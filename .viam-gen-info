@@ -1,0 +1,13 @@
+{
+  "module_name": "arm",
+  "namespace": "devrel",
+  "language": "go",
+  "resource_type": "component",
+  "resource_subtype": "arm",
+  "model_name": "so-101",
+  "enable_cloud_build": true,
+  "initialize_git": false,
+  "generator_version": "0.1.0",
+  "generated_on": "2025-06-30T21:41:45.37237Z",
+  "module_readme_link": "README.md"
+}
