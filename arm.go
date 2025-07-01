@@ -116,13 +116,14 @@ func (cfg *SoArm101Config) Validate(path string) ([]string, []string, error) {
 	return nil, nil, nil
 }
 
-// Joint limits for SO-101 arm (5 joints) in radians
+// Joint limits for SO-101 arm based on improved calibration data
+// Your arm has excellent range of motion!
 var so101JointLimits = [][2]float64{
-	{-math.Pi, math.Pi},         // Base rotation: ±180°
-	{-math.Pi / 2, math.Pi / 2}, // Shoulder: ±90°
-	{-math.Pi / 2, math.Pi / 2}, // Elbow: ±90°
-	{-math.Pi / 2, math.Pi / 2}, // Wrist pitch: ±90°
-	{-math.Pi, math.Pi},         // Wrist roll: ±180°
+	{-math.Pi, math.Pi},               // Shoulder Pan: full rotation (range: 1820 units)
+	{-math.Pi * 0.75, math.Pi * 0.75}, // Shoulder Lift: ±135° (range: 2358 units)
+	{-math.Pi * 0.75, math.Pi * 0.75}, // Elbow Flex: ±135° (range: 2229 units)
+	{-math.Pi * 0.6, math.Pi * 0.6},   // Wrist Flex: ±108° (range: 1977 units)
+	{-math.Pi, math.Pi},               // Wrist Roll: full rotation (range: 3277 units)
 }
 
 // Create a SO-101 kinematic model

@@ -20,10 +20,10 @@ func main() {
 	// Configuration for SO-101 Leader arm
 	cfg := &soarm.SoArm101Config{
 		Port:                "/dev/tty.usbmodem5A4B0464471",
-		Baudrate:            1000000,
+		Baudrate:            1000000, // Use same baudrate as working simple test
 		Timeout:             5 * time.Second,
-		DefaultSpeed:        500, // Lower speed for testing
-		DefaultAcceleration: 25,  // Lower acceleration
+		DefaultSpeed:        500,
+		DefaultAcceleration: 25,
 		ServoIDs:            []int{1, 2, 3, 4, 5},
 		Mode:                "leader",
 		ScaleFactor:         1.0,
@@ -107,14 +107,15 @@ func main() {
 	// Test 4: Check if servos are receiving commands
 	logger.Info("Checking servo status...")
 
-	// Try to get controller status
+	// Try to check motion parameters (this command exists in our implementation)
 	result, err = leaderArm.DoCommand(ctx, map[string]interface{}{
-		"command": "get_motion_params",
+		"command": "set_motion_params",
+		"speed":   500.0,
 	})
 	if err != nil {
-		logger.Errorf("Get motion params failed: %v", err)
+		logger.Errorf("Set motion params failed: %v", err)
 	} else {
-		logger.Infof("Motion params: %+v", result)
+		logger.Infof("Motion params set: %+v", result)
 	}
 
 	logger.Info("Debug test completed. Check if the arm moved at all during the test.")

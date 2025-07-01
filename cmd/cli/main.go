@@ -26,7 +26,7 @@ func realMain() error {
 
 	// Configuration for SO-101 Leader arm
 	cfg := &soarm.SoArm101Config{
-		Port:                "/dev/tty.usbmodem5A4B0464471", // Adjust to your serial port
+		Port:                "/dev/tty.usbmodem5A4B0465041", // Adjust to your serial port
 		Baudrate:            1000000,                        // Standard SO-ARM baudrate
 		Timeout:             5 * time.Second,
 		DefaultSpeed:        1000,                 // Mid-range speed
@@ -74,14 +74,14 @@ func realMain() error {
 
 	time.Sleep(3 * time.Second) // Wait for movement to complete
 
-	// Test Movement 2: Move base joint to 45 degrees (π/4 radians)
-	logger.Info("Test 2: Moving base joint to 45 degrees...")
+	// Test Movement 2: Move base joint to 60 degrees for better visibility
+	logger.Info("Test 2: Moving base joint to 60 degrees...")
 	baseRotatePositions := []referenceframe.Input{
-		{Value: 0.7854}, // Base: 45 degrees in radians
-		{Value: 0.0},    // Shoulder
-		{Value: 0.0},    // Elbow
-		{Value: 0.0},    // Wrist pitch
-		{Value: 0.0},    // Wrist roll
+		{Value: 1.047}, // Base: 60 degrees in radians (more visible movement)
+		{Value: 0.0},   // Shoulder
+		{Value: 0.0},   // Elbow
+		{Value: 0.0},   // Wrist pitch
+		{Value: 0.0},   // Wrist roll
 	}
 
 	err = leaderArm.MoveToJointPositions(ctx, baseRotatePositions, nil)
@@ -93,14 +93,14 @@ func realMain() error {
 
 	time.Sleep(3 * time.Second)
 
-	// Test Movement 3: Simple reaching motion
-	logger.Info("Test 3: Performing reaching motion...")
+	// Test Movement 3: More dramatic reaching motion using improved range
+	logger.Info("Test 3: Performing extended reaching motion...")
 	reachPositions := []referenceframe.Input{
-		{Value: 0.0},     // Base: straight ahead
-		{Value: 0.5236},  // Shoulder: 30 degrees up
-		{Value: -0.7854}, // Elbow: -45 degrees (bend inward)
-		{Value: 0.2618},  // Wrist pitch: 15 degrees
-		{Value: 0.0},     // Wrist roll: no rotation
+		{Value: 0.0},    // Base: straight ahead
+		{Value: 0.7854}, // Shoulder: 45 degrees up (more range available)
+		{Value: -1.047}, // Elbow: -60 degrees (better bend)
+		{Value: 0.5236}, // Wrist pitch: 30 degrees
+		{Value: 0.0},    // Wrist roll: no rotation
 	}
 
 	err = leaderArm.MoveToJointPositions(ctx, reachPositions, map[string]interface{}{
@@ -115,14 +115,14 @@ func realMain() error {
 
 	time.Sleep(4 * time.Second)
 
-	// Test Movement 4: Move wrist roll
-	logger.Info("Test 4: Testing wrist roll...")
+	// Test Movement 4: Full wrist roll demonstration
+	logger.Info("Test 4: Testing full wrist roll...")
 	wristRollPositions := []referenceframe.Input{
-		{Value: 0.0},     // Base
-		{Value: 0.5236},  // Shoulder: keep at 30 degrees
-		{Value: -0.7854}, // Elbow: keep at -45 degrees
-		{Value: 0.2618},  // Wrist pitch: keep at 15 degrees
-		{Value: 1.5708},  // Wrist roll: 90 degrees
+		{Value: 0.0},    // Base
+		{Value: 0.7854}, // Shoulder: keep at 45 degrees
+		{Value: -1.047}, // Elbow: keep at -60 degrees
+		{Value: 0.5236}, // Wrist pitch: keep at 30 degrees
+		{Value: 2.094},  // Wrist roll: 120 degrees (full range test)
 	}
 
 	err = leaderArm.MoveToJointPositions(ctx, wristRollPositions, nil)
@@ -161,9 +161,9 @@ func realMain() error {
 	}
 
 	// Optional: If you want to test with a follower arm as well
-	if false { // Set to true when you want to test follower (requires separate controller implementation)
+	if true { // Set to true when you want to test follower (requires separate controller implementation)
 		followerCfg := &soarm.SoArm101Config{
-			Port:                "/dev/tty.usbmodem5A4B0465041", // Second SoArm
+			Port:                "/dev/tty.usbmodem5A4B0464471", // Second SoArm
 			Baudrate:            1000000,
 			Timeout:             5 * time.Second,
 			DefaultSpeed:        1000,
