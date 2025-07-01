@@ -77,6 +77,19 @@ func main() {
 	logger.Info("Allowing extra time for arm to settle...")
 	time.Sleep(5 * time.Second)
 
+	// Check what position we actually reached
+	logger.Info("Checking actual position reached...")
+	actualPos, err := leaderArm.JointPositions(ctx, nil)
+	if err == nil && len(actualPos) == 5 {
+		logger.Infof("Actual position: [%.4f, %.4f, %.4f, %.4f, %.4f]",
+			actualPos[0].Value, actualPos[1].Value, actualPos[2].Value, actualPos[3].Value, actualPos[4].Value)
+
+		// Convert to degrees for easier reading
+		logger.Infof("In degrees: [%.1f°, %.1f°, %.1f°, %.1f°, %.1f°]",
+			actualPos[0].Value*180/3.14159, actualPos[1].Value*180/3.14159,
+			actualPos[2].Value*180/3.14159, actualPos[3].Value*180/3.14159, actualPos[4].Value*180/3.14159)
+	}
+
 	// Now safely disable torque
 	logger.Info("Arm should now be in your safe position - disabling torque...")
 
