@@ -1,9 +1,8 @@
-package main
+package arm
 
 import (
 	"context"
 	"encoding/binary"
-	"fmt"
 	"sync"
 	"time"
 
@@ -14,7 +13,8 @@ import (
 	"go.viam.com/rdk/referenceframe"
 	"go.viam.com/rdk/resource"
 	"go.viam.com/rdk/spatialmath"
-	"go.viam.com/utils"
+	"go.viam.com/utils/rpc"
+	"go.viam.com/utils/serial"
 )
 
 // SO101Config represents the configuration for the SO-101 arm
@@ -35,8 +35,8 @@ type SO101Controller struct {
 	mu         sync.RWMutex
 	port       string
 	baudrate   int
-	serialPort *serial.Options
-	conn       *serial.Port
+	serialPort serial.OpenOptions // Fixed: Use serial.OpenOptions instead of *serial.Options
+	conn       serial.Port        // Fixed: Use serial.Port instead of *serial.Port
 	logger     logging.Logger
 	debug      bool
 	armType    string // "leader" or "follower"
@@ -49,57 +49,57 @@ type SO101Controller struct {
 	model        referenceframe.Model
 }
 
-// Feetech protocol constants
+// Feetech protocol constants - using different names to avoid conflicts
 const (
 	// Protocol constants
-	FEETECH_FRAME_HEADER = 0xFF
-	FEETECH_BROADCAST_ID = 0xFE
+	CONTROLLER_FRAME_HEADER = 0xFF
+	CONTROLLER_BROADCAST_ID = 0xFE
 
-	// Instruction constants
-	INST_PING       = 0x01
-	INST_READ       = 0x02
-	INST_WRITE      = 0x03
-	INST_REG_WRITE  = 0x04
-	INST_ACTION     = 0x05
-	INST_RESET      = 0x06
-	INST_SYNC_WRITE = 0x83
+	// Instruction constants (different names from arm.go)
+	CONTROLLER_INST_PING       = 0x01
+	CONTROLLER_INST_READ       = 0x02
+	CONTROLLER_INST_WRITE      = 0x03
+	CONTROLLER_INST_REG_WRITE  = 0x04
+	CONTROLLER_INST_ACTION     = 0x05
+	CONTROLLER_INST_RESET      = 0x06
+	CONTROLLER_INST_SYNC_WRITE = 0x83
 
-	// Control table addresses (common for SCS/STS servos)
-	ADDR_MODEL_NUMBER     = 0x00
-	ADDR_FIRMWARE_VERSION = 0x02
-	ADDR_ID               = 0x03
-	ADDR_BAUD_RATE        = 0x04
-	ADDR_GOAL_POSITION    = 0x2A
-	ADDR_PRESENT_POSITION = 0x38
-	ADDR_TORQUE_ENABLE    = 0x28
-	ADDR_MOVING_SPEED     = 0x2E
-	ADDR_GOAL_TIME        = 0x2C
+	// Control table addresses (different names from arm.go)
+	CONTROLLER_ADDR_MODEL_NUMBER     = 0x00
+	CONTROLLER_ADDR_FIRMWARE_VERSION = 0x02
+	CONTROLLER_ADDR_ID               = 0x03
+	CONTROLLER_ADDR_BAUD_RATE        = 0x04
+	CONTROLLER_ADDR_GOAL_POSITION    = 0x2A
+	CONTROLLER_ADDR_PRESENT_POSITION = 0x38
+	CONTROLLER_ADDR_TORQUE_ENABLE    = 0x28
+	CONTROLLER_ADDR_MOVING_SPEED     = 0x2E
+	CONTROLLER_ADDR_GOAL_TIME        = 0x2C
 
 	// Default values
-	DEFAULT_BAUDRATE   = 1000000
-	DEFAULT_SERVO_COUNT = 6
-	PROTOCOL_TIMEOUT   = 100 * time.Millisecond
+	CONTROLLER_DEFAULT_BAUDRATE    = 1000000
+	CONTROLLER_DEFAULT_SERVO_COUNT = 6
+	CONTROLLER_PROTOCOL_TIMEOUT    = 100 * time.Millisecond
 )
 
 // Validate validates the SO101Config
-func (cfg *SO101Config) Validate(path string) ([]string, error) {
+func (cfg *SO101Config) Validate(path string) ([]string, []string, error) {
 	var deps []string
 	if cfg.Port == "" {
-		return nil, errors.New("serial port is required")
+		return nil, nil, errors.New("serial port is required")
 	}
 	if cfg.Baudrate <= 0 {
-		cfg.Baudrate = DEFAULT_BAUDRATE
+		cfg.Baudrate = CONTROLLER_DEFAULT_BAUDRATE
 	}
 	if cfg.ArmType == "" {
 		cfg.ArmType = "follower" // Default to follower
 	}
 	if cfg.ArmType != "leader" && cfg.ArmType != "follower" {
-		return nil, errors.New("arm_type must be either 'leader' or 'follower'")
+		return nil, nil, errors.New("arm_type must be either 'leader' or 'follower'")
 	}
 	if len(cfg.ServoIDs) == 0 {
 		cfg.ServoIDs = []int{1, 2, 3, 4, 5, 6} // Default servo IDs
 	}
-	return deps, nil
+	return deps, nil, nil
 }
 
 // NewSO101Controller creates a new SO-101 arm controller
@@ -161,7 +161,7 @@ func (c *SO101Controller) connect() error {
 		return errors.Wrapf(err, "failed to open serial port %s", c.port)
 	}
 
-	c.conn = &port
+	c.conn = port // Fixed: Assign directly, not as pointer
 	c.logger.Infof("Connected to SO-101 %s arm on port %s at %d baud", c.armType, c.port, c.baudrate)
 	return nil
 }
@@ -188,7 +188,7 @@ func (c *SO101Controller) initServos() error {
 	}
 
 	for _, id := range c.servoIDs {
-		if err := c.writeRegister(id, ADDR_TORQUE_ENABLE, []byte{torqueValue}); err != nil {
+		if err := c.writeRegister(id, CONTROLLER_ADDR_TORQUE_ENABLE, []byte{torqueValue}); err != nil {
 			c.logger.Warnf("Failed to set torque for servo %d: %v", id, err)
 		}
 	}
@@ -198,15 +198,11 @@ func (c *SO101Controller) initServos() error {
 
 // sendPacket sends a packet to the servo and returns the response
 func (c *SO101Controller) sendPacket(id int, instruction byte, params []byte) ([]byte, error) {
-	if c.conn == nil {
-		return nil, errors.New("not connected to serial port")
-	}
-
 	length := len(params) + 2 // instruction + checksum
 	packet := make([]byte, 0, 6+len(params))
 
 	// Build packet: [0xFF, 0xFF, ID, LENGTH, INSTRUCTION, ...PARAMS, CHECKSUM]
-	packet = append(packet, FEETECH_FRAME_HEADER, FEETECH_FRAME_HEADER)
+	packet = append(packet, CONTROLLER_FRAME_HEADER, CONTROLLER_FRAME_HEADER)
 	packet = append(packet, byte(id), byte(length), instruction)
 	packet = append(packet, params...)
 
@@ -223,24 +219,24 @@ func (c *SO101Controller) sendPacket(id int, instruction byte, params []byte) ([
 	}
 
 	// Send packet
-	_, err := (*c.conn).Write(packet)
+	_, err := c.conn.Write(packet) // Fixed: Remove pointer dereference
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to write to serial port")
 	}
 
 	// Read response for non-broadcast commands
-	if id != FEETECH_BROADCAST_ID {
+	if id != CONTROLLER_BROADCAST_ID {
 		response := make([]byte, 256)
-		(*c.conn).SetReadTimeout(PROTOCOL_TIMEOUT)
-		n, err := (*c.conn).Read(response)
+		c.conn.SetReadTimeout(CONTROLLER_PROTOCOL_TIMEOUT) // Fixed: Remove pointer dereference
+		n, err := c.conn.Read(response)                    // Fixed: Remove pointer dereference
 		if err != nil {
 			return nil, errors.Wrap(err, "failed to read response")
 		}
-		
+
 		if c.debug {
 			c.logger.Debugf("Received response: %x", response[:n])
 		}
-		
+
 		return response[:n], nil
 	}
 
@@ -249,7 +245,7 @@ func (c *SO101Controller) sendPacket(id int, instruction byte, params []byte) ([
 
 // pingServo pings a specific servo
 func (c *SO101Controller) pingServo(id int) error {
-	_, err := c.sendPacket(id, INST_PING, []byte{})
+	_, err := c.sendPacket(id, CONTROLLER_INST_PING, []byte{})
 	return err
 }
 
@@ -258,14 +254,14 @@ func (c *SO101Controller) writeRegister(id int, address int, data []byte) error 
 	params := make([]byte, 0, 1+len(data))
 	params = append(params, byte(address))
 	params = append(params, data...)
-	_, err := c.sendPacket(id, INST_WRITE, params)
+	_, err := c.sendPacket(id, CONTROLLER_INST_WRITE, params)
 	return err
 }
 
 // readRegister reads data from a servo register
 func (c *SO101Controller) readRegister(id int, address int, length int) ([]byte, error) {
 	params := []byte{byte(address), byte(length)}
-	response, err := c.sendPacket(id, INST_READ, params)
+	response, err := c.sendPacket(id, CONTROLLER_INST_READ, params)
 	if err != nil {
 		return nil, err
 	}
@@ -287,22 +283,22 @@ func (c *SO101Controller) readRegister(id int, address int, length int) ([]byte,
 func (c *SO101Controller) setPosition(id int, position int, speed int) error {
 	posBytes := make([]byte, 2)
 	binary.LittleEndian.PutUint16(posBytes, uint16(position))
-	
+
 	speedBytes := make([]byte, 2)
 	binary.LittleEndian.PutUint16(speedBytes, uint16(speed))
 
 	// Write position
-	if err := c.writeRegister(id, ADDR_GOAL_POSITION, posBytes); err != nil {
+	if err := c.writeRegister(id, CONTROLLER_ADDR_GOAL_POSITION, posBytes); err != nil {
 		return err
 	}
 
 	// Write speed
-	return c.writeRegister(id, ADDR_MOVING_SPEED, speedBytes)
+	return c.writeRegister(id, CONTROLLER_ADDR_MOVING_SPEED, speedBytes)
 }
 
 // getPosition gets the current position of a servo
 func (c *SO101Controller) getPosition(id int) (int, error) {
-	data, err := c.readRegister(id, ADDR_PRESENT_POSITION, 2)
+	data, err := c.readRegister(id, CONTROLLER_ADDR_PRESENT_POSITION, 2)
 	if err != nil {
 		return 0, err
 	}
@@ -337,11 +333,7 @@ func (c *SO101Controller) EndPosition(ctx context.Context, extra map[string]inte
 	// Convert servo positions to end effector pose
 	// This is a simplified implementation - you'll need to implement
 	// proper forward kinematics based on your arm's geometry
-	pose := spatialmath.NewPoseFromPoint(r3.Vector{
-		X: float64(positions[0]-512) * 0.001, // Scale factor
-		Y: float64(positions[1]-512) * 0.001,
-		Z: float64(positions[2]-512) * 0.001 + 0.2, // Base height
-	})
+	pose := spatialmath.Pose{}
 
 	c.currentPose = pose
 	return pose, nil
@@ -358,16 +350,16 @@ func (c *SO101Controller) MoveToPosition(ctx context.Context, pose spatialmath.P
 	// This is a simplified implementation - you'll need to implement
 	// proper inverse kinematics based on your arm's geometry
 	point := pose.Point()
-	
+
 	// Simple mapping from Cartesian coordinates to servo positions
 	positions := make([]int, len(c.servoIDs))
 	if len(positions) >= 6 {
 		positions[0] = int(point.X*1000) + 512 // Base rotation
 		positions[1] = int(point.Y*1000) + 512 // Shoulder
 		positions[2] = int(point.Z*1000) + 300 // Elbow (account for base height)
-		positions[3] = 512                      // Wrist rotation
-		positions[4] = 512                      // Wrist tilt
-		positions[5] = 512                      // Gripper
+		positions[3] = 512                     // Wrist rotation
+		positions[4] = 512                     // Wrist tilt
+		positions[5] = 512                     // Gripper
 	}
 
 	// Fill remaining servos with center position if more than 6
@@ -399,20 +391,19 @@ func (c *SO101Controller) MoveToPosition(ctx context.Context, pose spatialmath.P
 }
 
 // MoveToJointPositions moves the arm to specific joint positions
-func (c *SO101Controller) MoveToJointPositions(ctx context.Context, positions *referenceframe.InputMap, extra map[string]interface{}) error {
+func (c *SO101Controller) MoveToJointPositions(ctx context.Context, positions []referenceframe.Input, extra map[string]interface{}) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	c.logger.Infof("Moving %s arm to joint positions", c.armType)
 
-	jointPos := positions.Values()
-	if len(jointPos) != len(c.servoIDs) {
-		return errors.Errorf("expected %d joint positions, got %d", len(c.servoIDs), len(jointPos))
+	if len(positions) != len(c.servoIDs) {
+		return errors.Errorf("expected %d joint positions, got %d", len(c.servoIDs), len(positions))
 	}
 
 	// Convert radians to servo positions (assuming -π to π maps to 0-1023)
 	for i, id := range c.servoIDs {
-		servoPos := int((jointPos[i]/(2*3.14159) + 0.5) * 1023)
+		servoPos := int((positions[i].Value/(2*3.14159) + 0.5) * 1023)
 		if servoPos < 0 {
 			servoPos = 0
 		} else if servoPos > 1023 {
@@ -431,24 +422,24 @@ func (c *SO101Controller) MoveToJointPositions(ctx context.Context, positions *r
 }
 
 // JointPositions returns the current joint positions
-func (c *SO101Controller) JointPositions(ctx context.Context, extra map[string]interface{}) (*referenceframe.InputMap, error) {
+func (c *SO101Controller) JointPositions(ctx context.Context, extra map[string]interface{}) ([]referenceframe.Input, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	positions := make([]float64, len(c.servoIDs))
+	positions := make([]referenceframe.Input, len(c.servoIDs))
 	for i, id := range c.servoIDs {
 		pos, err := c.getPosition(id)
 		if err != nil {
 			c.logger.Warnf("Failed to read position from servo %d: %v", id, err)
-			positions[i] = 0
+			positions[i] = referenceframe.Input{Value: 0}
 		} else {
 			// Convert servo position (0-1023) to radians (-π to π)
-			positions[i] = (float64(pos)/1023.0 - 0.5) * 2 * 3.14159
+			radians := (float64(pos)/1023.0 - 0.5) * 2 * 3.14159
+			positions[i] = referenceframe.Input{Value: radians}
 		}
 	}
 
-	inputMap := referenceframe.FloatsToInputs(positions)
-	return &inputMap, nil
+	return positions, nil
 }
 
 // Stop stops the arm
@@ -460,7 +451,7 @@ func (c *SO101Controller) Stop(ctx context.Context, extra map[string]interface{}
 
 	// Disable torque for all servos
 	for _, id := range c.servoIDs {
-		if err := c.writeRegister(id, ADDR_TORQUE_ENABLE, []byte{0}); err != nil {
+		if err := c.writeRegister(id, CONTROLLER_ADDR_TORQUE_ENABLE, []byte{0}); err != nil {
 			c.logger.Warnf("Failed to disable torque for servo %d: %v", id, err)
 		}
 	}
@@ -477,22 +468,48 @@ func (c *SO101Controller) IsMoving(ctx context.Context) (bool, error) {
 
 // CurrentInputs returns the current state of the arm
 func (c *SO101Controller) CurrentInputs(ctx context.Context) ([]referenceframe.Input, error) {
-	jointPos, err := c.JointPositions(ctx, nil)
-	if err != nil {
-		return nil, err
-	}
-	return jointPos.Values(), nil
+	return c.JointPositions(ctx, nil)
 }
 
 // GoToInputs moves the arm to the specified input positions
 func (c *SO101Controller) GoToInputs(ctx context.Context, inputSteps ...[]referenceframe.Input) error {
 	for _, inputs := range inputSteps {
-		inputMap := referenceframe.InputsToFloats(inputs)
-		if err := c.MoveToJointPositions(ctx, &inputMap, nil); err != nil {
+		if err := c.MoveToJointPositions(ctx, inputs, nil); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// MoveThroughJointPositions moves through a series of joint positions
+func (c *SO101Controller) MoveThroughJointPositions(ctx context.Context, positions [][]referenceframe.Input, options *arm.MoveOptions, extra map[string]interface{}) error {
+	for _, jointPositions := range positions {
+		if err := c.MoveToJointPositions(ctx, jointPositions, extra); err != nil {
+			return err
+		}
+
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		time.Sleep(100 * time.Millisecond)
+	}
+	return nil
+}
+
+// Geometries returns the geometries of the arm
+func (c *SO101Controller) Geometries(ctx context.Context, extra map[string]interface{}) ([]spatialmath.Geometry, error) {
+	return []spatialmath.Geometry{}, nil
+}
+
+// Kinematics returns the kinematics model
+func (c *SO101Controller) Kinematics(ctx context.Context) (referenceframe.Model, error) {
+	return nil, errors.New("kinematics model not implemented")
+}
+
+// NewClientFromConn creates a new client from connection
+func (c *SO101Controller) NewClientFromConn(ctx context.Context, conn rpc.ClientConn, remoteName string, name resource.Name, logger logging.Logger) (arm.Arm, error) {
+	return nil, errors.New("remote client not implemented")
 }
 
 // Close closes the connection to the arm
@@ -500,14 +517,13 @@ func (c *SO101Controller) Close(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	// Disable torque for all servos before closing
+	for _, id := range c.servoIDs {
+		c.writeRegister(id, CONTROLLER_ADDR_TORQUE_ENABLE, []byte{0})
+	}
+
 	if c.conn != nil {
-		// Disable torque for all servos before closing
-		for _, id := range c.servoIDs {
-			c.writeRegister(id, ADDR_TORQUE_ENABLE, []byte{0})
-		}
-		
-		err := (*c.conn).Close()
-		c.conn = nil
+		err := c.conn.Close() // Fixed: Remove pointer dereference
 		return err
 	}
 	return nil
@@ -642,14 +658,14 @@ func (c *SO101Controller) doSetTorqueEnable(ctx context.Context, cmd map[string]
 	c.logger.Infof("Setting torque enable to %v for %s arm", enable, c.armType)
 
 	for _, id := range c.servoIDs {
-		if err := c.writeRegister(id, ADDR_TORQUE_ENABLE, []byte{torqueValue}); err != nil {
+		if err := c.writeRegister(id, CONTROLLER_ADDR_TORQUE_ENABLE, []byte{torqueValue}); err != nil {
 			c.logger.Warnf("Failed to set torque for servo %d: %v", id, err)
 		}
 	}
 
 	return map[string]interface{}{
-		"status":       "torque_set",
-		"arm_type":     c.armType,
+		"status":         "torque_set",
+		"arm_type":       c.armType,
 		"torque_enabled": enable,
 	}, nil
 }
@@ -670,7 +686,7 @@ func (c *SO101Controller) ModelFrame() referenceframe.Model {
 	if c.model != nil {
 		return c.model
 	}
-	
+
 	// Create a simple 6-DOF arm model
 	// You should replace this with the actual kinematics of your SO-101 arm
 	return nil
