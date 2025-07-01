@@ -26,7 +26,7 @@ func realMain() error {
 
 	// Configuration for SO-101 Leader arm
 	cfg := &soarm.SoArm101Config{
-		Port:                "/dev/tty.usbmodem5A4B0465041", // Adjust to your serial port
+		Port:                "/dev/tty.usbmodem5A4B0464471", // Adjust to your serial port
 		Baudrate:            1000000,                        // Standard SO-ARM baudrate
 		Timeout:             5 * time.Second,
 		DefaultSpeed:        1000,                 // Mid-range speed
@@ -161,9 +161,9 @@ func realMain() error {
 	}
 
 	// Optional: If you want to test with a follower arm as well
-	if true { // Set to true when you want to test follower (requires separate controller implementation)
+	if false { // Set to true when you want to test follower (requires separate controller implementation)
 		followerCfg := &soarm.SoArm101Config{
-			Port:                "/dev/tty.usbmodem5A4B0464471", // Second SoArm
+			Port:                "/dev/tty.usbmodem5A4B0465041", // Second SoArm
 			Baudrate:            1000000,
 			Timeout:             5 * time.Second,
 			DefaultSpeed:        1000,
@@ -186,7 +186,48 @@ func realMain() error {
 	}
 
 	// Keep the program running for testing
-	logger.Info("Movement tests completed! Arms running... Press Ctrl+C to exit")
+	logger.Info("Movement tests completed!")
+
+	// Move to your manually-tested safe position before disabling torque
+	logger.Info("Returning to safe resting position...")
+	logger.Info("Position: Base=-139.5°, Shoulder=-129.3°, Elbow=287.8°, Wrist_P=218.6°, Wrist_R=23.1°")
+
+	// Your manually found safe position
+	safeRestPosition := []referenceframe.Input{
+		{Value: -2.4339}, // Base: -139.5° (your safe position)
+		{Value: -2.2569}, // Shoulder: -129.3° (your safe position)
+		{Value: 5.0226},  // Elbow: 287.8° (your safe position)
+		{Value: 3.8157},  // Wrist pitch: 218.6° (your safe position)
+		{Value: 0.4028},  // Wrist roll: 23.1° (your safe position)
+	}
+
+	err = leaderArm.MoveToJointPositions(ctx, safeRestPosition, map[string]interface{}{
+		"speed":        15, // Extremely slow for safety
+		"acceleration": 1,  // Minimal acceleration
+	})
+	if err != nil {
+		logger.Errorf("Failed to move to safe position: %v", err)
+	} else {
+		logger.Info("Moving to safe position - this will be very slow...")
+	}
+
+	// Wait for the slow movement to complete
+	logger.Info("Waiting for movement to safe position...")
+	time.Sleep(20 * time.Second)
+
+	// Disable torque to make arm moveable
+	logger.Info("Disabling torque to relax the arm...")
+	_, err = leaderArm.DoCommand(ctx, map[string]interface{}{
+		"command": "set_torque",
+		"enable":  false,
+	})
+	if err != nil {
+		logger.Errorf("Failed to disable torque: %v", err)
+	} else {
+		logger.Info("✅ Arm is now in safe position and relaxed - joints are freely moveable!")
+	}
+
+	logger.Info("Press Ctrl+C to exit")
 	time.Sleep(30 * time.Second) // Extended time to observe the arm
 
 	return nil
