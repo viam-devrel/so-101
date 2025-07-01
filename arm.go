@@ -2,13 +2,15 @@ package arm
 
 import (
 	"context"
-	"errors"
+	_ "embed"
+	"encoding/json"
 	"fmt"
 	"math"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/pkg/errors"
 	"go.viam.com/rdk/components/arm"
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/operation"
@@ -19,6 +21,9 @@ import (
 	"go.viam.com/utils/rpc"
 )
 
+//go:embed soarm_101.json
+var soarmModelJson []byte
+
 var (
 	So101Leader      = resource.NewModel("devrel", "arm", "so-101-leader")
 	So101Follower    = resource.NewModel("devrel", "arm", "so-101-follower")
@@ -27,21 +32,21 @@ var (
 
 func init() {
 	resource.RegisterComponent(arm.API, So101Leader,
-		resource.Registration[arm.Arm, *Config]{
+		resource.Registration[arm.Arm, *SoArm101Config]{
 			Constructor: newArmSo101Leader,
 		},
 	)
 	resource.RegisterComponent(arm.API, So101Follower,
-		resource.Registration[arm.Arm, *Config]{
+		resource.Registration[arm.Arm, *SoArm101Config]{
 			Constructor: newArmSo101Follower,
 		},
 	)
 }
 
-type Config struct {
+type SoArm101Config struct {
 	// Serial communication settings
 	Port     string        `json:"port"`               // Required: Serial port path (e.g., "/dev/ttyUSB0")
-	Baudrate int           `json:"baudrate,omitempty"` // Baudrate for Feetech servos (default: 1000000)
+	Baudrate int           `json:"baudrate,omitempty"` // Baudrate for SO-ARM servos (default: 1000000)
 	Timeout  time.Duration `json:"timeout,omitempty"`  // Communication timeout (default: 5s)
 
 	// Motion parameters
@@ -58,17 +63,20 @@ type Config struct {
 	MirrorMode  bool    `json:"mirror_mode,omitempty"`  // Mirror movements horizontally
 	ScaleFactor float64 `json:"scale_factor,omitempty"` // Scale factor for movements (default: 1.0)
 	SyncRate    int     `json:"sync_rate,omitempty"`    // Sync rate in Hz (default: 20)
+
+	// Internal logger (not from JSON)
+	Logger logging.Logger `json:"-"`
 }
 
 // Validate ensures all parts of the config are valid
-func (cfg *Config) Validate(path string) ([]string, []string, error) {
+func (cfg *SoArm101Config) Validate(path string) ([]string, []string, error) {
 	if cfg.Port == "" {
 		return nil, nil, fmt.Errorf("serial port must be specified")
 	}
 
 	// Set defaults
 	if cfg.Baudrate == 0 {
-		cfg.Baudrate = 1000000 // Standard Feetech baudrate
+		cfg.Baudrate = 1000000 // Standard SO-ARM baudrate
 	}
 	if cfg.Timeout == 0 {
 		cfg.Timeout = 5 * time.Second
@@ -117,6 +125,45 @@ var so101JointLimits = [][2]float64{
 	{-math.Pi, math.Pi},         // Wrist roll: ±180°
 }
 
+// Create a SO-101 kinematic model
+func createSO101Model() (referenceframe.Model, error) {
+	// Try to load the embedded SoArm kinematics model (same pattern as RoArm)
+	if len(soarmModelJson) > 0 {
+		m := &referenceframe.ModelConfigJSON{
+			OriginalFile: &referenceframe.ModelFile{
+				Bytes:     soarmModelJson,
+				Extension: "json",
+			},
+		}
+		err := json.Unmarshal(soarmModelJson, m)
+		if err != nil {
+			return nil, errors.Wrap(err, "failed to unmarshal json file")
+		}
+
+		return m.ParseConfig("soarm_101")
+	}
+
+	// If no embedded model, return error since we need a proper kinematic model
+	return nil, fmt.Errorf("no embedded soarm_m3.json kinematic model found")
+}
+
+func (s *armSo101) Close(context.Context) error {
+	s.logger.Info("Closing SO-101 arm")
+
+	// Stop synchronization
+	select {
+	case s.syncStop <- struct{}{}:
+	default:
+	}
+
+	s.cancelFunc()
+
+	// Release the shared controller
+	ReleaseSharedController()
+
+	return nil
+}
+
 // Main arm structure
 type armSo101 struct {
 	resource.AlwaysRebuild
@@ -125,7 +172,6 @@ type armSo101 struct {
 	logger     logging.Logger
 	cfg        *SoArm101Config
 	opMgr      *operation.SingleOperationManager
-	cfg        *Config
 	controller *SafeSoArmController
 
 	// Motion control
@@ -152,31 +198,45 @@ type armSo101 struct {
 }
 
 func newArmSo101Leader(ctx context.Context, deps resource.Dependencies, rawConf resource.Config, logger logging.Logger) (arm.Arm, error) {
-	conf, err := resource.NativeConfig[*Config](rawConf)
+	conf, err := resource.NativeConfig[*SoArm101Config](rawConf)
 	if err != nil {
 		return nil, err
 	}
 	conf.Mode = "leader"
+	conf.Logger = logger
 	return NewSo101(ctx, deps, rawConf.ResourceName(), conf, logger)
 }
 
 func newArmSo101Follower(ctx context.Context, deps resource.Dependencies, rawConf resource.Config, logger logging.Logger) (arm.Arm, error) {
-	conf, err := resource.NativeConfig[*Config](rawConf)
+	conf, err := resource.NativeConfig[*SoArm101Config](rawConf)
 	if err != nil {
 		return nil, err
 	}
 	conf.Mode = "follower"
+	conf.Logger = logger
 	return NewSo101(ctx, deps, rawConf.ResourceName(), conf, logger)
 }
 
-func NewSo101(ctx context.Context, deps resource.Dependencies, name resource.Name, conf *Config, logger logging.Logger) (arm.Arm, error) {
+func NewSo101(ctx context.Context, deps resource.Dependencies, name resource.Name, conf *SoArm101Config, logger logging.Logger) (arm.Arm, error) {
 	cancelCtx, cancelFunc := context.WithCancel(context.Background())
 
-	// Initialize Feetech controller
-	controller, err := NewFeetechController(conf.Port, conf.Baudrate, conf.ServoIDs, logger)
+	// Set logger in config if not set
+	if conf.Logger == nil {
+		conf.Logger = logger
+	}
+
+	// Initialize SO-ARM controller using the shared controller manager
+	controller, err := GetSharedController(conf)
 	if err != nil {
 		cancelFunc()
-		return nil, fmt.Errorf("failed to initialize Feetech controller: %w", err)
+		return nil, fmt.Errorf("failed to initialize SO-ARM controller: %w", err)
+	}
+
+	// Create kinematic model
+	model, err := createSO101Model()
+	if err != nil {
+		ReleaseSharedController() // Clean up on error
+		return nil, fmt.Errorf("failed to create kinematic model: %w", err)
 	}
 
 	s := &armSo101{
@@ -512,7 +572,7 @@ func (s *armSo101) DoCommand(ctx context.Context, cmd map[string]interface{}) (m
 		return map[string]interface{}{"success": err == nil}, err
 
 	case "ping_servos":
-		err := s.controller.PingAll()
+		err := s.controller.Ping()
 		return map[string]interface{}{"success": err == nil}, err
 
 	case "set_motion_params":
@@ -575,23 +635,4 @@ func (s *armSo101) Geometries(ctx context.Context, extra map[string]interface{})
 		return nil, err
 	}
 	return gif.Geometries(), nil
-}
-
-func (s *armSo101) Close(context.Context) error {
-	s.logger.Info("Closing SO-101 arm")
-
-	// Stop synchronization
-	select {
-	case s.syncStop <- struct{}{}:
-	default:
-	}
-
-	s.cancelFunc()
-
-	if s.controller != nil {
-		// Disable torque before closing
-		s.controller.SetTorqueEnable(false)
-		return s.controller.Close()
-	}
-	return nil
 }

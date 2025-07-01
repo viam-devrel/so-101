@@ -5,8 +5,8 @@ go 1.23.8
 toolchain go1.24.4
 
 require (
-	github.com/jacobsa/go-serial v0.0.0-20180131005756-15cf729a72d4
 	github.com/pkg/errors v0.9.1
+	go.bug.st/serial v1.6.4
 	go.viam.com/rdk v0.81.0
 	go.viam.com/utils v0.1.148
 )
@@ -31,6 +31,7 @@ require (
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
 	github.com/chenzhekl/goply v0.0.0-20190930133256-258c2381defd // indirect
 	github.com/cloudwego/base64x v0.1.5 // indirect
+	github.com/creack/goselect v0.1.2 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.2.0 // indirect
 	github.com/desertbit/timer v0.0.0-20180107155436-c41aec40b27f // indirect
@@ -157,6 +158,5 @@ require (
 	google.golang.org/protobuf v1.36.6 // indirect
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
-	howett.net/plist v1.0.0 // indirect
 	nhooyr.io/websocket v1.8.7 // indirect
 )
