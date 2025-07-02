@@ -1,4 +1,4 @@
-module arm
+module so_arm
 
 go 1.23.8
 

@@ -1,13 +1,19 @@
 {
   "$schema": "https://dl.viam.dev/module.schema.json",
-  "module_id": "devrel:arm",
+  "module_id": "devrel:so-arm",
   "visibility": "public",
   "url": "https://github.com/viam-devrel/so-101",
   "description": "Control LeRobot's SO-101 robot arm.",
   "models": [
     {
       "api": "rdk:component:arm",
-      "model": "devrel:arm:so-101",
+      "model": "devrel:so-arm:so-101-leader",
+      "short_description": "Control the first 5 joints of the SO-101: base/pan, shoulder, elbow, wrist flex, and wrist roll",
+      "markdown_link": "README.md#model-devrelarmso-101"
+    },
+    {
+      "api": "rdk:component:arm",
+      "model": "devrel:so-arm:so-101-follower",
       "short_description": "Control the first 5 joints of the SO-101: base/pan, shoulder, elbow, wrist flex, and wrist roll",
       "markdown_link": "README.md#model-devrelarmso-101"
     }

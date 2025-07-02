@@ -1,4 +1,4 @@
-package arm
+package so_arm
 
 import (
 	"fmt"

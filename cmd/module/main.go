@@ -1,13 +1,13 @@
 package main
 
 import (
-	"arm"
+	"go.viam.com/rdk/components/arm"
 	"go.viam.com/rdk/module"
 	"go.viam.com/rdk/resource"
-	"go.viam.com/rdk/components/arm"
+	soArm "so_arm"
 )
 
 func main() {
 	// ModularMain can take multiple APIModel arguments, if your module implements multiple models.
-	module.ModularMain(resource.APIModel{ arm.API, arm.So101})
+	module.ModularMain(resource.APIModel{arm.API, soArm.So101Leader}, resource.APIModel{arm.API, soArm.So101Follower})
 }

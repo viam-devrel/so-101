@@ -1,4 +1,4 @@
-package arm
+package so_arm
 
 import (
 	"context"
@@ -224,6 +224,32 @@ func NewSo101(ctx context.Context, deps resource.Dependencies, name resource.Nam
 	// Set logger in config if not set
 	if conf.Logger == nil {
 		conf.Logger = logger
+	}
+
+	// Set defaults
+	if conf.Baudrate == 0 {
+		conf.Baudrate = 1000000 // Standard SO-ARM baudrate
+	}
+	if conf.Timeout == 0 {
+		conf.Timeout = 5 * time.Second
+	}
+	if conf.DefaultSpeed == 0 {
+		conf.DefaultSpeed = 1000 // Mid-range speed
+	}
+	if conf.DefaultAcceleration == 0 {
+		conf.DefaultAcceleration = 50 // Mid-range acceleration
+	}
+	if len(conf.ServoIDs) == 0 {
+		conf.ServoIDs = []int{1, 2, 3, 4, 5} // Default servo IDs
+	}
+	if len(conf.ServoIDs) != 5 {
+		return nil, fmt.Errorf("expected 5 servo IDs for arm joints, got %d", len(conf.ServoIDs))
+	}
+	if conf.ScaleFactor == 0 {
+		conf.ScaleFactor = 1.0
+	}
+	if conf.SyncRate == 0 {
+		conf.SyncRate = 20 // 20 Hz default
 	}
 
 	// Initialize SO-ARM controller using the shared controller manager
