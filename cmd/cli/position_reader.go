@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	soarm "arm"
+	soarm "so_arm"
 
 	"go.viam.com/rdk/components/arm"
 	"go.viam.com/rdk/logging"
@@ -19,13 +19,13 @@ func main() {
 
 	// Configuration for SO-101 arm
 	cfg := &soarm.SoArm101Config{
-		Port:                "/dev/tty.usbmodem5A4B0465041", // Your leader arm port
+		Port:                "/dev/tty.usbmodem58CD1767051", // Leader arm port
 		Baudrate:            1000000,
 		Timeout:             5 * time.Second,
 		DefaultSpeed:        100, // Very slow for safety
 		DefaultAcceleration: 5,   // Very gentle
 		ServoIDs:            []int{1, 2, 3, 4, 5},
-		Mode:                "leader",
+		Mode:                "follower",
 		ScaleFactor:         1.0,
 		SyncRate:            20,
 	}

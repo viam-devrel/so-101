@@ -27,13 +27,13 @@ func realMain() error {
 
 	// Configuration for SO-101 Leader arm with gentle settings
 	cfg := &soarm.SoArm101Config{
-		Port:                "/dev/tty.usbmodem5A4B0465041", // Leader arm port
+		Port:                "/dev/tty.usbmodem58CD1767051", // Leader arm port
 		Baudrate:            1000000,                        // Standard SO-ARM baudrate
 		Timeout:             10 * time.Second,               // Longer timeout for safety
 		DefaultSpeed:        15,                             // Very slow default
 		DefaultAcceleration: 1,                              // Very gentle acceleration
 		ServoIDs:            []int{1, 2, 3, 4, 5},           // Default servo IDs
-		Mode:                "leader",                       // Set as leader
+		Mode:                "follower",                     // Set as leader
 		ScaleFactor:         1.0,
 		SyncRate:            5, // Very slow sync rate for ultra-gentle operation
 	}

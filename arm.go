@@ -21,103 +21,14 @@ import (
 	"go.viam.com/utils/rpc"
 )
 
-//go:embed soarm_101.json
-var soarmModelJson []byte
-
 var (
-	So101Leader      = resource.NewModel("devrel", "arm", "so-101-leader")
-	So101Follower    = resource.NewModel("devrel", "arm", "so-101-follower")
-	errUnimplemented = errors.New("unimplemented")
+	SO101Model = resource.NewModel("devrel", "so101", "arm")
 )
 
-func init() {
-	resource.RegisterComponent(arm.API, So101Leader,
-		resource.Registration[arm.Arm, *SoArm101Config]{
-			Constructor: newArmSo101Leader,
-		},
-	)
-	resource.RegisterComponent(arm.API, So101Follower,
-		resource.Registration[arm.Arm, *SoArm101Config]{
-			Constructor: newArmSo101Follower,
-		},
-	)
-}
+//go:embed soarm_101.json
+var so101ModelJson []byte
 
-type SoArm101Config struct {
-	// Serial communication settings
-	Port     string        `json:"port"`               // Required: Serial port path (e.g., "/dev/ttyUSB0")
-	Baudrate int           `json:"baudrate,omitempty"` // Baudrate for SO-ARM servos (default: 1000000)
-	Timeout  time.Duration `json:"timeout,omitempty"`  // Communication timeout (default: 5s)
-
-	// Motion parameters
-	DefaultSpeed        int `json:"default_speed,omitempty"`        // Default servo speed (1-4094)
-	DefaultAcceleration int `json:"default_acceleration,omitempty"` // Default servo acceleration (0-254)
-
-	// Servo configuration
-	ServoIDs []int `json:"servo_ids,omitempty"` // Servo IDs for the 5 arm joints (default: [1,2,3,4,5])
-
-	// Leader-Follower configuration
-	Mode        string  `json:"mode,omitempty"`         // "leader" or "follower"
-	FollowerArm string  `json:"follower_arm,omitempty"` // Name of follower arm (for leader mode)
-	LeaderArm   string  `json:"leader_arm,omitempty"`   // Name of leader arm (for follower mode)
-	MirrorMode  bool    `json:"mirror_mode,omitempty"`  // Mirror movements horizontally
-	ScaleFactor float64 `json:"scale_factor,omitempty"` // Scale factor for movements (default: 1.0)
-	SyncRate    int     `json:"sync_rate,omitempty"`    // Sync rate in Hz (default: 20)
-
-	// Internal logger (not from JSON)
-	Logger logging.Logger `json:"-"`
-}
-
-// Validate ensures all parts of the config are valid
-func (cfg *SoArm101Config) Validate(path string) ([]string, []string, error) {
-	if cfg.Port == "" {
-		return nil, nil, fmt.Errorf("serial port must be specified")
-	}
-
-	// Set defaults
-	if cfg.Baudrate == 0 {
-		cfg.Baudrate = 1000000 // Standard SO-ARM baudrate
-	}
-	if cfg.Timeout == 0 {
-		cfg.Timeout = 5 * time.Second
-	}
-	if cfg.DefaultSpeed == 0 {
-		cfg.DefaultSpeed = 1000 // Mid-range speed
-	}
-	if cfg.DefaultAcceleration == 0 {
-		cfg.DefaultAcceleration = 50 // Mid-range acceleration
-	}
-	if len(cfg.ServoIDs) == 0 {
-		cfg.ServoIDs = []int{1, 2, 3, 4, 5} // Default servo IDs
-	}
-	if len(cfg.ServoIDs) != 5 {
-		return nil, nil, fmt.Errorf("expected 5 servo IDs for arm joints, got %d", len(cfg.ServoIDs))
-	}
-	if cfg.ScaleFactor == 0 {
-		cfg.ScaleFactor = 1.0
-	}
-	if cfg.SyncRate == 0 {
-		cfg.SyncRate = 20 // 20 Hz default
-	}
-
-	// Validate ranges
-	if cfg.DefaultSpeed < 1 || cfg.DefaultSpeed > 4094 {
-		return nil, nil, fmt.Errorf("default_speed must be between 1 and 4094, got %d", cfg.DefaultSpeed)
-	}
-	if cfg.DefaultAcceleration < 0 || cfg.DefaultAcceleration > 254 {
-		return nil, nil, fmt.Errorf("default_acceleration must be between 0 and 254, got %d", cfg.DefaultAcceleration)
-	}
-
-	// Validate mode
-	if cfg.Mode != "" && cfg.Mode != "leader" && cfg.Mode != "follower" {
-		return nil, nil, fmt.Errorf("mode must be 'leader' or 'follower', got '%s'", cfg.Mode)
-	}
-
-	return nil, nil, nil
-}
-
-// Joint limits for SO-101 arm based on improved calibration data
-// Joint limits for SO-101 arm - expanded to match your actual safe position
+// SO-101 joint limits (5 joints for arm, excluding gripper)
 var so101JointLimits = [][2]float64{
 	{-math.Pi, math.Pi},               // Shoulder Pan: full rotation
 	{-math.Pi * 0.75, math.Pi * 0.75}, // Shoulder Lift: ±135°
@@ -126,342 +37,176 @@ var so101JointLimits = [][2]float64{
 	{-math.Pi, math.Pi},               // Wrist Roll: full rotation
 }
 
-// Create a SO-101 kinematic model
-func createSO101Model() (referenceframe.Model, error) {
-	// Try to load the embedded SoArm kinematics model (same pattern as RoArm)
-	if len(soarmModelJson) > 0 {
-		m := &referenceframe.ModelConfigJSON{
-			OriginalFile: &referenceframe.ModelFile{
-				Bytes:     soarmModelJson,
-				Extension: "json",
-			},
-		}
-		err := json.Unmarshal(soarmModelJson, m)
-		if err != nil {
-			return nil, errors.Wrap(err, "failed to unmarshal json file")
-		}
-
-		return m.ParseConfig("soarm_101")
-	}
-
-	// If no embedded model, return error since we need a proper kinematic model
-	return nil, fmt.Errorf("no embedded soarm_m3.json kinematic model found")
+func init() {
+	resource.RegisterComponent(arm.API, SO101Model,
+		resource.Registration[arm.Arm, *SO101ArmConfig]{
+			Constructor: newSO101,
+		},
+	)
 }
 
-func (s *armSo101) Close(context.Context) error {
-	s.logger.Info("Closing SO-101 arm")
+// SO101ArmConfig represents the configuration for the SO-101 arm component
+type SO101ArmConfig struct {
+	// Serial configuration
+	Port     string `json:"port,omitempty"`
+	Baudrate int    `json:"baudrate,omitempty"`
 
-	// Stop synchronization
-	select {
-	case s.syncStop <- struct{}{}:
-	default:
-	}
+	// Common configuration
+	Timeout time.Duration `json:"timeout,omitempty"`
 
-	s.cancelFunc()
-
-	// Release the shared controller
-	ReleaseSharedController()
-
-	return nil
+	// Motion configuration
+	SpeedDegsPerSec        float32 `json:"speed_degs_per_sec,omitempty"`
+	AccelerationDegsPerSec float32 `json:"acceleration_degs_per_sec_per_sec,omitempty"`
 }
 
-// Main arm structure
-type armSo101 struct {
+// Validate ensures all parts of the config are valid
+func (cfg *SO101ArmConfig) Validate(path string) ([]string, []string, error) {
+	if cfg.Port == "" {
+		return nil, nil, fmt.Errorf("must specify port for serial communication")
+	}
+	return nil, nil, nil
+}
+
+type so101 struct {
 	resource.AlwaysRebuild
 
 	name       resource.Name
 	logger     logging.Logger
-	cfg        *SoArm101Config
+	cfg        *SO101ArmConfig
 	opMgr      *operation.SingleOperationManager
 	controller *SafeSoArmController
 
-	// Motion control
 	mu          sync.RWMutex
 	moveLock    sync.Mutex
 	isMoving    atomic.Bool
 	model       referenceframe.Model
 	jointLimits [][2]float64
 
-	// Motion parameters
+	// Motion configuration
 	defaultSpeed int
 	defaultAcc   int
-
-	// Leader-Follower mode
-	isLeader    bool
-	isFollower  bool
-	followerArm arm.Arm
-	leaderArm   arm.Arm
-	syncTicker  *time.Ticker
-	syncStop    chan struct{}
 
 	cancelCtx  context.Context
 	cancelFunc func()
 }
 
-func newArmSo101Leader(ctx context.Context, deps resource.Dependencies, rawConf resource.Config, logger logging.Logger) (arm.Arm, error) {
-	conf, err := resource.NativeConfig[*SoArm101Config](rawConf)
+func makeSO101ModelFrame() (referenceframe.Model, error) {
+	m := &referenceframe.ModelConfigJSON{
+		OriginalFile: &referenceframe.ModelFile{
+			Bytes:     so101ModelJson,
+			Extension: "json",
+		},
+	}
+	err := json.Unmarshal(so101ModelJson, m)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to unmarshal json file")
+	}
+
+	return m.ParseConfig("so101_arm")
+}
+
+func newSO101(ctx context.Context, deps resource.Dependencies, rawConf resource.Config, logger logging.Logger) (arm.Arm, error) {
+	conf, err := resource.NativeConfig[*SO101ArmConfig](rawConf)
 	if err != nil {
 		return nil, err
 	}
-	conf.Mode = "leader"
-	conf.Logger = logger
-	return NewSo101(ctx, deps, rawConf.ResourceName(), conf, logger)
-}
 
-func newArmSo101Follower(ctx context.Context, deps resource.Dependencies, rawConf resource.Config, logger logging.Logger) (arm.Arm, error) {
-	conf, err := resource.NativeConfig[*SoArm101Config](rawConf)
-	if err != nil {
-		return nil, err
+	// Validate and set default motion parameters
+	speedDegsPerSec := conf.SpeedDegsPerSec
+	if speedDegsPerSec == 0 {
+		speedDegsPerSec = 50 // Default speed in degrees per second
 	}
-	conf.Mode = "follower"
-	conf.Logger = logger
-	return NewSo101(ctx, deps, rawConf.ResourceName(), conf, logger)
-}
-
-func NewSo101(ctx context.Context, deps resource.Dependencies, name resource.Name, conf *SoArm101Config, logger logging.Logger) (arm.Arm, error) {
-	cancelCtx, cancelFunc := context.WithCancel(context.Background())
-
-	// Set logger in config if not set
-	if conf.Logger == nil {
-		conf.Logger = logger
+	if speedDegsPerSec < 3 || speedDegsPerSec > 180 {
+		return nil, fmt.Errorf("speed_degs_per_sec must be between 3 and 180 degrees/second, got %.1f", speedDegsPerSec)
 	}
 
-	// Set defaults
+	accelerationDegsPerSec := conf.AccelerationDegsPerSec
+	if accelerationDegsPerSec == 0 {
+		accelerationDegsPerSec = 100 // Default acceleration in degrees per second^2
+	}
+	if accelerationDegsPerSec < 10 || accelerationDegsPerSec > 500 {
+		return nil, fmt.Errorf("acceleration_degs_per_sec_per_sec must be between 10 and 500 degrees/second^2, got %.1f", accelerationDegsPerSec)
+	}
+
+	// Convert degrees/sec to internal speed units (approximate conversion)
+	defaultSpeed := int(speedDegsPerSec * 10)
+	if defaultSpeed < 30 {
+		defaultSpeed = 30
+	}
+	if defaultSpeed > 4096 {
+		defaultSpeed = 4096
+	}
+
+	// Convert degrees/sec^2 to internal acceleration units
+	defaultAcc := int(accelerationDegsPerSec * 0.5)
+	if defaultAcc < 1 {
+		defaultAcc = 1
+	}
+	if defaultAcc > 254 {
+		defaultAcc = 254
+	}
+
 	if conf.Baudrate == 0 {
-		conf.Baudrate = 1000000 // Standard SO-ARM baudrate
-	}
-	if conf.Timeout == 0 {
-		conf.Timeout = 5 * time.Second
-	}
-	if conf.DefaultSpeed == 0 {
-		conf.DefaultSpeed = 1000 // Mid-range speed
-	}
-	if conf.DefaultAcceleration == 0 {
-		conf.DefaultAcceleration = 50 // Mid-range acceleration
-	}
-	if len(conf.ServoIDs) == 0 {
-		conf.ServoIDs = []int{1, 2, 3, 4, 5} // Default servo IDs
-	}
-	if len(conf.ServoIDs) != 5 {
-		return nil, fmt.Errorf("expected 5 servo IDs for arm joints, got %d", len(conf.ServoIDs))
-	}
-	if conf.ScaleFactor == 0 {
-		conf.ScaleFactor = 1.0
-	}
-	if conf.SyncRate == 0 {
-		conf.SyncRate = 20 // 20 Hz default
+		conf.Baudrate = 1000000
 	}
 
-	// Initialize SO-ARM controller using the shared controller manager
-	controller, err := GetSharedController(conf)
+	// Create controller configuration
+	controllerConfig := &SoArm101Config{
+		Port:     conf.Port,
+		Baudrate: conf.Baudrate,
+		Timeout:  conf.Timeout,
+		ServoIDs: []int{1, 2, 3, 4, 5}, // Only use first 5 servos for arm
+		Logger:   logger,
+	}
+
+	controller, err := GetSharedController(controllerConfig)
 	if err != nil {
-		cancelFunc()
-		return nil, fmt.Errorf("failed to initialize SO-ARM controller: %w", err)
+		return nil, fmt.Errorf("failed to get shared SO-ARM controller: %w", err)
 	}
 
-	// Create kinematic model
-	model, err := createSO101Model()
+	model, err := makeSO101ModelFrame()
 	if err != nil {
 		ReleaseSharedController() // Clean up on error
 		return nil, fmt.Errorf("failed to create kinematic model: %w", err)
 	}
 
-	s := &armSo101{
-		name:         name,
-		logger:       logger,
-		model:        model,
+	cancelCtx, cancelFunc := context.WithCancel(context.Background())
+
+	arm := &so101{
+		name:         rawConf.ResourceName(),
 		cfg:          conf,
 		opMgr:        operation.NewSingleOperationManager(),
+		logger:       logger,
 		controller:   controller,
-		jointLimits:  so101JointLimits,
-		defaultSpeed: conf.DefaultSpeed,
-		defaultAcc:   conf.DefaultAcceleration,
-		isLeader:     conf.Mode == "leader",
-		isFollower:   conf.Mode == "follower",
-		syncStop:     make(chan struct{}),
+		model:        model,
+		jointLimits:  so101JointLimits, // Only first 5 joints
+		defaultSpeed: defaultSpeed,
+		defaultAcc:   defaultAcc,
 		cancelCtx:    cancelCtx,
 		cancelFunc:   cancelFunc,
 	}
 
-	// Enable torque by default
-	if err := controller.SetTorqueEnable(true); err != nil {
-		logger.Warnf("Failed to enable torque: %v", err)
+	logger.Infof("SO-101 configured with speed: %.1f deg/s (internal: %d), acceleration: %.1f deg/s² (internal: %d)",
+		speedDegsPerSec, defaultSpeed, accelerationDegsPerSec, defaultAcc)
+
+	// Initialize and verify servo connections
+	if err := arm.initializeServos(); err != nil {
+		ReleaseSharedController() // Clean up on error
+		return nil, fmt.Errorf("failed to initialize servos: %w", err)
 	}
 
-	// Setup leader-follower relationship
-	if s.isLeader && conf.FollowerArm != "" {
-		go s.startLeaderSync(deps, conf.FollowerArm)
-	} else if s.isFollower && conf.LeaderArm != "" {
-		go s.startFollowerSync(deps, conf.LeaderArm)
-	}
-
-	logger.Infof("SO-101 arm (%s mode) initialized on port %s with servo IDs: %v",
-		conf.Mode, conf.Port, conf.ServoIDs)
-	return s, nil
+	return arm, nil
 }
 
-// Start synchronization for leader mode
-func (s *armSo101) startLeaderSync(deps resource.Dependencies, followerName string) {
-	ticker := time.NewTicker(time.Duration(1000/s.cfg.SyncRate) * time.Millisecond)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			// Get follower arm
-			if s.followerArm == nil {
-				followerResource, err := deps.Lookup(resource.NewName(arm.API, followerName))
-				if err != nil {
-					s.logger.Debugf("Follower arm not yet available: %v", err)
-					continue
-				}
-				if followerArm, ok := followerResource.(arm.Arm); ok {
-					s.followerArm = followerArm
-					s.logger.Info("Connected to follower arm")
-				}
-			}
-
-			// Sync positions
-			if s.followerArm != nil {
-				s.syncToFollower()
-			}
-
-		case <-s.syncStop:
-			return
-		case <-s.cancelCtx.Done():
-			return
-		}
-	}
-}
-
-// Start synchronization for follower mode
-func (s *armSo101) startFollowerSync(deps resource.Dependencies, leaderName string) {
-	ticker := time.NewTicker(time.Duration(1000/s.cfg.SyncRate) * time.Millisecond)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			// Get leader arm
-			if s.leaderArm == nil {
-				leaderResource, err := deps.Lookup(resource.NewName(arm.API, leaderName))
-				if err != nil {
-					s.logger.Debugf("Leader arm not yet available: %v", err)
-					continue
-				}
-				if leaderArm, ok := leaderResource.(arm.Arm); ok {
-					s.leaderArm = leaderArm
-					s.logger.Info("Connected to leader arm")
-				}
-			}
-
-			// Sync from leader
-			if s.leaderArm != nil {
-				s.syncFromLeader()
-			}
-
-		case <-s.syncStop:
-			return
-		case <-s.cancelCtx.Done():
-			return
-		}
-	}
-}
-
-// Sync current position to follower
-func (s *armSo101) syncToFollower() {
-	if s.followerArm == nil {
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	defer cancel()
-
-	// Get current position
-	positions, err := s.JointPositions(ctx, nil)
-	if err != nil {
-		s.logger.Debugf("Failed to get leader positions: %v", err)
-		return
-	}
-
-	// Apply mirroring and scaling if configured
-	if s.cfg.MirrorMode || s.cfg.ScaleFactor != 1.0 {
-		positions = s.transformPositions(positions)
-	}
-
-	// Send to follower
-	err = s.followerArm.MoveToJointPositions(ctx, positions, map[string]interface{}{
-		"speed": s.defaultSpeed,
-	})
-	if err != nil {
-		s.logger.Debugf("Failed to sync to follower: %v", err)
-	}
-}
-
-// Sync position from leader
-func (s *armSo101) syncFromLeader() {
-	if s.leaderArm == nil {
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	defer cancel()
-
-	// Get leader position
-	positions, err := s.leaderArm.JointPositions(ctx, nil)
-	if err != nil {
-		s.logger.Debugf("Failed to get leader positions: %v", err)
-		return
-	}
-
-	// Apply mirroring and scaling if configured
-	if s.cfg.MirrorMode || s.cfg.ScaleFactor != 1.0 {
-		positions = s.transformPositions(positions)
-	}
-
-	// Move to match leader
-	err = s.MoveToJointPositions(ctx, positions, map[string]interface{}{
-		"speed": s.defaultSpeed,
-	})
-	if err != nil {
-		s.logger.Debugf("Failed to sync from leader: %v", err)
-	}
-}
-
-// Transform positions for mirroring and scaling
-func (s *armSo101) transformPositions(positions []referenceframe.Input) []referenceframe.Input {
-	transformed := make([]referenceframe.Input, len(positions))
-
-	for i, pos := range positions {
-		value := pos.Value
-
-		// Apply scaling
-		if s.cfg.ScaleFactor != 1.0 {
-			value *= s.cfg.ScaleFactor
-		}
-
-		// Apply mirroring (typically mirror base and wrist roll)
-		if s.cfg.MirrorMode && (i == 0 || i == 4) {
-			value = -value
-		}
-
-		transformed[i] = referenceframe.Input{Value: value}
-	}
-
-	return transformed
-}
-
-// Standard arm interface methods
-func (s *armSo101) Name() resource.Name {
+func (s *so101) Name() resource.Name {
 	return s.name
 }
 
-func (s *armSo101) NewClientFromConn(ctx context.Context, conn rpc.ClientConn, remoteName string, name resource.Name, logger logging.Logger) (arm.Arm, error) {
-	return nil, errors.New("remote client not implemented")
+func (s *so101) NewClientFromConn(ctx context.Context, conn rpc.ClientConn, remoteName string, name resource.Name, logger logging.Logger) (arm.Arm, error) {
+	panic("not implemented")
 }
 
-func (s *armSo101) EndPosition(ctx context.Context, extra map[string]interface{}) (spatialmath.Pose, error) {
-	// Simple end position calculation - in practice you'd use forward kinematics
+func (s *so101) EndPosition(ctx context.Context, extra map[string]interface{}) (spatialmath.Pose, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -478,64 +223,111 @@ func (s *armSo101) EndPosition(ctx context.Context, extra map[string]interface{}
 	return pose, nil
 }
 
-func (s *armSo101) MoveToPosition(ctx context.Context, pose spatialmath.Pose, extra map[string]interface{}) error {
+func (s *so101) MoveToPosition(ctx context.Context, pose spatialmath.Pose, extra map[string]interface{}) error {
 	if err := motion.MoveArm(ctx, s.logger, s, pose); err != nil {
 		return err
 	}
 	return nil
 }
 
-func (s *armSo101) MoveToJointPositions(ctx context.Context, positions []referenceframe.Input, extra map[string]interface{}) error {
+func (s *so101) MoveToJointPositions(ctx context.Context, positions []referenceframe.Input, extra map[string]interface{}) error {
 	s.moveLock.Lock()
 	defer s.moveLock.Unlock()
-
-	if len(positions) != 5 {
-		return fmt.Errorf("expected 5 joint positions for SO-101, got %d", len(positions))
-	}
 
 	s.isMoving.Store(true)
 	defer s.isMoving.Store(false)
 
-	// Extract and validate joint angles
-	jointAngles := make([]float64, len(positions))
-	for i, input := range positions {
-		angle := input.Value
-		min, max := s.jointLimits[i][0], s.jointLimits[i][1]
-
-		// Clamp to joint limits
-		if angle < min {
-			s.logger.Warnf("Joint %d angle %.3f rad below limit %.3f rad, clamping", i+1, angle, min)
-			angle = min
-		} else if angle > max {
-			s.logger.Warnf("Joint %d angle %.3f rad above limit %.3f rad, clamping", i+1, angle, max)
-			angle = max
-		}
-
-		jointAngles[i] = angle
+	if len(positions) != 5 {
+		return fmt.Errorf("expected 5 joint positions for SO-101 arm, got %d", len(positions))
 	}
 
-	// Get motion parameters
+	values := make([]float64, len(positions))
+	for i, input := range positions {
+		values[i] = input.Value
+	}
+
+	// Validate input ranges and clamp positions for the 5 arm joints
+	clampedPositions := make([]float64, len(values))
+	for i, pos := range values {
+		min, max := s.jointLimits[i][0], s.jointLimits[i][1]
+
+		// Validate and clamp the position
+		if pos < min || pos > max {
+			s.logger.Warnf("Joint %d position %.3f rad (%.1f°) out of range [%.3f, %.3f] rad ([%.1f°, %.1f°]), clamping",
+				i+1, pos, pos*180/math.Pi, min, max, min*180/math.Pi, max*180/math.Pi)
+		}
+		clampedPositions[i] = math.Max(min, math.Min(max, pos))
+	}
+
+	// Use configured speed and acceleration
 	speed := s.defaultSpeed
 	acc := s.defaultAcc
 
+	// Check for speed/acceleration overrides in extra parameters
 	if extra != nil {
-		if speedVal, ok := extra["speed"].(int); ok && speedVal > 0 && speedVal <= 4094 {
-			speed = speedVal
+		if speedOverride, ok := extra["speed"]; ok {
+			if speedVal, ok := speedOverride.(float64); ok {
+				speed = int(speedVal * 10)
+				if speed < 30 {
+					speed = 30
+				}
+				if speed > 4096 {
+					speed = 4096
+				}
+			}
 		}
-		if accVal, ok := extra["acceleration"].(int); ok && accVal >= 0 && accVal <= 254 {
-			acc = accVal
+		if accOverride, ok := extra["acceleration"]; ok {
+			if accVal, ok := accOverride.(float64); ok {
+				acc = int(accVal * 0.5)
+				if acc < 1 {
+					acc = 1
+				}
+				if acc > 254 {
+					acc = 254
+				}
+			}
 		}
 	}
 
-	// Send movement command to controller
-	if err := s.controller.MoveToJointPositions(jointAngles, speed, acc); err != nil {
-		return fmt.Errorf("failed to move to joint positions: %w", err)
+	// Send command to controller with the 5 arm joints
+	if err := s.controller.MoveToJointPositions(clampedPositions, speed, acc); err != nil {
+		return fmt.Errorf("failed to move SO-101 arm: %w", err)
 	}
+
+	// Calculate wait time based on movement distance and configured speed
+	currentPositions, err := s.controller.GetJointPositions()
+	if err != nil {
+		s.logger.Warnf("Failed to get current positions for timing calculation: %v", err)
+		currentPositions = make([]float64, 5) // Use zeros as fallback
+	}
+
+	maxMovement := 0.0
+	for i, target := range clampedPositions {
+		if i < len(currentPositions) {
+			movement := math.Abs(target - currentPositions[i])
+			if movement > maxMovement {
+				maxMovement = movement
+			}
+		}
+	}
+
+	// Calculate move time based on configured speed (convert internal units back to rad/sec)
+	speedRadPerSec := float64(speed) / 10.0 * math.Pi / 180.0 // Convert to rad/sec
+	moveTimeSeconds := maxMovement / speedRadPerSec
+	if moveTimeSeconds < 0.1 {
+		moveTimeSeconds = 0.1 // Minimum move time
+	}
+	if moveTimeSeconds > 10.0 {
+		moveTimeSeconds = 10.0 // Maximum move time for safety
+	}
+
+	// Wait for movement to complete
+	time.Sleep(time.Duration(moveTimeSeconds * float64(time.Second)))
 
 	return nil
 }
 
-func (s *armSo101) MoveThroughJointPositions(ctx context.Context, positions [][]referenceframe.Input, options *arm.MoveOptions, extra map[string]interface{}) error {
+func (s *so101) MoveThroughJointPositions(ctx context.Context, positions [][]referenceframe.Input, options *arm.MoveOptions, extra map[string]interface{}) error {
 	for _, jointPositions := range positions {
 		if err := s.MoveToJointPositions(ctx, jointPositions, extra); err != nil {
 			return err
@@ -544,51 +336,55 @@ func (s *armSo101) MoveThroughJointPositions(ctx context.Context, positions [][]
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-
-		time.Sleep(100 * time.Millisecond)
 	}
 	return nil
 }
 
-func (s *armSo101) JointPositions(ctx context.Context, extra map[string]interface{}) ([]referenceframe.Input, error) {
+func (s *so101) JointPositions(ctx context.Context, extra map[string]interface{}) ([]referenceframe.Input, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	angles, err := s.controller.GetJointPositions()
+	// Get joint positions from controller (only 5 joints for arm)
+	radians, err := s.controller.GetJointPositions()
 	if err != nil {
-		return nil, fmt.Errorf("failed to read joint positions: %w", err)
+		s.logger.Warnf("Failed to read joint positions: %v", err)
+
+		return nil, fmt.Errorf("failed to read joint positions: %w. Try running 'diagnose' command for more details", err)
 	}
 
-	if len(angles) != 5 {
-		return nil, fmt.Errorf("expected 5 joint angles, got %d", len(angles))
+	// Ensure we have exactly 5 joints for the arm
+	if len(radians) != 5 {
+		return nil, fmt.Errorf("expected 5 joint positions for SO-101 arm, got %d", len(radians))
 	}
 
+	// Convert to Viam input format
 	positions := make([]referenceframe.Input, 5)
-	for i, angle := range angles {
-		positions[i] = referenceframe.Input{Value: angle}
+	for i, radian := range radians {
+		positions[i] = referenceframe.Input{Value: radian}
 	}
 
 	return positions, nil
 }
 
-func (s *armSo101) Stop(ctx context.Context, extra map[string]interface{}) error {
+func (s *so101) Stop(ctx context.Context, extra map[string]interface{}) error {
 	s.isMoving.Store(false)
 	return s.controller.Stop()
 }
 
-func (s *armSo101) Kinematics(ctx context.Context) (referenceframe.Model, error) {
+func (s *so101) Kinematics(ctx context.Context) (referenceframe.Model, error) {
 	return s.model, nil
 }
 
-func (s *armSo101) CurrentInputs(ctx context.Context) ([]referenceframe.Input, error) {
+func (s *so101) CurrentInputs(ctx context.Context) ([]referenceframe.Input, error) {
 	return s.JointPositions(ctx, nil)
 }
 
-func (s *armSo101) GoToInputs(ctx context.Context, inputSteps ...[]referenceframe.Input) error {
+func (s *so101) GoToInputs(ctx context.Context, inputSteps ...[]referenceframe.Input) error {
 	return s.MoveThroughJointPositions(ctx, inputSteps, nil, nil)
 }
 
-func (s *armSo101) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
+func (s *so101) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
+	// Handle custom commands specific to SO-101
 	switch cmd["command"] {
 	case "set_torque":
 		enable, ok := cmd["enable"].(bool)
@@ -598,61 +394,134 @@ func (s *armSo101) DoCommand(ctx context.Context, cmd map[string]interface{}) (m
 		err := s.controller.SetTorqueEnable(enable)
 		return map[string]interface{}{"success": err == nil}, err
 
-	case "ping_servos":
+	case "ping":
 		err := s.controller.Ping()
 		return map[string]interface{}{"success": err == nil}, err
 
-	case "set_motion_params":
-		result := make(map[string]interface{})
+	case "controller_status":
+		refCount, hasController, configSummary := GetControllerStatus()
+		return map[string]interface{}{
+			"ref_count":      refCount,
+			"has_controller": hasController,
+			"config":         configSummary,
+		}, nil
 
-		if speedVal, ok := cmd["speed"].(float64); ok {
-			speed := int(speedVal)
-			if speed < 1 || speed > 4094 {
-				return nil, fmt.Errorf("speed must be between 1 and 4094, got %d", speed)
-			}
-			s.mu.Lock()
-			s.defaultSpeed = speed
-			s.mu.Unlock()
-			result["speed_set"] = speed
+	case "diagnose":
+		err := s.diagnoseConnection()
+		return map[string]interface{}{
+			"success": err == nil,
+			"error":   fmt.Sprintf("%v", err),
+		}, nil
+
+	case "verify_config":
+		err := s.verifyServoConfig()
+		return map[string]interface{}{
+			"success": err == nil,
+			"error":   fmt.Sprintf("%v", err),
+		}, nil
+
+	case "reinitialize":
+		retries := 3 // default
+		if r, ok := cmd["retries"].(float64); ok {
+			retries = int(r)
 		}
+		err := s.initializeServosWithRetry(retries)
+		return map[string]interface{}{
+			"success": err == nil,
+			"error":   fmt.Sprintf("%v", err),
+			"retries": retries,
+		}, nil
 
-		if accVal, ok := cmd["acceleration"].(float64); ok {
-			acc := int(accVal)
-			if acc < 0 || acc > 254 {
-				return nil, fmt.Errorf("acceleration must be between 0 and 254, got %d", acc)
-			}
-			s.mu.Lock()
-			s.defaultAcc = acc
-			s.mu.Unlock()
-			result["acceleration_set"] = acc
+	case "test_servo_communication":
+		servoID := 1 // default
+		if id, ok := cmd["servo_id"].(float64); ok {
+			servoID = int(id)
 		}
-
+		positions, err := s.controller.GetJointPositions()
+		result := map[string]interface{}{
+			"success":  err == nil,
+			"servo_id": servoID,
+		}
+		if err != nil {
+			result["error"] = fmt.Sprintf("%v", err)
+		} else if servoID > 0 && servoID <= len(positions) {
+			result["position"] = positions[servoID-1]
+		} else {
+			result["all_positions"] = positions
+		}
 		return result, nil
 
-	case "start_sync":
-		if s.isLeader || s.isFollower {
-			return map[string]interface{}{"message": "synchronization already active"}, nil
-		}
-		return map[string]interface{}{"error": "not configured for leader-follower mode"}, nil
-
-	case "stop_sync":
-		select {
-		case s.syncStop <- struct{}{}:
-			return map[string]interface{}{"message": "synchronization stopped"}, nil
-		default:
-			return map[string]interface{}{"message": "synchronization already stopped"}, nil
-		}
-
 	default:
-		return nil, fmt.Errorf("unknown command: %v", cmd["command"])
+		// Check for speed and acceleration setting
+		result := make(map[string]interface{})
+		changed := false
+
+		if speedVal, ok := cmd["set_speed"]; ok {
+			if speed, ok := speedVal.(float64); ok {
+				if speed < 3 || speed > 180 {
+					return nil, fmt.Errorf("speed must be between 3 and 180 degrees/second, got %.1f", speed)
+				}
+				s.mu.Lock()
+				s.defaultSpeed = int(speed * 10)
+				if s.defaultSpeed < 30 {
+					s.defaultSpeed = 30
+				}
+				if s.defaultSpeed > 4096 {
+					s.defaultSpeed = 4096
+				}
+				s.mu.Unlock()
+				result["speed_set"] = speed
+				changed = true
+			} else {
+				return nil, fmt.Errorf("set_speed requires a number value")
+			}
+		}
+
+		if accVal, ok := cmd["set_acceleration"]; ok {
+			if acc, ok := accVal.(float64); ok {
+				if acc < 10 || acc > 500 {
+					return nil, fmt.Errorf("acceleration must be between 10 and 500 degrees/second^2, got %.1f", acc)
+				}
+				s.mu.Lock()
+				s.defaultAcc = int(acc * 0.5)
+				if s.defaultAcc < 1 {
+					s.defaultAcc = 1
+				}
+				if s.defaultAcc > 254 {
+					s.defaultAcc = 254
+				}
+				s.mu.Unlock()
+				result["acceleration_set"] = acc
+				changed = true
+			} else {
+				return nil, fmt.Errorf("set_acceleration requires a number value")
+			}
+		}
+
+		if getParams, ok := cmd["get_motion_params"]; ok && getParams.(bool) {
+			s.mu.RLock()
+			speedDegsPerSec := float64(s.defaultSpeed) / 10.0
+			accDegsPerSec := float64(s.defaultAcc) / 0.5
+			s.mu.RUnlock()
+
+			result["current_speed_degs_per_sec"] = speedDegsPerSec
+			result["current_acceleration_degs_per_sec_per_sec"] = accDegsPerSec
+			changed = true
+		}
+
+		if changed {
+			return result, nil
+		}
+
+		return nil, fmt.Errorf("unknown command: %v", cmd)
 	}
 }
 
-func (s *armSo101) IsMoving(ctx context.Context) (bool, error) {
+func (s *so101) IsMoving(ctx context.Context) (bool, error) {
 	return s.isMoving.Load(), nil
 }
 
-func (s *armSo101) Geometries(ctx context.Context, extra map[string]interface{}) ([]spatialmath.Geometry, error) {
+func (s *so101) Geometries(ctx context.Context, extra map[string]interface{}) ([]spatialmath.Geometry, error) {
 	inputs, err := s.CurrentInputs(ctx)
 	if err != nil {
 		return nil, err
@@ -662,4 +531,128 @@ func (s *armSo101) Geometries(ctx context.Context, extra map[string]interface{})
 		return nil, err
 	}
 	return gif.Geometries(), nil
+}
+
+func (s *so101) Close(context.Context) error {
+	s.cancelFunc()
+	ReleaseSharedController()
+	return nil
+}
+
+// initializeServos pings each servo and enables torque to ensure proper communication
+func (s *so101) initializeServos() error {
+	return s.initializeServosWithRetry(3)
+}
+
+// initializeServosWithRetry attempts servo initialization with retries
+func (s *so101) initializeServosWithRetry(maxRetries int) error {
+	s.logger.Info("Initializing SO-101 servos...")
+
+	var lastErr error
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		s.logger.Infof("Servo initialization attempt %d/%d", attempt, maxRetries)
+
+		if err := s.doServoInitialization(); err != nil {
+			lastErr = err
+			s.logger.Warnf("Initialization attempt %d failed: %v", attempt, err)
+
+			if attempt < maxRetries {
+				// Wait before retrying, with exponential backoff
+				waitTime := time.Duration(attempt) * 500 * time.Millisecond
+				s.logger.Infof("Waiting %v before retry...", waitTime)
+				time.Sleep(waitTime)
+				continue
+			}
+		} else {
+			s.logger.Infof("Servo initialization successful on attempt %d", attempt)
+			return nil
+		}
+	}
+
+	return fmt.Errorf("servo initialization failed after %d attempts, last error: %w", maxRetries, lastErr)
+}
+
+// doServoInitialization performs the actual initialization steps
+func (s *so101) doServoInitialization() error {
+	// Ping each servo to ensure it's responding
+	servoIDs := []int{1, 2, 3, 4, 5}
+	for _, servoID := range servoIDs {
+		s.logger.Debugf("Pinging servo %d...", servoID)
+		if err := s.controller.Ping(); err != nil {
+			return fmt.Errorf("servo %d ping failed: %w", servoID, err)
+		}
+		s.logger.Debugf("Servo %d ping successful", servoID)
+	}
+
+	// Enable torque for all servos
+	s.logger.Debug("Enabling torque for all servos...")
+	if err := s.controller.SetTorqueEnable(true); err != nil {
+		return fmt.Errorf("failed to enable torque: %w", err)
+	}
+
+	// Brief delay to allow torque to stabilize
+	time.Sleep(100 * time.Millisecond)
+
+	// Verify we can read positions from all servos
+	s.logger.Debug("Verifying position reading from all servos...")
+	positions, err := s.controller.GetJointPositions()
+	if err != nil {
+		return fmt.Errorf("failed to read initial joint positions: %w", err)
+	}
+
+	if len(positions) != 5 {
+		return fmt.Errorf("expected 5 joint positions, got %d", len(positions))
+	}
+
+	s.logger.Infof("SO-101 servo initialization successful. Initial positions: %v", positions)
+	return nil
+}
+
+// diagnoseConnection provides detailed diagnostics for troubleshooting
+func (s *so101) diagnoseConnection() error {
+	s.logger.Info("Starting SO-101 connection diagnosis...")
+
+	// Test each servo individually
+	servoIDs := []int{1, 2, 3, 4, 5}
+	for _, servoID := range servoIDs {
+		s.logger.Infof("Testing servo %d...", servoID)
+
+		// Try ping first
+		if err := s.controller.Ping(); err != nil {
+			s.logger.Errorf("Servo %d ping failed: %v", servoID, err)
+			continue
+		}
+		s.logger.Infof("Servo %d ping successful", servoID)
+
+		// Try reading current position
+		positions, err := s.controller.GetJointPositions()
+		if err != nil {
+			s.logger.Errorf("Failed to read positions: %v", err)
+			continue
+		}
+
+		if servoID-1 < len(positions) {
+			s.logger.Infof("Servo %d position: %.3f rad", servoID, positions[servoID-1])
+		}
+	}
+
+	return nil
+}
+
+// verifyServoConfig checks servo configuration
+func (s *so101) verifyServoConfig() error {
+	s.logger.Info("Verifying servo configuration...")
+
+	// Try to read all positions to verify communication
+	positions, err := s.controller.GetJointPositions()
+	if err != nil {
+		return fmt.Errorf("failed to verify servo config: %w", err)
+	}
+
+	if len(positions) != 5 {
+		return fmt.Errorf("config verification failed: expected 5 servos, got %d", len(positions))
+	}
+
+	s.logger.Infof("Servo configuration verified. Current positions: %v", positions)
+	return nil
 }

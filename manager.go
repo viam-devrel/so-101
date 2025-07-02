@@ -3,12 +3,13 @@ package so_arm
 import (
 	"fmt"
 	"sync"
+	"sync/atomic"
 )
 
 var (
 	globalController *SafeSoArmController
 	controllerMutex  sync.RWMutex
-	refCount         int
+	refCount         int64 // Changed to int64 for atomic operations
 	lastError        error
 	currentConfig    *SoArm101Config
 )
@@ -75,15 +76,17 @@ func GetSharedController(config *SoArm101Config) (*SafeSoArmController, error) {
 	controllerMutex.Lock()
 	defer controllerMutex.Unlock()
 
+	currentRefCount := atomic.LoadInt64(&refCount)
+
 	if globalController == nil && lastError != nil {
 		return nil, fmt.Errorf("cached controller creation error: %w", lastError)
 	}
 
 	if globalController != nil {
 		if !configsEqual(currentConfig, config) {
-			return nil, fmt.Errorf("conflict: existing controller uses different config (refCount: %d)", refCount)
+			return nil, fmt.Errorf("conflict: existing controller uses different config (refCount: %d)", currentRefCount)
 		}
-		refCount++
+		atomic.AddInt64(&refCount, 1)
 		return globalController, nil
 	}
 
@@ -98,7 +101,8 @@ func GetSharedController(config *SoArm101Config) (*SafeSoArmController, error) {
 	}
 	currentConfig = config
 	lastError = nil
-	refCount = 1
+	atomic.StoreInt64(&refCount, 1)
+
 	return globalController, nil
 }
 
@@ -106,14 +110,14 @@ func ReleaseSharedController() {
 	controllerMutex.Lock()
 	defer controllerMutex.Unlock()
 
-	refCount--
-	if refCount <= 0 && globalController != nil {
+	currentRefCount := atomic.AddInt64(&refCount, -1)
+	if currentRefCount <= 0 && globalController != nil {
 		if err := globalController.Close(); err != nil && currentConfig != nil && currentConfig.Logger != nil {
 			currentConfig.Logger.Warnf("error closing shared controller: %v", err)
 		}
 		globalController = nil
 		currentConfig = nil
-		refCount = 0
+		atomic.StoreInt64(&refCount, 0)
 		lastError = nil
 	}
 }
@@ -127,19 +131,24 @@ func ForceCloseSharedController() error {
 		err = globalController.Close()
 		globalController = nil
 		currentConfig = nil
-		refCount = 0
+		atomic.StoreInt64(&refCount, 0)
 		lastError = nil
 	}
 	return err
 }
 
-func GetControllerStatus() (refCount int, hasController bool, configSummary string) {
+// Fixed function signature to avoid variable shadowing
+func GetControllerStatus() (int64, bool, string) {
 	controllerMutex.RLock()
 	defer controllerMutex.RUnlock()
 
-	hasController = globalController != nil
+	currentRefCount := atomic.LoadInt64(&refCount)
+	hasController := globalController != nil
+	configSummary := ""
+
 	if currentConfig != nil {
 		configSummary = fmt.Sprintf("Serial: %s@%d", currentConfig.Port, currentConfig.Baudrate)
 	}
-	return refCount, hasController, configSummary
+
+	return currentRefCount, hasController, configSummary
 }

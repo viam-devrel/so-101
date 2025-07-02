@@ -27,45 +27,30 @@ type SO101Calibration struct {
 	ElbowFlex    SO101JointCalibration `json:"elbow_flex"`
 	WristFlex    SO101JointCalibration `json:"wrist_flex"`
 	WristRoll    SO101JointCalibration `json:"wrist_roll"`
-	Gripper      SO101JointCalibration `json:"gripper"`
 }
 
-// Your improved calibration data from LeRobot
+// Default calibration data for SO-101
 var DefaultSO101Calibration = SO101Calibration{
 	ShoulderPan: SO101JointCalibration{
-		ID: 1, DriveMode: 0, HomingOffset: 631,
-		RangeMin: 1156, RangeMax: 2976,
+		ID: 1, DriveMode: 0, HomingOffset: 2048,
+		RangeMin: 0, RangeMax: 4095,
 	},
 	ShoulderLift: SO101JointCalibration{
-		ID: 2, DriveMode: 0, HomingOffset: -268,
-		RangeMin: 848, RangeMax: 3206,
+		ID: 2, DriveMode: 0, HomingOffset: 2048,
+		RangeMin: 0, RangeMax: 4095,
 	},
 	ElbowFlex: SO101JointCalibration{
-		ID: 3, DriveMode: 0, HomingOffset: -713,
-		RangeMin: 976, RangeMax: 3205,
+		ID: 3, DriveMode: 0, HomingOffset: 2048,
+		RangeMin: 0, RangeMax: 4095,
 	},
 	WristFlex: SO101JointCalibration{
-		ID: 4, DriveMode: 0, HomingOffset: -515,
-		RangeMin: 711, RangeMax: 2688,
+		ID: 4, DriveMode: 0, HomingOffset: 2048,
+		RangeMin: 0, RangeMax: 4095,
 	},
 	WristRoll: SO101JointCalibration{
-		ID: 5, DriveMode: 0, HomingOffset: -230,
-		RangeMin: 369, RangeMax: 3646,
+		ID: 5, DriveMode: 0, HomingOffset: 2048,
+		RangeMin: 0, RangeMax: 4095,
 	},
-	Gripper: SO101JointCalibration{
-		ID: 6, DriveMode: 0, HomingOffset: -1479,
-		RangeMin: 2046, RangeMax: 3403,
-	},
-}
-
-// SoArmController handles communication with SO-ARM servo motors using Feetech protocol
-type SoArmController struct {
-	port        serial.Port
-	servoIDs    []int
-	logger      logging.Logger
-	mu          sync.RWMutex
-	timeout     time.Duration
-	calibration SO101Calibration
 }
 
 // Feetech servo command constants
@@ -88,7 +73,7 @@ const (
 	INST_RESET      = 0x06
 	INST_SYNC_WRITE = 0x83
 
-	// Control table addresses (from STS_SMS_SERIES_CONTROL_TABLE)
+	// Control table addresses
 	ADDR_MODEL_NUMBER     = 3
 	ADDR_ID               = 5
 	ADDR_TORQUE_ENABLE    = 40
@@ -101,33 +86,37 @@ const (
 	ADDR_PRESENT_LOAD     = 60
 	ADDR_MOVING           = 66
 
-	// Communication results
-	COMM_SUCCESS    = 0
-	COMM_PORT_BUSY  = -1000
-	COMM_TX_FAIL    = -1001
-	COMM_RX_FAIL    = -1002
-	COMM_TX_ERROR   = -2000
-	COMM_RX_WAITING = -3000
-	COMM_RX_TIMEOUT = -3001
-	COMM_RX_CORRUPT = -3002
-
 	// Special IDs
 	BROADCAST_ID = 0xFE
 
-	// Position range for SO-101 (based on your reading of 0x500A = 20490)
-	// SO-101 appears to use 16-bit position values
-	SERVO_CENTER_POSITION = 32768 // Center position
-	SERVO_MIN_POSITION    = 0     // Minimum position
-	SERVO_MAX_POSITION    = 65535 // Maximum position
+	// Position range for servos
+	SERVO_CENTER_POSITION = 2048
+	SERVO_MIN_POSITION    = 0
+	SERVO_MAX_POSITION    = 4095
 )
 
-// NewSoArmController creates a new controller for SO-ARM servos
+// Improved controller with better concurrent access handling
+type SoArmController struct {
+	port        serial.Port
+	servoIDs    []int
+	logger      logging.Logger
+	mu          sync.RWMutex
+	timeout     time.Duration
+	calibration SO101Calibration
+
+	// Serial communication management
+	serialMu        sync.Mutex    // Separate mutex for serial operations
+	lastCommandTime time.Time     // Track timing between commands
+	minCommandGap   time.Duration // Minimum gap between commands
+}
+
+// Enhanced controller creation with better error handling
 func NewSoArmController(portName string, baudrate int, servoIDs []int, logger logging.Logger) (*SoArmController, error) {
 	if logger == nil {
 		return nil, errors.New("logger cannot be nil")
 	}
 
-	// Open serial port
+	// Open serial port with improved configuration
 	mode := &serial.Mode{
 		BaudRate: baudrate,
 		DataBits: 8,
@@ -141,89 +130,240 @@ func NewSoArmController(portName string, baudrate int, servoIDs []int, logger lo
 	}
 
 	controller := &SoArmController{
-		port:        port,
-		servoIDs:    servoIDs,
-		logger:      logger,
-		timeout:     time.Second * 1,
-		calibration: DefaultSO101Calibration, // Use the calibration data
+		port:            port,
+		servoIDs:        servoIDs,
+		logger:          logger,
+		timeout:         time.Second * 1,
+		calibration:     DefaultSO101Calibration,
+		minCommandGap:   time.Millisecond * 5, // Minimum 5ms between commands
+		lastCommandTime: time.Now(),
 	}
 
-	// Skip ping test since we know movement commands work
-	// Test communication will happen during actual operations
-	logger.Warnf("Skipping ping test - will verify communication during operations")
+	// Clear any existing data in buffers
+	controller.clearSerialBuffers()
 
 	logger.Infof("SO-ARM controller initialized on %s at %d baud with servo IDs: %v", portName, baudrate, servoIDs)
 	return controller, nil
 }
 
-// Ping tests communication with all servos
-func (c *SoArmController) Ping() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	for _, id := range c.servoIDs {
-		if err := c.sendPing(id); err != nil {
-			return fmt.Errorf("ping failed for servo %d: %w", id, err)
-		}
+// clearSerialBuffers clears both input and output buffers
+func (c *SoArmController) clearSerialBuffers() {
+	if c.port == nil {
+		return
 	}
-	return nil
+
+	// Clear input buffer
+	c.port.ResetInputBuffer()
+
+	// Read any remaining data with a short timeout
+	c.port.SetReadTimeout(10 * time.Millisecond)
+	buffer := make([]byte, 256)
+	for {
+		n, err := c.port.Read(buffer)
+		if err != nil || n == 0 {
+			break
+		}
+		c.logger.Debugf("Cleared %d bytes from input buffer", n)
+	}
+
+	// Reset timeout
+	c.port.SetReadTimeout(c.timeout)
 }
 
-// sendPing sends a ping command to a specific servo
-func (c *SoArmController) sendPing(servoID int) error {
-	// Build ping packet: [0xFF][0xFF][ID][Length][Instruction][Checksum]
-	packet := []byte{PKT_HEADER1, PKT_HEADER2, byte(servoID), 0x02, INST_PING}
+// enforceCommandGap ensures minimum time between serial commands
+func (c *SoArmController) enforceCommandGap() {
+	elapsed := time.Since(c.lastCommandTime)
+	if elapsed < c.minCommandGap {
+		time.Sleep(c.minCommandGap - elapsed)
+	}
+	c.lastCommandTime = time.Now()
+}
 
-	// Calculate checksum (exclude headers, include ID, length, instruction)
-	checksum := byte(servoID) + 0x02 + INST_PING
-	checksum = ^checksum // Bitwise NOT
+// Improved GetJointPositions with better error handling and recovery
+func (c *SoArmController) GetJointPositions() ([]float64, error) {
+	c.serialMu.Lock()
+	defer c.serialMu.Unlock()
+
+	angles := make([]float64, len(c.servoIDs))
+	maxRetries := 3
+
+	for i, id := range c.servoIDs {
+		var position int
+		var err error
+
+		// Retry logic for each servo
+		for attempt := 0; attempt < maxRetries; attempt++ {
+			if attempt > 0 {
+				c.logger.Debugf("Retrying read for servo %d, attempt %d", id, attempt+1)
+				// Clear buffers before retry
+				c.clearSerialBuffers()
+				// Wait longer between retries
+				time.Sleep(time.Duration(attempt*10) * time.Millisecond)
+			}
+
+			c.enforceCommandGap()
+			position, err = c.readCurrentPositionRobust(id)
+			if err == nil {
+				break
+			}
+
+			c.logger.Warnf("Failed to read position from servo %d on attempt %d: %v", id, attempt+1, err)
+		}
+
+		if err != nil {
+			return nil, fmt.Errorf("failed to read position from servo %d after %d attempts: %w", id, maxRetries, err)
+		}
+
+		angles[i] = c.servoPositionToRadiansCalibrated(position, i)
+	}
+
+	return angles, nil
+}
+
+// readCurrentPositionRobust with improved error detection and recovery
+func (c *SoArmController) readCurrentPositionRobust(servoID int) (int, error) {
+	// Build read packet
+	packet := []byte{
+		PKT_HEADER1, PKT_HEADER2,
+		byte(servoID),
+		0x04,                  // Length
+		INST_READ,             // Read instruction
+		ADDR_PRESENT_POSITION, // Address
+		0x02,                  // Read 2 bytes
+	}
+
+	checksum := c.calculateChecksum(packet[2:])
 	packet = append(packet, checksum)
 
-	if err := c.writePacket(packet); err != nil {
-		return err
+	// Clear buffers before sending
+	c.clearSerialBuffers()
+
+	// Send packet with verification
+	if err := c.writePacketVerified(packet); err != nil {
+		return 0, fmt.Errorf("failed to send packet: %w", err)
 	}
 
-	// Read response with more lenient timeout
-	response, err := c.readResponseLenient()
+	// Read response with improved validation
+	response, err := c.readResponseRobust(8) // Expected response length
 	if err != nil {
-		return err
+		return 0, err
 	}
 
-	if len(response) < 6 || response[PKT_ID] != byte(servoID) {
-		return fmt.Errorf("invalid ping response from servo %d: got %X", servoID, response)
+	// Validate response structure
+	if len(response) < 8 {
+		return 0, fmt.Errorf("response too short: got %d bytes, expected 8", len(response))
 	}
+
+	// Check packet headers
+	if response[0] != PKT_HEADER1 || response[1] != PKT_HEADER2 {
+		return 0, fmt.Errorf("invalid packet header: got [0x%02X, 0x%02X], expected [0xFF, 0xFF]", response[0], response[1])
+	}
+
+	// Check servo ID
+	if response[PKT_ID] != byte(servoID) {
+		return 0, fmt.Errorf("invalid position response from servo %d: got ID %d", servoID, response[PKT_ID])
+	}
+
+	// Verify checksum
+	if !c.verifyChecksum(response) {
+		return 0, fmt.Errorf("checksum verification failed")
+	}
+
+	// Extract position from response (little endian)
+	if len(response) < 7 {
+		return 0, fmt.Errorf("response too short for position data")
+	}
+
+	position := int(response[5]) | (int(response[6]) << 8)
+	return position, nil
+}
+
+// writePacketVerified writes packet and verifies it was sent completely
+func (c *SoArmController) writePacketVerified(packet []byte) error {
+	// Clear input buffer before writing
+	c.port.ResetInputBuffer()
+
+	n, err := c.port.Write(packet)
+	if err != nil {
+		return fmt.Errorf("failed to write packet: %w", err)
+	}
+	if n != len(packet) {
+		return fmt.Errorf("incomplete packet write: wrote %d of %d bytes", n, len(packet))
+	}
+
+	// Small delay to allow transmission to complete
+	time.Sleep(time.Millisecond * 2)
 
 	return nil
 }
 
-// SetTorqueEnable enables or disables torque for all servos
-func (c *SoArmController) SetTorqueEnable(enable bool) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	value := 0
-	if enable {
-		value = 1
+// readResponseRobust with improved error handling and timeout management
+func (c *SoArmController) readResponseRobust(expectedLen int) ([]byte, error) {
+	// Set read timeout
+	if err := c.port.SetReadTimeout(c.timeout); err != nil {
+		return nil, fmt.Errorf("failed to set read timeout: %w", err)
 	}
 
-	for _, id := range c.servoIDs {
-		if err := c.writeRegister(id, ADDR_TORQUE_ENABLE, 1, []int{value}); err != nil {
-			return fmt.Errorf("failed to set torque enable for servo %d: %w", id, err)
+	buffer := make([]byte, expectedLen*2) // Allow for extra data
+	totalRead := 0
+	startTime := time.Now()
+
+	// Read with timeout and partial read handling
+	for totalRead < expectedLen {
+		if time.Since(startTime) > c.timeout {
+			return nil, fmt.Errorf("timeout reading response after %v", c.timeout)
+		}
+
+		n, err := c.port.Read(buffer[totalRead:])
+		if err != nil {
+			return nil, fmt.Errorf("failed to read response: %w", err)
+		}
+
+		if n == 0 {
+			// No data available, check if we've waited long enough
+			if time.Since(startTime) > time.Millisecond*100 {
+				break
+			}
+			time.Sleep(time.Millisecond * 5)
+			continue
+		}
+
+		totalRead += n
+
+		// Check if we have enough data for a valid packet
+		if totalRead >= 6 {
+			// Look for packet headers
+			for i := 0; i <= totalRead-6; i++ {
+				if buffer[i] == PKT_HEADER1 && buffer[i+1] == PKT_HEADER2 {
+					// Found headers, check if we have complete packet
+					if i+3 < totalRead {
+						packetLength := int(buffer[i+3]) + 4 // Length + headers + ID + length
+						if i+packetLength <= totalRead {
+							// We have a complete packet
+							response := make([]byte, packetLength)
+							copy(response, buffer[i:i+packetLength])
+							return response, nil
+						}
+					}
+				}
+			}
 		}
 	}
 
-	status := "disabled"
-	if enable {
-		status = "enabled"
+	if totalRead == 0 {
+		return nil, errors.New("no response received")
 	}
-	c.logger.Infof("Torque %s for all servos", status)
-	return nil
+
+	// Return whatever we got
+	response := make([]byte, totalRead)
+	copy(response, buffer[:totalRead])
+	return response, nil
 }
 
-// MoveToJointPositions moves all joints to specified angles using calibration
+// Improved MoveToJointPositions with better error handling
 func (c *SoArmController) MoveToJointPositions(jointAngles []float64, speed, acceleration int) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.serialMu.Lock()
+	defer c.serialMu.Unlock()
 
 	if len(jointAngles) != len(c.servoIDs) {
 		return fmt.Errorf("expected %d joint angles, got %d", len(c.servoIDs), len(jointAngles))
@@ -237,167 +377,18 @@ func (c *SoArmController) MoveToJointPositions(jointAngles []float64, speed, acc
 	}
 
 	// Use sync write to move all servos simultaneously
-	return c.syncWritePositions(positions)
+	return c.syncWritePositionsRobust(positions)
 }
 
-// GetJointPositions reads current positions of all joints using calibration
-func (c *SoArmController) GetJointPositions() ([]float64, error) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	angles := make([]float64, len(c.servoIDs))
-	for i, id := range c.servoIDs {
-		position, err := c.readCurrentPosition(id)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read position from servo %d: %w", id, err)
-		}
-		angles[i] = c.servoPositionToRadiansCalibrated(position, i)
-	}
-
-	return angles, nil
-}
-
-// Stop stops all servo movement by setting goal velocity to 0
-func (c *SoArmController) Stop() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	for _, id := range c.servoIDs {
-		if err := c.writeRegister(id, ADDR_GOAL_VELOCITY, 2, []int{0, 0}); err != nil {
-			return fmt.Errorf("failed to stop servo %d: %w", id, err)
-		}
-	}
-	return nil
-}
-
-// Close closes the serial connection
-func (c *SoArmController) Close() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if c.port != nil {
-		c.logger.Info("Closing SO-ARM controller")
-		return c.port.Close()
-	}
-	return nil
-}
-
-// Helper methods
-
-// radiansToServoPositionCalibrated converts radians to servo position using calibration
-func (c *SoArmController) radiansToServoPositionCalibrated(radians float64, jointIndex int) int {
-	// Get calibration for this joint
-	calibrations := []SO101JointCalibration{
-		c.calibration.ShoulderPan,
-		c.calibration.ShoulderLift,
-		c.calibration.ElbowFlex,
-		c.calibration.WristFlex,
-		c.calibration.WristRoll,
-	}
-
-	if jointIndex >= len(calibrations) {
-		// Fall back to uncalibrated conversion
-		return c.radiansToServoPosition(radians)
-	}
-
-	cal := calibrations[jointIndex]
-
-	// Convert radians to normalized range (-1 to 1)
-	// Assuming ±π radians maps to full joint range
-	normalizedPos := radians / math.Pi
-
-	// Clamp to reasonable range
-	if normalizedPos > 1.0 {
-		normalizedPos = 1.0
-	} else if normalizedPos < -1.0 {
-		normalizedPos = -1.0
-	}
-
-	// Map to calibrated servo range
-	center := (cal.RangeMin + cal.RangeMax) / 2
-	halfRange := (cal.RangeMax - cal.RangeMin) / 2
-
-	position := center + int(normalizedPos*float64(halfRange))
-
-	// Apply homing offset
-	position += cal.HomingOffset
-
-	// Clamp to safe range
-	if position < cal.RangeMin {
-		c.logger.Warnf("Joint %d position %d below min %d, clamping", jointIndex, position, cal.RangeMin)
-		position = cal.RangeMin
-	} else if position > cal.RangeMax {
-		c.logger.Warnf("Joint %d position %d above max %d, clamping", jointIndex, position, cal.RangeMax)
-		position = cal.RangeMax
-	}
-
-	c.logger.Debugf("Joint %d: %.3f rad -> position %d (range: %d-%d, offset: %d)",
-		jointIndex, radians, position, cal.RangeMin, cal.RangeMax, cal.HomingOffset)
-
-	return position
-}
-
-// servoPositionToRadiansCalibrated converts servo position to radians using calibration
-func (c *SoArmController) servoPositionToRadiansCalibrated(position int, jointIndex int) float64 {
-	// Get calibration for this joint
-	calibrations := []SO101JointCalibration{
-		c.calibration.ShoulderPan,
-		c.calibration.ShoulderLift,
-		c.calibration.ElbowFlex,
-		c.calibration.WristFlex,
-		c.calibration.WristRoll,
-	}
-
-	if jointIndex >= len(calibrations) {
-		// Fall back to uncalibrated conversion
-		return c.servoPositionToRadians(position)
-	}
-
-	cal := calibrations[jointIndex]
-
-	// Remove homing offset
-	adjustedPos := position - cal.HomingOffset
-
-	// Convert from servo range to normalized range (-1 to 1)
-	center := (cal.RangeMin + cal.RangeMax) / 2
-	halfRange := (cal.RangeMax - cal.RangeMin) / 2
-
-	normalizedPos := float64(adjustedPos-center) / float64(halfRange)
-
-	// Convert to radians (±π range)
-	return normalizedPos * math.Pi
-}
-
-// radiansToServoPosition converts radians to servo position (0-65535 range)
-func (c *SoArmController) radiansToServoPosition(radians float64) int {
-	// Convert radians to degrees
-	degrees := radians * 180.0 / math.Pi
-
-	// Map -180° to +180° to range 0-65535, center at 32768
-	position := int(SERVO_CENTER_POSITION + (degrees * float64(SERVO_MAX_POSITION) / 360.0))
-
-	// Clamp to valid range
-	if position < SERVO_MIN_POSITION {
-		position = SERVO_MIN_POSITION
-	} else if position > SERVO_MAX_POSITION {
-		position = SERVO_MAX_POSITION
-	}
-
-	return position
-}
-
-// servoPositionToRadians converts servo position to radians
-func (c *SoArmController) servoPositionToRadians(position int) float64 {
-	// Convert from 16-bit range back to degrees, then radians
-	degrees := (float64(position) - float64(SERVO_CENTER_POSITION)) * 360.0 / float64(SERVO_MAX_POSITION)
-	return degrees * math.Pi / 180.0
-}
-
-// syncWritePositions moves multiple servos simultaneously using sync write
-func (c *SoArmController) syncWritePositions(positions []int) error {
+// syncWritePositionsRobust with improved error handling
+func (c *SoArmController) syncWritePositionsRobust(positions []int) error {
 	if len(positions) != len(c.servoIDs) {
 		return fmt.Errorf("position count mismatch: expected %d, got %d", len(c.servoIDs), len(positions))
 	}
+
+	// Clear buffers before sync write
+	c.clearSerialBuffers()
+	c.enforceCommandGap()
 
 	// Build sync write packet for Goal_Position (address 42, 2 bytes per servo)
 	dataLen := 2                                // 2 bytes per position
@@ -424,55 +415,186 @@ func (c *SoArmController) syncWritePositions(positions []int) error {
 	checksum := c.calculateChecksum(packet[2:]) // Skip headers
 	packet = append(packet, checksum)
 
-	return c.writePacket(packet)
+	return c.writePacketVerified(packet)
 }
 
-// readCurrentPosition reads the current position of a servo
-func (c *SoArmController) readCurrentPosition(servoID int) (int, error) {
-	// Build read packet: [0xFF][0xFF][ID][Length][Instruction][Address][Data_Length][Checksum]
-	packet := []byte{
-		PKT_HEADER1, PKT_HEADER2,
-		byte(servoID),
-		0x04,                  // Length
-		INST_READ,             // Read instruction
-		ADDR_PRESENT_POSITION, // Address
-		0x02,                  // Read 2 bytes
+// Rest of the methods remain the same but with improved error handling...
+// (keeping the original methods but adding the serialMu.Lock() pattern)
+
+func (c *SoArmController) SetTorqueEnable(enable bool) error {
+	c.serialMu.Lock()
+	defer c.serialMu.Unlock()
+
+	value := 0
+	if enable {
+		value = 1
 	}
 
-	checksum := c.calculateChecksum(packet[2:])
+	for _, id := range c.servoIDs {
+		c.enforceCommandGap()
+		if err := c.writeRegister(id, ADDR_TORQUE_ENABLE, 1, []int{value}); err != nil {
+			return fmt.Errorf("failed to set torque enable for servo %d: %w", id, err)
+		}
+	}
+
+	status := "disabled"
+	if enable {
+		status = "enabled"
+	}
+	c.logger.Infof("Torque %s for all servos", status)
+	return nil
+}
+
+func (c *SoArmController) Ping() error {
+	c.serialMu.Lock()
+	defer c.serialMu.Unlock()
+
+	for _, id := range c.servoIDs {
+		c.enforceCommandGap()
+		if err := c.sendPing(id); err != nil {
+			return fmt.Errorf("ping failed for servo %d: %w", id, err)
+		}
+	}
+	return nil
+}
+
+func (c *SoArmController) Stop() error {
+	c.serialMu.Lock()
+	defer c.serialMu.Unlock()
+
+	for _, id := range c.servoIDs {
+		c.enforceCommandGap()
+		if err := c.writeRegister(id, ADDR_GOAL_VELOCITY, 2, []int{0, 0}); err != nil {
+			return fmt.Errorf("failed to stop servo %d: %w", id, err)
+		}
+	}
+	return nil
+}
+
+func (c *SoArmController) Close() error {
+	c.serialMu.Lock()
+	defer c.serialMu.Unlock()
+
+	if c.port != nil {
+		c.logger.Info("Closing SO-ARM controller")
+		return c.port.Close()
+	}
+	return nil
+}
+
+// Helper methods (keeping original implementations but adding proper error handling)
+
+func (c *SoArmController) sendPing(servoID int) error {
+	packet := []byte{PKT_HEADER1, PKT_HEADER2, byte(servoID), 0x02, INST_PING}
+	checksum := byte(servoID) + 0x02 + INST_PING
+	checksum = ^checksum
 	packet = append(packet, checksum)
 
-	if err := c.writePacket(packet); err != nil {
-		return 0, err
+	if err := c.writePacketVerified(packet); err != nil {
+		return err
 	}
 
-	// Read response: [0xFF][0xFF][ID][Length][Error][Data1][Data2][Checksum]
-	response, err := c.readResponse(8) // Expected response length
+	response, err := c.readResponseRobust(6)
 	if err != nil {
-		return 0, err
+		return err
 	}
 
-	if len(response) < 8 || response[PKT_ID] != byte(servoID) {
-		return 0, fmt.Errorf("invalid position response from servo %d", servoID)
+	if len(response) < 6 || response[PKT_ID] != byte(servoID) {
+		return fmt.Errorf("invalid ping response from servo %d: got %X", servoID, response)
 	}
 
-	// Extract position from response (little endian)
-	position := int(response[5]) | (int(response[6]) << 8)
-	return position, nil
+	return nil
 }
 
-// writeRegister writes data to a servo register
+// Keep all the calibration and utility methods from the original implementation
+// (radiansToServoPositionCalibrated, servoPositionToRadiansCalibrated, etc.)
+// but they don't need the serial mutex since they're just calculations
+
+func (c *SoArmController) radiansToServoPositionCalibrated(radians float64, jointIndex int) int {
+	// Same implementation as before
+	calibrations := []SO101JointCalibration{
+		c.calibration.ShoulderPan,
+		c.calibration.ShoulderLift,
+		c.calibration.ElbowFlex,
+		c.calibration.WristFlex,
+		c.calibration.WristRoll,
+	}
+
+	if jointIndex >= len(calibrations) {
+		return c.radiansToServoPosition(radians)
+	}
+
+	cal := calibrations[jointIndex]
+	normalizedPos := radians / math.Pi
+	if normalizedPos > 1.0 {
+		normalizedPos = 1.0
+	} else if normalizedPos < -1.0 {
+		normalizedPos = -1.0
+	}
+
+	center := (cal.RangeMin + cal.RangeMax) / 2
+	halfRange := (cal.RangeMax - cal.RangeMin) / 2
+	position := center + int(normalizedPos*float64(halfRange))
+	position += cal.HomingOffset
+
+	if position < cal.RangeMin {
+		c.logger.Warnf("Joint %d position %d below min %d, clamping", jointIndex, position, cal.RangeMin)
+		position = cal.RangeMin
+	} else if position > cal.RangeMax {
+		c.logger.Warnf("Joint %d position %d above max %d, clamping", jointIndex, position, cal.RangeMax)
+		position = cal.RangeMax
+	}
+
+	return position
+}
+
+func (c *SoArmController) servoPositionToRadiansCalibrated(position int, jointIndex int) float64 {
+	// Same implementation as before
+	calibrations := []SO101JointCalibration{
+		c.calibration.ShoulderPan,
+		c.calibration.ShoulderLift,
+		c.calibration.ElbowFlex,
+		c.calibration.WristFlex,
+		c.calibration.WristRoll,
+	}
+
+	if jointIndex >= len(calibrations) {
+		return c.servoPositionToRadians(position)
+	}
+
+	cal := calibrations[jointIndex]
+	adjustedPos := position - cal.HomingOffset
+	center := (cal.RangeMin + cal.RangeMax) / 2
+	halfRange := (cal.RangeMax - cal.RangeMin) / 2
+	normalizedPos := float64(adjustedPos-center) / float64(halfRange)
+	return normalizedPos * math.Pi
+}
+
+func (c *SoArmController) radiansToServoPosition(radians float64) int {
+	degrees := radians * 180.0 / math.Pi
+	position := int(SERVO_CENTER_POSITION + (degrees * float64(SERVO_MAX_POSITION) / 360.0))
+	if position < SERVO_MIN_POSITION {
+		position = SERVO_MIN_POSITION
+	} else if position > SERVO_MAX_POSITION {
+		position = SERVO_MAX_POSITION
+	}
+	return position
+}
+
+func (c *SoArmController) servoPositionToRadians(position int) float64 {
+	degrees := (float64(position) - float64(SERVO_CENTER_POSITION)) * 360.0 / float64(SERVO_MAX_POSITION)
+	return degrees * math.Pi / 180.0
+}
+
 func (c *SoArmController) writeRegister(servoID int, address byte, length int, data []int) error {
-	// Build write packet
 	packet := []byte{
 		PKT_HEADER1, PKT_HEADER2,
 		byte(servoID),
-		byte(3 + length), // Length: instruction + address + data + checksum
-		INST_WRITE,       // Write instruction
-		address,          // Register address
+		byte(3 + length),
+		INST_WRITE,
+		address,
 	}
 
-	// Add data bytes
 	for _, value := range data {
 		packet = append(packet, byte(value&0xFF))
 		if length > 1 {
@@ -483,109 +605,22 @@ func (c *SoArmController) writeRegister(servoID int, address byte, length int, d
 	checksum := c.calculateChecksum(packet[2:])
 	packet = append(packet, checksum)
 
-	return c.writePacket(packet)
+	return c.writePacketVerified(packet)
 }
 
-// calculateChecksum calculates Feetech protocol checksum
 func (c *SoArmController) calculateChecksum(packet []byte) byte {
 	checksum := byte(0)
 	for _, b := range packet {
 		checksum += b
 	}
-	return ^checksum // Bitwise NOT
+	return ^checksum
 }
 
-// readResponseLenient reads response with more flexible error handling
-func (c *SoArmController) readResponseLenient() ([]byte, error) {
-	// Set read timeout
-	if err := c.port.SetReadTimeout(200 * time.Millisecond); err != nil {
-		return nil, fmt.Errorf("failed to set read timeout: %w", err)
-	}
-
-	// Read up to 20 bytes to capture any response
-	buffer := make([]byte, 20)
-	n, err := c.port.Read(buffer)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
-	}
-
-	if n == 0 {
-		return nil, errors.New("no response received")
-	}
-
-	response := buffer[:n]
-	c.logger.Debugf("Raw response: %X", response)
-
-	// Just return the response without strict validation for debugging
-	return response, nil
-}
-
-// writePacket writes a packet to the serial port
-func (c *SoArmController) writePacket(packet []byte) error {
-	// Clear input buffer
-	c.port.ResetInputBuffer()
-
-	n, err := c.port.Write(packet)
-	if err != nil {
-		return fmt.Errorf("failed to write packet: %w", err)
-	}
-	if n != len(packet) {
-		return fmt.Errorf("incomplete packet write: wrote %d of %d bytes", n, len(packet))
-	}
-
-	return nil
-}
-
-// readResponse reads a response packet from the serial port
-func (c *SoArmController) readResponse(expectedLen int) ([]byte, error) {
-	// Set read timeout
-	if err := c.port.SetReadTimeout(c.timeout); err != nil {
-		return nil, fmt.Errorf("failed to set read timeout: %w", err)
-	}
-
-	buffer := make([]byte, expectedLen)
-	totalRead := 0
-
-	for totalRead < expectedLen {
-		n, err := c.port.Read(buffer[totalRead:])
-		if err != nil {
-			return nil, fmt.Errorf("failed to read response: %w", err)
-		}
-		totalRead += n
-
-		// Check for timeout or partial read
-		if n == 0 {
-			break
-		}
-	}
-
-	response := buffer[:totalRead]
-
-	// Verify packet structure
-	if len(response) < 4 {
-		return nil, errors.New("response too short")
-	}
-
-	if response[0] != PKT_HEADER1 || response[1] != PKT_HEADER2 {
-		return nil, errors.New("invalid packet header")
-	}
-
-	// Verify checksum
-	if !c.verifyChecksum(response) {
-		return nil, errors.New("checksum verification failed")
-	}
-
-	return response, nil
-}
-
-// verifyChecksum verifies the packet checksum
 func (c *SoArmController) verifyChecksum(packet []byte) bool {
 	if len(packet) < 4 {
 		return false
 	}
-
-	// Calculate expected checksum (exclude headers and final checksum byte)
 	checksum := c.calculateChecksum(packet[2 : len(packet)-1])
-
 	return checksum == packet[len(packet)-1]
 }
+
