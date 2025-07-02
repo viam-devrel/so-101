@@ -95,7 +95,7 @@ const (
 	SERVO_MAX_POSITION    = 4095
 )
 
-// Improved controller with better concurrent access handling
+// Improved controller with better concurrent access handling and calibration support
 type SoArmController struct {
 	port        serial.Port
 	servoIDs    []int
@@ -110,8 +110,8 @@ type SoArmController struct {
 	minCommandGap   time.Duration // Minimum gap between commands
 }
 
-// Enhanced controller creation with better error handling
-func NewSoArmController(portName string, baudrate int, servoIDs []int, logger logging.Logger) (*SoArmController, error) {
+// Enhanced controller creation with calibration support
+func NewSoArmController(portName string, baudrate int, servoIDs []int, calibration SO101Calibration, logger logging.Logger) (*SoArmController, error) {
 	if logger == nil {
 		return nil, errors.New("logger cannot be nil")
 	}
@@ -134,7 +134,7 @@ func NewSoArmController(portName string, baudrate int, servoIDs []int, logger lo
 		servoIDs:        servoIDs,
 		logger:          logger,
 		timeout:         time.Second * 1,
-		calibration:     DefaultSO101Calibration,
+		calibration:     calibration,
 		minCommandGap:   time.Millisecond * 5, // Minimum 5ms between commands
 		lastCommandTime: time.Now(),
 	}
@@ -144,6 +144,28 @@ func NewSoArmController(portName string, baudrate int, servoIDs []int, logger lo
 
 	logger.Infof("SO-ARM controller initialized on %s at %d baud with servo IDs: %v", portName, baudrate, servoIDs)
 	return controller, nil
+}
+
+// SetCalibration updates the controller's calibration and validates it
+func (c *SoArmController) SetCalibration(calibration SO101Calibration) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Validate the new calibration
+	if err := ValidateCalibration(calibration, c.logger); err != nil {
+		return fmt.Errorf("invalid calibration: %w", err)
+	}
+
+	c.calibration = calibration
+	c.logger.Info("Controller calibration updated successfully")
+	return nil
+}
+
+// GetCalibration returns a copy of the current calibration
+func (c *SoArmController) GetCalibration() SO101Calibration {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.calibration
 }
 
 // clearSerialBuffers clears both input and output buffers
@@ -506,12 +528,9 @@ func (c *SoArmController) sendPing(servoID int) error {
 	return nil
 }
 
-// Keep all the calibration and utility methods from the original implementation
-// (radiansToServoPositionCalibrated, servoPositionToRadiansCalibrated, etc.)
-// but they don't need the serial mutex since they're just calculations
+// Updated calibration methods to use the configurable calibration
 
 func (c *SoArmController) radiansToServoPositionCalibrated(radians float64, jointIndex int) int {
-	// Same implementation as before
 	calibrations := []SO101JointCalibration{
 		c.calibration.ShoulderPan,
 		c.calibration.ShoulderLift,
@@ -525,18 +544,30 @@ func (c *SoArmController) radiansToServoPositionCalibrated(radians float64, join
 	}
 
 	cal := calibrations[jointIndex]
-	normalizedPos := radians / math.Pi
+
+	// Apply drive mode (invert direction if needed)
+	adjustedRadians := radians
+	if cal.DriveMode != 0 {
+		adjustedRadians = -radians
+	}
+
+	// Convert radians to normalized position (-1 to 1)
+	normalizedPos := adjustedRadians / math.Pi
 	if normalizedPos > 1.0 {
 		normalizedPos = 1.0
 	} else if normalizedPos < -1.0 {
 		normalizedPos = -1.0
 	}
 
+	// Map to servo range
 	center := (cal.RangeMin + cal.RangeMax) / 2
 	halfRange := (cal.RangeMax - cal.RangeMin) / 2
 	position := center + int(normalizedPos*float64(halfRange))
+
+	// Apply homing offset
 	position += cal.HomingOffset
 
+	// Clamp to valid range
 	if position < cal.RangeMin {
 		c.logger.Warnf("Joint %d position %d below min %d, clamping", jointIndex, position, cal.RangeMin)
 		position = cal.RangeMin
@@ -549,7 +580,6 @@ func (c *SoArmController) radiansToServoPositionCalibrated(radians float64, join
 }
 
 func (c *SoArmController) servoPositionToRadiansCalibrated(position int, jointIndex int) float64 {
-	// Same implementation as before
 	calibrations := []SO101JointCalibration{
 		c.calibration.ShoulderPan,
 		c.calibration.ShoulderLift,
@@ -563,11 +593,24 @@ func (c *SoArmController) servoPositionToRadiansCalibrated(position int, jointIn
 	}
 
 	cal := calibrations[jointIndex]
+
+	// Remove homing offset
 	adjustedPos := position - cal.HomingOffset
+
+	// Map from servo range to normalized position
 	center := (cal.RangeMin + cal.RangeMax) / 2
 	halfRange := (cal.RangeMax - cal.RangeMin) / 2
 	normalizedPos := float64(adjustedPos-center) / float64(halfRange)
-	return normalizedPos * math.Pi
+
+	// Convert to radians
+	radians := normalizedPos * math.Pi
+
+	// Apply drive mode (invert direction if needed)
+	if cal.DriveMode != 0 {
+		radians = -radians
+	}
+
+	return radians
 }
 
 func (c *SoArmController) radiansToServoPosition(radians float64) int {
@@ -623,4 +666,3 @@ func (c *SoArmController) verifyChecksum(packet []byte) bool {
 	checksum := c.calculateChecksum(packet[2 : len(packet)-1])
 	return checksum == packet[len(packet)-1]
 }
-

@@ -5,12 +5,10 @@ import (
 	"strings"
 	"time"
 
-	soarm "arm"
-
-	"go.viam.com/rdk/components/arm"
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/referenceframe"
 	"go.viam.com/rdk/resource"
+	soarm "so_arm"
 )
 
 func main() {
@@ -26,20 +24,14 @@ func realMain() error {
 	deps := resource.Dependencies{}
 
 	// Configuration for SO-101 Leader arm with gentle settings
-	cfg := &soarm.SoArm101Config{
-		Port:                "/dev/tty.usbmodem58CD1767051", // Leader arm port
-		Baudrate:            1000000,                        // Standard SO-ARM baudrate
-		Timeout:             10 * time.Second,               // Longer timeout for safety
-		DefaultSpeed:        15,                             // Very slow default
-		DefaultAcceleration: 1,                              // Very gentle acceleration
-		ServoIDs:            []int{1, 2, 3, 4, 5},           // Default servo IDs
-		Mode:                "follower",                     // Set as leader
-		ScaleFactor:         1.0,
-		SyncRate:            5, // Very slow sync rate for ultra-gentle operation
+	cfg := &soarm.SO101ArmConfig{
+		Port:     "/dev/tty.usbmodem58CD1767051", // Leader arm port
+		Baudrate: 1000000,                        // Standard SO-ARM baudrate
+		Timeout:  10 * time.Second,               // Longer timeout for safety
 	}
 
 	// Create SO-101 Leader arm
-	leaderArm, err := soarm.NewSo101(ctx, deps, resource.NewName(arm.API, "soarm-leader"), cfg, logger)
+	leaderArm, err := soarm.NewSO101(ctx, deps, cfg, logger)
 	if err != nil {
 		return err
 	}
@@ -175,31 +167,6 @@ func realMain() error {
 		logger.Warnf("Could not read final joint positions (this is normal with servo communication issues): %v", err)
 	} else {
 		logger.Infof("Final joint positions: %+v", finalPositions)
-	}
-
-	// Optional: If you want to test with a follower arm as well
-	if false { // Set to true when you want to test follower (requires separate controller implementation)
-		followerCfg := &soarm.SoArm101Config{
-			Port:                "/dev/tty.usbmodem5A4B0464471", // Follower arm port
-			Baudrate:            1000000,
-			Timeout:             10 * time.Second,
-			DefaultSpeed:        15, // Gentle
-			DefaultAcceleration: 1,  // Gentle
-			ServoIDs:            []int{1, 2, 3, 4, 5},
-			Mode:                "follower",
-			LeaderArm:           "soarm-leader", // Reference to leader arm
-			MirrorMode:          false,          // Set to true for mirroring
-			ScaleFactor:         1.0,
-			SyncRate:            5,
-		}
-
-		followerArm, err := soarm.NewSo101(ctx, deps, resource.NewName(arm.API, "soarm-follower"), followerCfg, logger)
-		if err != nil {
-			logger.Errorf("Failed to create follower arm: %v", err)
-		} else {
-			defer followerArm.Close(ctx)
-			logger.Info("SO-101 Follower arm initialized successfully")
-		}
 	}
 
 	// === SAFE SHUTDOWN SEQUENCE ===

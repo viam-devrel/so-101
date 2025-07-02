@@ -25,7 +25,7 @@ var (
 	SO101Model = resource.NewModel("devrel", "so101", "arm")
 )
 
-//go:embed soarm_101.json
+//go:embed so101.json
 var so101ModelJson []byte
 
 // SO-101 joint limits (5 joints for arm, excluding gripper)
@@ -40,7 +40,7 @@ var so101JointLimits = [][2]float64{
 func init() {
 	resource.RegisterComponent(arm.API, SO101Model,
 		resource.Registration[arm.Arm, *SO101ArmConfig]{
-			Constructor: newSO101,
+			Constructor: NewSO101,
 		},
 	)
 }
@@ -57,6 +57,9 @@ type SO101ArmConfig struct {
 	// Motion configuration
 	SpeedDegsPerSec        float32 `json:"speed_degs_per_sec,omitempty"`
 	AccelerationDegsPerSec float32 `json:"acceleration_degs_per_sec_per_sec,omitempty"`
+
+	// Arm calibration file
+	CalibrationFile string `json:"calibration_file,omitempty"`
 }
 
 // Validate ensures all parts of the config are valid
@@ -102,10 +105,10 @@ func makeSO101ModelFrame() (referenceframe.Model, error) {
 		return nil, errors.Wrap(err, "failed to unmarshal json file")
 	}
 
-	return m.ParseConfig("so101_arm")
+	return m.ParseConfig("so101")
 }
 
-func newSO101(ctx context.Context, deps resource.Dependencies, rawConf resource.Config, logger logging.Logger) (arm.Arm, error) {
+func NewSO101(ctx context.Context, deps resource.Dependencies, rawConf resource.Config, logger logging.Logger) (arm.Arm, error) {
 	conf, err := resource.NativeConfig[*SO101ArmConfig](rawConf)
 	if err != nil {
 		return nil, err
@@ -152,14 +155,20 @@ func newSO101(ctx context.Context, deps resource.Dependencies, rawConf resource.
 
 	// Create controller configuration
 	controllerConfig := &SoArm101Config{
-		Port:     conf.Port,
-		Baudrate: conf.Baudrate,
-		Timeout:  conf.Timeout,
-		ServoIDs: []int{1, 2, 3, 4, 5}, // Only use first 5 servos for arm
-		Logger:   logger,
+		Port:            conf.Port,
+		Baudrate:        conf.Baudrate,
+		Timeout:         conf.Timeout,
+		CalibrationFile: conf.CalibrationFile,
+		Logger:          logger,
 	}
 
-	controller, err := GetSharedController(controllerConfig)
+	controllerConfig.Validate(conf.CalibrationFile)
+
+	// Load calibration from file or use defaults
+	calibration := controllerConfig.LoadCalibration(logger)
+	logger.Infof("Using calibration for SO-101 with shoulder_pan homing_offset: %d", calibration.ShoulderPan.HomingOffset)
+
+	controller, err := GetSharedControllerWithCalibration(controllerConfig, calibration)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get shared SO-ARM controller: %w", err)
 	}
@@ -382,7 +391,6 @@ func (s *so101) CurrentInputs(ctx context.Context) ([]referenceframe.Input, erro
 func (s *so101) GoToInputs(ctx context.Context, inputSteps ...[]referenceframe.Input) error {
 	return s.MoveThroughJointPositions(ctx, inputSteps, nil, nil)
 }
-
 func (s *so101) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
 	// Handle custom commands specific to SO-101
 	switch cmd["command"] {
@@ -450,6 +458,79 @@ func (s *so101) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[
 			result["all_positions"] = positions
 		}
 		return result, nil
+
+	case "reload_calibration":
+		// Reload calibration from the configured file
+		if s.cfg.CalibrationFile == "" {
+			return map[string]interface{}{
+				"success": false,
+				"error":   "No calibration file configured",
+			}, nil
+		}
+
+		// Load the new calibration
+		newCalibration, err := LoadCalibrationFromFile(s.cfg.CalibrationFile, s.logger)
+		if err != nil {
+			return map[string]interface{}{
+				"success": false,
+				"error":   fmt.Sprintf("Failed to load calibration: %v", err),
+			}, nil
+		}
+
+		// Update the controller with the new calibration
+		if err := s.controller.SetCalibration(newCalibration); err != nil {
+			return map[string]interface{}{
+				"success": false,
+				"error":   fmt.Sprintf("Failed to update calibration: %v", err),
+			}, nil
+		}
+
+		s.logger.Infof("Successfully reloaded calibration from %s", s.cfg.CalibrationFile)
+		return map[string]interface{}{
+			"success":          true,
+			"calibration_file": s.cfg.CalibrationFile,
+			"message":          "Calibration reloaded successfully",
+		}, nil
+
+	case "get_calibration":
+		// Return the current calibration
+		calibration := s.controller.GetCalibration()
+		return map[string]interface{}{
+			"success":     true,
+			"calibration": calibration,
+		}, nil
+
+	case "set_calibration":
+		// Allow setting calibration via command (useful for testing)
+		calibrationData, ok := cmd["calibration"]
+		if !ok {
+			return nil, fmt.Errorf("set_calibration command requires 'calibration' parameter")
+		}
+
+		// Convert the calibration data to JSON and back to ensure proper structure
+		calibrationBytes, err := json.Marshal(calibrationData)
+		if err != nil {
+			return nil, fmt.Errorf("invalid calibration data: %w", err)
+		}
+
+		var newCalibration SO101Calibration
+		if err := json.Unmarshal(calibrationBytes, &newCalibration); err != nil {
+			return nil, fmt.Errorf("failed to parse calibration data: %w", err)
+		}
+
+		// Update the controller with the new calibration
+		if err := s.controller.SetCalibration(newCalibration); err != nil {
+			return map[string]interface{}{
+				"success": false,
+				"error":   fmt.Sprintf("Failed to update calibration: %v", err),
+			}, nil
+		}
+
+		s.logger.Info("Successfully updated calibration via command")
+		return map[string]interface{}{
+			"success": true,
+			"message": "Calibration updated successfully",
+		}, nil
 
 	default:
 		// Check for speed and acceleration setting

@@ -7,11 +7,12 @@ import (
 )
 
 var (
-	globalController *SafeSoArmController
-	controllerMutex  sync.RWMutex
-	refCount         int64 // Changed to int64 for atomic operations
-	lastError        error
-	currentConfig    *SoArm101Config
+	globalController   *SafeSoArmController
+	controllerMutex    sync.RWMutex
+	refCount           int64 // Changed to int64 for atomic operations
+	lastError          error
+	currentConfig      *SoArm101Config
+	currentCalibration SO101Calibration
 )
 
 // SafeSoArmController wraps the low-level controller with thread-safe access
@@ -58,6 +59,29 @@ func (s *SafeSoArmController) Ping() error {
 	return s.SoArmController.Ping()
 }
 
+func (s *SafeSoArmController) SetCalibration(calibration SO101Calibration) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Update both the controller and the global calibration
+	if err := s.SoArmController.SetCalibration(calibration); err != nil {
+		return err
+	}
+
+	// Update the global calibration
+	controllerMutex.Lock()
+	currentCalibration = calibration
+	controllerMutex.Unlock()
+
+	return nil
+}
+
+func (s *SafeSoArmController) GetCalibration() SO101Calibration {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.SoArmController.GetCalibration()
+}
+
 // Compare configs for compatibility
 func configsEqual(a, b *SoArm101Config) bool {
 	if a == nil && b == nil {
@@ -71,8 +95,22 @@ func configsEqual(a, b *SoArm101Config) bool {
 		a.Timeout == b.Timeout
 }
 
-// Shared controller manager
+// Compare calibrations for equality
+func calibrationsEqual(a, b SO101Calibration) bool {
+	return a.ShoulderPan == b.ShoulderPan &&
+		a.ShoulderLift == b.ShoulderLift &&
+		a.ElbowFlex == b.ElbowFlex &&
+		a.WristFlex == b.WristFlex &&
+		a.WristRoll == b.WristRoll
+}
+
+// GetSharedController gets a shared controller using default calibration
 func GetSharedController(config *SoArm101Config) (*SafeSoArmController, error) {
+	return GetSharedControllerWithCalibration(config, DefaultSO101Calibration)
+}
+
+// GetSharedControllerWithCalibration gets a shared controller with specified calibration
+func GetSharedControllerWithCalibration(config *SoArm101Config, calibration SO101Calibration) (*SafeSoArmController, error) {
 	controllerMutex.Lock()
 	defer controllerMutex.Unlock()
 
@@ -86,11 +124,23 @@ func GetSharedController(config *SoArm101Config) (*SafeSoArmController, error) {
 		if !configsEqual(currentConfig, config) {
 			return nil, fmt.Errorf("conflict: existing controller uses different config (refCount: %d)", currentRefCount)
 		}
+
+		// Check if calibration is different - if so, update it
+		if !calibrationsEqual(currentCalibration, calibration) {
+			if config.Logger != nil {
+				config.Logger.Info("Updating controller calibration")
+			}
+			if err := globalController.SoArmController.SetCalibration(calibration); err != nil {
+				return nil, fmt.Errorf("failed to update controller calibration: %w", err)
+			}
+			currentCalibration = calibration
+		}
+
 		atomic.AddInt64(&refCount, 1)
 		return globalController, nil
 	}
 
-	controller, err := NewSoArmController(config.Port, config.Baudrate, config.ServoIDs, config.Logger)
+	controller, err := NewSoArmController(config.Port, config.Baudrate, config.ServoIDs, calibration, config.Logger)
 	if err != nil {
 		lastError = err
 		return nil, err
@@ -100,6 +150,7 @@ func GetSharedController(config *SoArm101Config) (*SafeSoArmController, error) {
 		SoArmController: controller,
 	}
 	currentConfig = config
+	currentCalibration = calibration
 	lastError = nil
 	atomic.StoreInt64(&refCount, 1)
 
@@ -117,6 +168,7 @@ func ReleaseSharedController() {
 		}
 		globalController = nil
 		currentConfig = nil
+		currentCalibration = SO101Calibration{} // Reset calibration
 		atomic.StoreInt64(&refCount, 0)
 		lastError = nil
 	}
@@ -131,13 +183,14 @@ func ForceCloseSharedController() error {
 		err = globalController.Close()
 		globalController = nil
 		currentConfig = nil
+		currentCalibration = SO101Calibration{} // Reset calibration
 		atomic.StoreInt64(&refCount, 0)
 		lastError = nil
 	}
 	return err
 }
 
-// Fixed function signature to avoid variable shadowing
+// Updated function signature to avoid variable shadowing
 func GetControllerStatus() (int64, bool, string) {
 	controllerMutex.RLock()
 	defer controllerMutex.RUnlock()
@@ -147,8 +200,20 @@ func GetControllerStatus() (int64, bool, string) {
 	configSummary := ""
 
 	if currentConfig != nil {
-		configSummary = fmt.Sprintf("Serial: %s@%d", currentConfig.Port, currentConfig.Baudrate)
+		calibrationInfo := "default"
+		if currentCalibration.ShoulderPan.HomingOffset != DefaultSO101Calibration.ShoulderPan.HomingOffset {
+			calibrationInfo = "custom"
+		}
+		configSummary = fmt.Sprintf("Serial: %s@%d, Calibration: %s",
+			currentConfig.Port, currentConfig.Baudrate, calibrationInfo)
 	}
 
 	return currentRefCount, hasController, configSummary
+}
+
+// GetCurrentCalibration returns the current calibration being used
+func GetCurrentCalibration() SO101Calibration {
+	controllerMutex.RLock()
+	defer controllerMutex.RUnlock()
+	return currentCalibration
 }
