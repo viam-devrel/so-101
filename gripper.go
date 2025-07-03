@@ -147,7 +147,7 @@ func newSO101Gripper(ctx context.Context, deps resource.Dependencies, conf resou
 	g.openPosition = gripperCalibration.RangeMax - 200 // Leave some margin
 
 	// Closed position: near the minimum of the range
-	g.closedPosition = gripperCalibration.RangeMin + 200 // Leave some margin
+	g.closedPosition = gripperCalibration.RangeMin
 
 	logger.Infof("SO-101 gripper initialized with servo ID %d, open=%d, closed=%d",
 		cfg.ServoID, g.openPosition, g.closedPosition)
