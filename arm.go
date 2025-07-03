@@ -117,24 +117,21 @@ func makeSO101ModelFrame() (referenceframe.Model, error) {
 	return m.ParseConfig("soarm_101")
 }
 
-// calculateJointLimits dynamically calculates joint limits from calibration data
 func (s *so101) calculateJointLimits() [][2]float64 {
 	limits := make([][2]float64, len(s.armServoIDs))
 
 	for i, servoID := range s.armServoIDs {
 		cal := s.controller.getCalibrationForServo(servoID)
 
-		// Convert calibration range to radians using the same logic as the controller
-		center := float64(cal.RangeMin+cal.RangeMax) / 2
-		halfRange := float64(cal.RangeMax-cal.RangeMin) / 2
+		// Calculate the actual physical range in radians
+		// Each servo unit represents 360°/4096 = 0.087890625°
+		mid := float64(cal.RangeMin+cal.RangeMax) / 2
 
-		// Calculate min limit (RangeMin -> radians)
-		minNormalized := (float64(cal.RangeMin) - center) / halfRange
-		minRadians := minNormalized * math.Pi
+		minDegrees := (float64(cal.RangeMin) - mid) * 360.0 / 4095.0
+		maxDegrees := (float64(cal.RangeMax) - mid) * 360.0 / 4095.0
 
-		// Calculate max limit (RangeMax -> radians)
-		maxNormalized := (float64(cal.RangeMax) - center) / halfRange
-		maxRadians := maxNormalized * math.Pi
+		minRadians := minDegrees * math.Pi / 180.0
+		maxRadians := maxDegrees * math.Pi / 180.0
 
 		limits[i] = [2]float64{minRadians, maxRadians}
 	}

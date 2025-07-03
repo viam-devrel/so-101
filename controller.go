@@ -299,33 +299,25 @@ func (c *SoArmController) getCalibrationForServo(servoID int) SO101JointCalibrat
 	}
 }
 
-// CORRECTED: radiansToServoPositionCalibrated - matches Python lerobot logic
 func (c *SoArmController) radiansToServoPositionCalibrated(radians float64, servoID int) int {
 	cal := c.getCalibrationForServo(servoID)
 
+	// Convert radians to degrees
+	degrees := radians * 180.0 / math.Pi
+
 	// Apply drive mode (invert direction if needed)
-	adjustedRadians := radians
 	if cal.DriveMode != 0 {
-		adjustedRadians = -radians
+		degrees = -degrees
 	}
 
-	// Convert radians to normalized position (-1 to 1)
-	// Using ±π as the full range (±180 degrees)
-	normalizedPos := adjustedRadians / math.Pi
-	if normalizedPos > 1.0 {
-		normalizedPos = 1.0
-	} else if normalizedPos < -1.0 {
-		normalizedPos = -1.0
-	}
+	// Calculate mid point of calibrated range
+	mid := float64(cal.RangeMin+cal.RangeMax) / 2
 
-	// Map to servo range using calibrated min/max
-	// IMPORTANT: These range values were recorded AFTER homing offset was written to motor firmware
-	// So they already account for the firmware-applied offset
-	center := float64(cal.RangeMin+cal.RangeMax) / 2
-	halfRange := float64(cal.RangeMax-cal.RangeMin) / 2
-	position := int(center + normalizedPos*halfRange)
+	// Convert degrees to servo position
+	// Full servo range (4096 positions) represents 360 degrees
+	position := int((degrees * 4095.0 / 360.0) + mid)
 
-	// Clamp to valid range
+	// Clamp to calibrated range
 	if position < cal.RangeMin {
 		c.logger.Warnf("Servo %d position %d below min %d, clamping", servoID, position, cal.RangeMin)
 		position = cal.RangeMin
@@ -337,24 +329,23 @@ func (c *SoArmController) radiansToServoPositionCalibrated(radians float64, serv
 	return position
 }
 
-// CORRECTED: servoPositionToRadiansCalibrated - matches Python lerobot logic
 func (c *SoArmController) servoPositionToRadiansCalibrated(position int, servoID int) float64 {
 	cal := c.getCalibrationForServo(servoID)
 
-	// The position value is already firmware-adjusted (homing offset applied by motor)
-	// Map from servo range to normalized position (-1 to 1)
-	center := float64(cal.RangeMin+cal.RangeMax) / 2
-	halfRange := float64(cal.RangeMax-cal.RangeMin) / 2
+	// Calculate mid point of calibrated range
+	mid := float64(cal.RangeMin+cal.RangeMax) / 2
 
-	normalizedPos := (float64(position) - center) / halfRange
-
-	// Convert to radians (±π range = ±180 degrees)
-	radians := normalizedPos * math.Pi
+	// Convert servo position to degrees
+	// Full servo range (4096 positions) represents 360 degrees
+	degrees := (float64(position) - mid) * 360.0 / 4095.0
 
 	// Apply drive mode (invert direction if needed)
 	if cal.DriveMode != 0 {
-		radians = -radians
+		degrees = -degrees
 	}
+
+	// Convert degrees to radians
+	radians := degrees * math.Pi / 180.0
 
 	return radians
 }
