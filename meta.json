@@ -1,6 +1,6 @@
 {
   "$schema": "https://dl.viam.dev/module.schema.json",
-  "module_id": "devrel:so-arm",
+  "module_id": "devrel:so101-arm",
   "visibility": "public",
   "url": "https://github.com/viam-devrel/so-101",
   "description": "Control LeRobot's SO-101 robot arm.",
@@ -9,13 +9,13 @@
       "api": "rdk:component:arm",
       "model": "devrel:so101:arm",
       "short_description": "Control the first 5 joints of the SO-101: base/pan, shoulder, elbow, wrist flex, and wrist roll",
-      "markdown_link": "README.md#model-devrelarmso-101"
+      "markdown_link": "README.md#model-devrelso101arm"
     },
     {
       "api": "rdk:component:gripper",
       "model": "devrel:so101:gripper",
-      "short_description": "Control the first 5 joints of the SO-101: base/pan, shoulder, elbow, wrist flex, and wrist roll",
-      "markdown_link": "README.md#model-devrelarmso-101"
+      "short_description": "Control the gripper joint of the SO-101 arm",
+      "markdown_link": "README.md#model-devrelso101gripper"
     }
   ],
   "applications": null,
@@ -31,6 +31,10 @@
       "windows/amd64",
       "linux/amd64",
       "linux/arm64"
+    ],
+    "darwin_deps": [
+      "nlopt-static",
+      "go"
     ]
   }
 }
