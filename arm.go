@@ -28,15 +28,6 @@ var (
 //go:embed so101.json
 var so101ModelJson []byte
 
-// SO-101 joint limits (5 joints for arm, excluding gripper)
-var so101JointLimits = [][2]float64{
-	{-math.Pi, math.Pi},               // Shoulder Pan: full rotation
-	{-math.Pi * 0.75, math.Pi * 0.75}, // Shoulder Lift: ±135°
-	{-math.Pi, math.Pi * 1.65},        // Elbow Flex: allow up to 297° (5.18 rad)
-	{-math.Pi, math.Pi * 1.3},         // Wrist Flex: allow up to 234° (4.08 rad)
-	{-math.Pi, math.Pi},               // Wrist Roll: full rotation
-}
-
 func init() {
 	resource.RegisterComponent(arm.API, SO101Model,
 		resource.Registration[arm.Arm, *SO101ArmConfig]{
@@ -95,11 +86,10 @@ type so101 struct {
 	opMgr      *operation.SingleOperationManager
 	controller *SafeSoArmController
 
-	mu          sync.RWMutex
-	moveLock    sync.Mutex
-	isMoving    atomic.Bool
-	model       referenceframe.Model
-	jointLimits [][2]float64
+	mu       sync.RWMutex
+	moveLock sync.Mutex
+	isMoving atomic.Bool
+	model    referenceframe.Model
 
 	// Arm-specific servo IDs (1-5)
 	armServoIDs []int
@@ -125,6 +115,31 @@ func makeSO101ModelFrame() (referenceframe.Model, error) {
 	}
 
 	return m.ParseConfig("so101")
+}
+
+// calculateJointLimits dynamically calculates joint limits from calibration data
+func (s *so101) calculateJointLimits() [][2]float64 {
+	limits := make([][2]float64, len(s.armServoIDs))
+
+	for i, servoID := range s.armServoIDs {
+		cal := s.controller.getCalibrationForServo(servoID)
+
+		// Convert calibration range to radians using the same logic as the controller
+		center := float64(cal.RangeMin+cal.RangeMax) / 2
+		halfRange := float64(cal.RangeMax-cal.RangeMin) / 2
+
+		// Calculate min limit (RangeMin -> radians)
+		minNormalized := (float64(cal.RangeMin) - center) / halfRange
+		minRadians := minNormalized * math.Pi
+
+		// Calculate max limit (RangeMax -> radians)
+		maxNormalized := (float64(cal.RangeMax) - center) / halfRange
+		maxRadians := maxNormalized * math.Pi
+
+		limits[i] = [2]float64{minRadians, maxRadians}
+	}
+
+	return limits
 }
 
 func NewSO101(ctx context.Context, deps resource.Dependencies, rawConf resource.Config, logger logging.Logger) (arm.Arm, error) {
@@ -212,8 +227,7 @@ func NewSO101(ctx context.Context, deps resource.Dependencies, rawConf resource.
 		logger:       logger,
 		controller:   controller,
 		model:        model,
-		jointLimits:  so101JointLimits, // Only first 5 joints
-		armServoIDs:  conf.ServoIDs,    // Store which servos this arm controls
+		armServoIDs:  conf.ServoIDs, // Store which servos this arm controls
 		defaultSpeed: defaultSpeed,
 		defaultAcc:   defaultAcc,
 		cancelCtx:    cancelCtx,
@@ -281,16 +295,13 @@ func (s *so101) MoveToJointPositions(ctx context.Context, positions []referencef
 		values[i] = input.Value
 	}
 
+	// Calculate joint limits dynamically from calibration
+	jointLimits := s.calculateJointLimits()
+
 	// Validate input ranges and clamp positions for the arm joints
 	clampedPositions := make([]float64, len(values))
 	for i, pos := range values {
-		// Use the joint index for limits (since armServoIDs might not be [1,2,3,4,5])
-		limitIndex := i
-		if limitIndex >= len(s.jointLimits) {
-			limitIndex = len(s.jointLimits) - 1
-		}
-
-		min, max := s.jointLimits[limitIndex][0], s.jointLimits[limitIndex][1]
+		min, max := jointLimits[i][0], jointLimits[i][1]
 
 		// Validate and clamp the position
 		if pos < min || pos > max {

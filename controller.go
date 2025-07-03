@@ -31,34 +31,35 @@ type SO101FullCalibration struct {
 }
 
 // Default calibration data for SO-101 (all 6 joints)
+// Note: These are placeholder values - actual calibration should be loaded from file
 var DefaultSO101FullCalibration = SO101FullCalibration{
 	ShoulderPan: SO101JointCalibration{
-		ID: 1, DriveMode: 0, HomingOffset: 2048,
-		RangeMin: 0, RangeMax: 4095,
+		ID: 1, DriveMode: 0, HomingOffset: 0,
+		RangeMin: 500, RangeMax: 3500,
 	},
 	ShoulderLift: SO101JointCalibration{
-		ID: 2, DriveMode: 0, HomingOffset: 2048,
-		RangeMin: 0, RangeMax: 4095,
+		ID: 2, DriveMode: 0, HomingOffset: 0,
+		RangeMin: 500, RangeMax: 3500,
 	},
 	ElbowFlex: SO101JointCalibration{
-		ID: 3, DriveMode: 0, HomingOffset: 2048,
-		RangeMin: 0, RangeMax: 4095,
+		ID: 3, DriveMode: 0, HomingOffset: 0,
+		RangeMin: 500, RangeMax: 3500,
 	},
 	WristFlex: SO101JointCalibration{
-		ID: 4, DriveMode: 0, HomingOffset: 2048,
-		RangeMin: 0, RangeMax: 4095,
+		ID: 4, DriveMode: 0, HomingOffset: 0,
+		RangeMin: 500, RangeMax: 3500,
 	},
 	WristRoll: SO101JointCalibration{
-		ID: 5, DriveMode: 0, HomingOffset: 2048,
-		RangeMin: 0, RangeMax: 4095,
+		ID: 5, DriveMode: 0, HomingOffset: 0,
+		RangeMin: 500, RangeMax: 3500,
 	},
 	Gripper: SO101JointCalibration{
 		ID: 6, DriveMode: 0, HomingOffset: 0,
-		RangeMin: 0, RangeMax: 4095,
+		RangeMin: 500, RangeMax: 3500,
 	},
 }
 
-// Feetech servo command constants (same as before)
+// Feetech servo command constants
 const (
 	PKT_HEADER1     = 0xFF
 	PKT_HEADER2     = 0xFF
@@ -292,13 +293,13 @@ func (c *SoArmController) getCalibrationForServo(servoID int) SO101JointCalibrat
 	default:
 		c.logger.Warnf("Unknown servo ID %d, using default calibration", servoID)
 		return SO101JointCalibration{
-			ID: servoID, DriveMode: 0, HomingOffset: 2048,
-			RangeMin: 0, RangeMax: 4095,
+			ID: servoID, DriveMode: 0, HomingOffset: 0,
+			RangeMin: 500, RangeMax: 3500,
 		}
 	}
 }
 
-// Updated calibration methods that use servo ID to look up the right calibration
+// CORRECTED: radiansToServoPositionCalibrated - matches Python lerobot logic
 func (c *SoArmController) radiansToServoPositionCalibrated(radians float64, servoID int) int {
 	cal := c.getCalibrationForServo(servoID)
 
@@ -309,6 +310,7 @@ func (c *SoArmController) radiansToServoPositionCalibrated(radians float64, serv
 	}
 
 	// Convert radians to normalized position (-1 to 1)
+	// Using ±π as the full range (±180 degrees)
 	normalizedPos := adjustedRadians / math.Pi
 	if normalizedPos > 1.0 {
 		normalizedPos = 1.0
@@ -316,13 +318,12 @@ func (c *SoArmController) radiansToServoPositionCalibrated(radians float64, serv
 		normalizedPos = -1.0
 	}
 
-	// Map to servo range
-	center := (cal.RangeMin + cal.RangeMax) / 2
-	halfRange := (cal.RangeMax - cal.RangeMin) / 2
-	position := center + int(normalizedPos*float64(halfRange))
-
-	// Apply homing offset
-	position += cal.HomingOffset
+	// Map to servo range using calibrated min/max
+	// IMPORTANT: These range values were recorded AFTER homing offset was written to motor firmware
+	// So they already account for the firmware-applied offset
+	center := float64(cal.RangeMin+cal.RangeMax) / 2
+	halfRange := float64(cal.RangeMax-cal.RangeMin) / 2
+	position := int(center + normalizedPos*halfRange)
 
 	// Clamp to valid range
 	if position < cal.RangeMin {
@@ -336,18 +337,18 @@ func (c *SoArmController) radiansToServoPositionCalibrated(radians float64, serv
 	return position
 }
 
+// CORRECTED: servoPositionToRadiansCalibrated - matches Python lerobot logic
 func (c *SoArmController) servoPositionToRadiansCalibrated(position int, servoID int) float64 {
 	cal := c.getCalibrationForServo(servoID)
 
-	// Remove homing offset
-	adjustedPos := position - cal.HomingOffset
+	// The position value is already firmware-adjusted (homing offset applied by motor)
+	// Map from servo range to normalized position (-1 to 1)
+	center := float64(cal.RangeMin+cal.RangeMax) / 2
+	halfRange := float64(cal.RangeMax-cal.RangeMin) / 2
 
-	// Map from servo range to normalized position
-	center := (cal.RangeMin + cal.RangeMax) / 2
-	halfRange := (cal.RangeMax - cal.RangeMin) / 2
-	normalizedPos := float64(adjustedPos-center) / float64(halfRange)
+	normalizedPos := (float64(position) - center) / halfRange
 
-	// Convert to radians
+	// Convert to radians (±π range = ±180 degrees)
 	radians := normalizedPos * math.Pi
 
 	// Apply drive mode (invert direction if needed)
@@ -393,8 +394,6 @@ func (c *SoArmController) syncWriteSpecificServos(servoIDs []int, positions []in
 }
 
 // Rest of the methods remain the same but use the full calibration structure
-// (keeping the existing serial communication methods unchanged)
-
 func (c *SoArmController) syncWritePositionsRobust(positions []int) error {
 	return c.syncWriteSpecificServos(c.servoIDs, positions)
 }
