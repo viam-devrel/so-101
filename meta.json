@@ -21,7 +21,7 @@
   "applications": null,
   "markdown_link": "README.md",
   "entrypoint": "bin/arm",
-  "first_run": "",
+  "first_run": "./first_run.sh",
   "build": {
     "build": "make module.tar.gz",
     "setup": "make setup",

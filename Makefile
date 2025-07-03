@@ -22,13 +22,13 @@ update:
 test:
 	go test ./...
 
-module.tar.gz: meta.json $(MODULE_BINARY)
+module.tar.gz: meta.json $(MODULE_BINARY) first_run.sh
 ifeq ($(VIAM_TARGET_OS), windows)
 	jq '.entrypoint = "./bin/arm.exe"' meta.json > temp.json && mv temp.json meta.json
 else
 	strip $(MODULE_BINARY)
 endif
-	tar czf $@ meta.json $(MODULE_BINARY)
+	tar czf $@ meta.json first_run.sh $(MODULE_BINARY)
 ifeq ($(VIAM_TARGET_OS), windows)
 	git checkout meta.json
 endif
