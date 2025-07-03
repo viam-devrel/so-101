@@ -63,26 +63,35 @@ func (cfg *SoArm101Config) Validate(path string) ([]string, []string, error) {
 }
 
 // LoadCalibration loads calibration from file or returns default calibration
-func (cfg *SoArm101Config) LoadCalibration(logger logging.Logger) SO101Calibration {
+func (cfg *SoArm101Config) LoadCalibration(logger logging.Logger) SO101FullCalibration {
 	if cfg.CalibrationFile == "" {
 		if logger != nil {
 			logger.Debug("No calibration file specified, using default calibration")
 		}
-		return DefaultSO101Calibration
+		return DefaultSO101FullCalibration
 	}
 
-	calibration, err := LoadCalibrationFromFile(cfg.CalibrationFile, logger)
+	calibration, err := LoadFullCalibrationFromFile(cfg.CalibrationFile, logger)
 	if err != nil {
 		if logger != nil {
 			logger.Warnf("Failed to load calibration from %s: %v, using default calibration", cfg.CalibrationFile, err)
 		}
-		return DefaultSO101Calibration
+		return DefaultSO101FullCalibration
 	}
 
 	if logger != nil {
 		logger.Infof("Successfully loaded calibration from %s", cfg.CalibrationFile)
 	}
 	return calibration
+}
+
+// SO101Calibration holds calibration data for arm joints (backwards compatibility)
+type SO101Calibration struct {
+	ShoulderPan  SO101JointCalibration `json:"shoulder_pan"`
+	ShoulderLift SO101JointCalibration `json:"shoulder_lift"`
+	ElbowFlex    SO101JointCalibration `json:"elbow_flex"`
+	WristFlex    SO101JointCalibration `json:"wrist_flex"`
+	WristRoll    SO101JointCalibration `json:"wrist_roll"`
 }
 
 // CalibrationFileFormat represents the JSON structure for calibration files
@@ -95,39 +104,40 @@ type CalibrationFileFormat struct {
 	Gripper      SO101JointCalibration `json:"gripper"`
 }
 
-// LoadCalibrationFromFile loads and validates calibration from a JSON file
-func LoadCalibrationFromFile(filePath string, logger logging.Logger) (SO101Calibration, error) {
+// LoadFullCalibrationFromFile loads and validates full calibration from a JSON file
+func LoadFullCalibrationFromFile(filePath string, logger logging.Logger) (SO101FullCalibration, error) {
 	// Read file
 	data, err := os.ReadFile(filePath)
 	if err != nil {
-		return SO101Calibration{}, fmt.Errorf("failed to read calibration file: %w", err)
+		return SO101FullCalibration{}, fmt.Errorf("failed to read calibration file: %w", err)
 	}
 
 	// Parse JSON
 	var fileFormat CalibrationFileFormat
 	if err := json.Unmarshal(data, &fileFormat); err != nil {
-		return SO101Calibration{}, fmt.Errorf("failed to parse calibration JSON: %w", err)
+		return SO101FullCalibration{}, fmt.Errorf("failed to parse calibration JSON: %w", err)
 	}
 
-	// Convert to internal format (excluding gripper since arm only has 5 joints)
-	calibration := SO101Calibration{
+	// Convert to internal format
+	calibration := SO101FullCalibration{
 		ShoulderPan:  fileFormat.ShoulderPan,
 		ShoulderLift: fileFormat.ShoulderLift,
 		ElbowFlex:    fileFormat.ElbowFlex,
 		WristFlex:    fileFormat.WristFlex,
 		WristRoll:    fileFormat.WristRoll,
+		Gripper:      fileFormat.Gripper,
 	}
 
 	// Validate calibration
-	if err := ValidateCalibration(calibration, logger); err != nil {
-		return SO101Calibration{}, fmt.Errorf("calibration validation failed: %w", err)
+	if err := ValidateFullCalibration(calibration, logger); err != nil {
+		return SO101FullCalibration{}, fmt.Errorf("calibration validation failed: %w", err)
 	}
 
 	return calibration, nil
 }
 
-// ValidateCalibration validates that calibration values are reasonable
-func ValidateCalibration(cal SO101Calibration, logger logging.Logger) error {
+// ValidateFullCalibration validates that all calibration values are reasonable
+func ValidateFullCalibration(cal SO101FullCalibration, logger logging.Logger) error {
 	joints := []struct {
 		name   string
 		config SO101JointCalibration
@@ -137,6 +147,7 @@ func ValidateCalibration(cal SO101Calibration, logger logging.Logger) error {
 		{"elbow_flex", cal.ElbowFlex},
 		{"wrist_flex", cal.WristFlex},
 		{"wrist_roll", cal.WristRoll},
+		{"gripper", cal.Gripper},
 	}
 
 	for _, joint := range joints {
@@ -146,7 +157,7 @@ func ValidateCalibration(cal SO101Calibration, logger logging.Logger) error {
 	}
 
 	if logger != nil {
-		logger.Debug("Calibration validation passed")
+		logger.Debug("Full calibration validation passed")
 	}
 
 	return nil
@@ -175,11 +186,17 @@ func validateJointCalibration(jointName string, cal SO101JointCalibration) error
 			jointName, cal.RangeMin, cal.RangeMax)
 	}
 
-	// Validate range size (should be reasonable, at least 500 steps for meaningful movement)
+	// For gripper, allow smaller range as it might have limited motion
+	minRangeSize := 500
+	if jointName == "gripper" {
+		minRangeSize = 200 // Grippers often have smaller ranges
+	}
+
+	// Validate range size
 	rangeSize := cal.RangeMax - cal.RangeMin
-	if rangeSize < 500 {
-		return fmt.Errorf("joint %s: range size %d is too small (< 500), check range_min/range_max values",
-			jointName, rangeSize)
+	if rangeSize < minRangeSize {
+		return fmt.Errorf("joint %s: range size %d is too small (< %d), check range_min/range_max values",
+			jointName, rangeSize, minRangeSize)
 	}
 
 	// Validate homing offset is reasonable (shouldn't be extremely large)

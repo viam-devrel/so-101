@@ -51,6 +51,9 @@ type SO101ArmConfig struct {
 	Port     string `json:"port,omitempty"`
 	Baudrate int    `json:"baudrate,omitempty"`
 
+	// Servo configuration - arm uses servos 1-5
+	ServoIDs []int `json:"servo_ids,omitempty"`
+
 	// Common configuration
 	Timeout time.Duration `json:"timeout,omitempty"`
 
@@ -67,6 +70,19 @@ func (cfg *SO101ArmConfig) Validate(path string) ([]string, []string, error) {
 	if cfg.Port == "" {
 		return nil, nil, fmt.Errorf("must specify port for serial communication")
 	}
+
+	// Default to arm servos (1-5) if not specified
+	if len(cfg.ServoIDs) == 0 {
+		cfg.ServoIDs = []int{1, 2, 3, 4, 5}
+	}
+
+	// Validate that only arm servos are specified
+	for _, id := range cfg.ServoIDs {
+		if id < 1 || id > 5 {
+			return nil, nil, fmt.Errorf("arm servo IDs must be 1-5, got %d", id)
+		}
+	}
+
 	return nil, nil, nil
 }
 
@@ -84,6 +100,9 @@ type so101 struct {
 	isMoving    atomic.Bool
 	model       referenceframe.Model
 	jointLimits [][2]float64
+
+	// Arm-specific servo IDs (1-5)
+	armServoIDs []int
 
 	// Motion configuration
 	defaultSpeed int
@@ -153,10 +172,15 @@ func NewSO101(ctx context.Context, deps resource.Dependencies, rawConf resource.
 		conf.Baudrate = 1000000
 	}
 
+	if len(conf.ServoIDs) == 0 {
+		conf.ServoIDs = []int{1, 2, 3, 4, 5}
+	}
+
 	// Create controller configuration
 	controllerConfig := &SoArm101Config{
 		Port:            conf.Port,
 		Baudrate:        conf.Baudrate,
+		ServoIDs:        []int{1, 2, 3, 4, 5, 6}, // Controller handles all 6, but arm only uses 1-5
 		Timeout:         conf.Timeout,
 		CalibrationFile: conf.CalibrationFile,
 		Logger:          logger,
@@ -164,7 +188,7 @@ func NewSO101(ctx context.Context, deps resource.Dependencies, rawConf resource.
 
 	controllerConfig.Validate(conf.CalibrationFile)
 
-	// Load calibration from file or use defaults
+	// Load full calibration (includes gripper for shared controller)
 	calibration := controllerConfig.LoadCalibration(logger)
 	logger.Infof("Using calibration for SO-101 with shoulder_pan homing_offset: %d", calibration.ShoulderPan.HomingOffset)
 
@@ -189,6 +213,7 @@ func NewSO101(ctx context.Context, deps resource.Dependencies, rawConf resource.
 		controller:   controller,
 		model:        model,
 		jointLimits:  so101JointLimits, // Only first 5 joints
+		armServoIDs:  conf.ServoIDs,    // Store which servos this arm controls
 		defaultSpeed: defaultSpeed,
 		defaultAcc:   defaultAcc,
 		cancelCtx:    cancelCtx,
@@ -197,6 +222,7 @@ func NewSO101(ctx context.Context, deps resource.Dependencies, rawConf resource.
 
 	logger.Infof("SO-101 configured with speed: %.1f deg/s (internal: %d), acceleration: %.1f deg/s² (internal: %d)",
 		speedDegsPerSec, defaultSpeed, accelerationDegsPerSec, defaultAcc)
+	logger.Infof("Arm controlling servo IDs: %v", arm.armServoIDs)
 
 	// Initialize and verify servo connections
 	if err := arm.initializeServos(); err != nil {
@@ -246,8 +272,8 @@ func (s *so101) MoveToJointPositions(ctx context.Context, positions []referencef
 	s.isMoving.Store(true)
 	defer s.isMoving.Store(false)
 
-	if len(positions) != 5 {
-		return fmt.Errorf("expected 5 joint positions for SO-101 arm, got %d", len(positions))
+	if len(positions) != len(s.armServoIDs) {
+		return fmt.Errorf("expected %d joint positions for SO-101 arm, got %d", len(s.armServoIDs), len(positions))
 	}
 
 	values := make([]float64, len(positions))
@@ -255,15 +281,21 @@ func (s *so101) MoveToJointPositions(ctx context.Context, positions []referencef
 		values[i] = input.Value
 	}
 
-	// Validate input ranges and clamp positions for the 5 arm joints
+	// Validate input ranges and clamp positions for the arm joints
 	clampedPositions := make([]float64, len(values))
 	for i, pos := range values {
-		min, max := s.jointLimits[i][0], s.jointLimits[i][1]
+		// Use the joint index for limits (since armServoIDs might not be [1,2,3,4,5])
+		limitIndex := i
+		if limitIndex >= len(s.jointLimits) {
+			limitIndex = len(s.jointLimits) - 1
+		}
+
+		min, max := s.jointLimits[limitIndex][0], s.jointLimits[limitIndex][1]
 
 		// Validate and clamp the position
 		if pos < min || pos > max {
 			s.logger.Warnf("Joint %d position %.3f rad (%.1f°) out of range [%.3f, %.3f] rad ([%.1f°, %.1f°]), clamping",
-				i+1, pos, pos*180/math.Pi, min, max, min*180/math.Pi, max*180/math.Pi)
+				s.armServoIDs[i], pos, pos*180/math.Pi, min, max, min*180/math.Pi, max*180/math.Pi)
 		}
 		clampedPositions[i] = math.Max(min, math.Min(max, pos))
 	}
@@ -298,16 +330,16 @@ func (s *so101) MoveToJointPositions(ctx context.Context, positions []referencef
 		}
 	}
 
-	// Send command to controller with the 5 arm joints
-	if err := s.controller.MoveToJointPositions(clampedPositions, speed, acc); err != nil {
+	// Send command to controller with specific servo IDs
+	if err := s.controller.MoveServosToPositions(s.armServoIDs, clampedPositions, speed, acc); err != nil {
 		return fmt.Errorf("failed to move SO-101 arm: %w", err)
 	}
 
 	// Calculate wait time based on movement distance and configured speed
-	currentPositions, err := s.controller.GetJointPositions()
+	currentPositions, err := s.controller.GetJointPositionsForServos(s.armServoIDs)
 	if err != nil {
 		s.logger.Warnf("Failed to get current positions for timing calculation: %v", err)
-		currentPositions = make([]float64, 5) // Use zeros as fallback
+		currentPositions = make([]float64, len(s.armServoIDs)) // Use zeros as fallback
 	}
 
 	maxMovement := 0.0
@@ -353,21 +385,20 @@ func (s *so101) JointPositions(ctx context.Context, extra map[string]interface{}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	// Get joint positions from controller (only 5 joints for arm)
-	radians, err := s.controller.GetJointPositions()
+	// Get joint positions for only the arm servos
+	radians, err := s.controller.GetJointPositionsForServos(s.armServoIDs)
 	if err != nil {
 		s.logger.Warnf("Failed to read joint positions: %v", err)
-
 		return nil, fmt.Errorf("failed to read joint positions: %w. Try running 'diagnose' command for more details", err)
 	}
 
-	// Ensure we have exactly 5 joints for the arm
-	if len(radians) != 5 {
-		return nil, fmt.Errorf("expected 5 joint positions for SO-101 arm, got %d", len(radians))
+	// Ensure we have the expected number of joints for the arm
+	if len(radians) != len(s.armServoIDs) {
+		return nil, fmt.Errorf("expected %d joint positions for SO-101 arm, got %d", len(s.armServoIDs), len(radians))
 	}
 
 	// Convert to Viam input format
-	positions := make([]referenceframe.Input, 5)
+	positions := make([]referenceframe.Input, len(radians))
 	for i, radian := range radians {
 		positions[i] = referenceframe.Input{Value: radian}
 	}
@@ -391,6 +422,7 @@ func (s *so101) CurrentInputs(ctx context.Context) ([]referenceframe.Input, erro
 func (s *so101) GoToInputs(ctx context.Context, inputSteps ...[]referenceframe.Input) error {
 	return s.MoveThroughJointPositions(ctx, inputSteps, nil, nil)
 }
+
 func (s *so101) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
 	// Handle custom commands specific to SO-101
 	switch cmd["command"] {
@@ -412,6 +444,7 @@ func (s *so101) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[
 			"ref_count":      refCount,
 			"has_controller": hasController,
 			"config":         configSummary,
+			"arm_servo_ids":  s.armServoIDs,
 		}, nil
 
 	case "diagnose":
@@ -441,26 +474,19 @@ func (s *so101) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[
 		}, nil
 
 	case "test_servo_communication":
-		servoID := 1 // default
-		if id, ok := cmd["servo_id"].(float64); ok {
-			servoID = int(id)
-		}
-		positions, err := s.controller.GetJointPositions()
+		positions, err := s.controller.GetJointPositionsForServos(s.armServoIDs)
 		result := map[string]interface{}{
-			"success":  err == nil,
-			"servo_id": servoID,
+			"success":       err == nil,
+			"arm_servo_ids": s.armServoIDs,
 		}
 		if err != nil {
 			result["error"] = fmt.Sprintf("%v", err)
-		} else if servoID > 0 && servoID <= len(positions) {
-			result["position"] = positions[servoID-1]
 		} else {
-			result["all_positions"] = positions
+			result["positions"] = positions
 		}
 		return result, nil
 
 	case "reload_calibration":
-		// Reload calibration from the configured file
 		if s.cfg.CalibrationFile == "" {
 			return map[string]interface{}{
 				"success": false,
@@ -469,7 +495,7 @@ func (s *so101) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[
 		}
 
 		// Load the new calibration
-		newCalibration, err := LoadCalibrationFromFile(s.cfg.CalibrationFile, s.logger)
+		newCalibration, err := LoadFullCalibrationFromFile(s.cfg.CalibrationFile, s.logger)
 		if err != nil {
 			return map[string]interface{}{
 				"success": false,
@@ -493,43 +519,10 @@ func (s *so101) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[
 		}, nil
 
 	case "get_calibration":
-		// Return the current calibration
 		calibration := s.controller.GetCalibration()
 		return map[string]interface{}{
 			"success":     true,
 			"calibration": calibration,
-		}, nil
-
-	case "set_calibration":
-		// Allow setting calibration via command (useful for testing)
-		calibrationData, ok := cmd["calibration"]
-		if !ok {
-			return nil, fmt.Errorf("set_calibration command requires 'calibration' parameter")
-		}
-
-		// Convert the calibration data to JSON and back to ensure proper structure
-		calibrationBytes, err := json.Marshal(calibrationData)
-		if err != nil {
-			return nil, fmt.Errorf("invalid calibration data: %w", err)
-		}
-
-		var newCalibration SO101Calibration
-		if err := json.Unmarshal(calibrationBytes, &newCalibration); err != nil {
-			return nil, fmt.Errorf("failed to parse calibration data: %w", err)
-		}
-
-		// Update the controller with the new calibration
-		if err := s.controller.SetCalibration(newCalibration); err != nil {
-			return map[string]interface{}{
-				"success": false,
-				"error":   fmt.Sprintf("Failed to update calibration: %v", err),
-			}, nil
-		}
-
-		s.logger.Info("Successfully updated calibration via command")
-		return map[string]interface{}{
-			"success": true,
-			"message": "Calibration updated successfully",
 		}, nil
 
 	default:
@@ -627,37 +620,35 @@ func (s *so101) initializeServos() error {
 
 // initializeServosWithRetry attempts servo initialization with retries
 func (s *so101) initializeServosWithRetry(maxRetries int) error {
-	s.logger.Info("Initializing SO-101 servos...")
+	s.logger.Info("Initializing SO-101 arm servos...")
 
 	var lastErr error
 	for attempt := 1; attempt <= maxRetries; attempt++ {
-		s.logger.Infof("Servo initialization attempt %d/%d", attempt, maxRetries)
+		s.logger.Infof("Arm servo initialization attempt %d/%d", attempt, maxRetries)
 
 		if err := s.doServoInitialization(); err != nil {
 			lastErr = err
 			s.logger.Warnf("Initialization attempt %d failed: %v", attempt, err)
 
 			if attempt < maxRetries {
-				// Wait before retrying, with exponential backoff
 				waitTime := time.Duration(attempt) * 500 * time.Millisecond
 				s.logger.Infof("Waiting %v before retry...", waitTime)
 				time.Sleep(waitTime)
 				continue
 			}
 		} else {
-			s.logger.Infof("Servo initialization successful on attempt %d", attempt)
+			s.logger.Infof("Arm servo initialization successful on attempt %d", attempt)
 			return nil
 		}
 	}
 
-	return fmt.Errorf("servo initialization failed after %d attempts, last error: %w", maxRetries, lastErr)
+	return fmt.Errorf("arm servo initialization failed after %d attempts, last error: %w", maxRetries, lastErr)
 }
 
 // doServoInitialization performs the actual initialization steps
 func (s *so101) doServoInitialization() error {
-	// Ping each servo to ensure it's responding
-	servoIDs := []int{1, 2, 3, 4, 5}
-	for _, servoID := range servoIDs {
+	// Ping each arm servo to ensure it's responding
+	for _, servoID := range s.armServoIDs {
 		s.logger.Debugf("Pinging servo %d...", servoID)
 		if err := s.controller.Ping(); err != nil {
 			return fmt.Errorf("servo %d ping failed: %w", servoID, err)
@@ -665,7 +656,7 @@ func (s *so101) doServoInitialization() error {
 		s.logger.Debugf("Servo %d ping successful", servoID)
 	}
 
-	// Enable torque for all servos
+	// Enable torque for all servos (controller manages all 6)
 	s.logger.Debug("Enabling torque for all servos...")
 	if err := s.controller.SetTorqueEnable(true); err != nil {
 		return fmt.Errorf("failed to enable torque: %w", err)
@@ -674,29 +665,28 @@ func (s *so101) doServoInitialization() error {
 	// Brief delay to allow torque to stabilize
 	time.Sleep(100 * time.Millisecond)
 
-	// Verify we can read positions from all servos
-	s.logger.Debug("Verifying position reading from all servos...")
-	positions, err := s.controller.GetJointPositions()
+	// Verify we can read positions from arm servos
+	s.logger.Debug("Verifying position reading from arm servos...")
+	positions, err := s.controller.GetJointPositionsForServos(s.armServoIDs)
 	if err != nil {
 		return fmt.Errorf("failed to read initial joint positions: %w", err)
 	}
 
-	if len(positions) != 5 {
-		return fmt.Errorf("expected 5 joint positions, got %d", len(positions))
+	if len(positions) != len(s.armServoIDs) {
+		return fmt.Errorf("expected %d joint positions, got %d", len(s.armServoIDs), len(positions))
 	}
 
-	s.logger.Infof("SO-101 servo initialization successful. Initial positions: %v", positions)
+	s.logger.Infof("SO-101 arm servo initialization successful. Initial positions: %v", positions)
 	return nil
 }
 
 // diagnoseConnection provides detailed diagnostics for troubleshooting
 func (s *so101) diagnoseConnection() error {
-	s.logger.Info("Starting SO-101 connection diagnosis...")
+	s.logger.Info("Starting SO-101 arm connection diagnosis...")
 
-	// Test each servo individually
-	servoIDs := []int{1, 2, 3, 4, 5}
-	for _, servoID := range servoIDs {
-		s.logger.Infof("Testing servo %d...", servoID)
+	// Test each arm servo individually
+	for _, servoID := range s.armServoIDs {
+		s.logger.Infof("Testing arm servo %d...", servoID)
 
 		// Try ping first
 		if err := s.controller.Ping(); err != nil {
@@ -704,17 +694,17 @@ func (s *so101) diagnoseConnection() error {
 			continue
 		}
 		s.logger.Infof("Servo %d ping successful", servoID)
+	}
 
-		// Try reading current position
-		positions, err := s.controller.GetJointPositions()
-		if err != nil {
-			s.logger.Errorf("Failed to read positions: %v", err)
-			continue
-		}
+	// Try reading all arm positions at once
+	positions, err := s.controller.GetJointPositionsForServos(s.armServoIDs)
+	if err != nil {
+		s.logger.Errorf("Failed to read arm positions: %v", err)
+		return err
+	}
 
-		if servoID-1 < len(positions) {
-			s.logger.Infof("Servo %d position: %.3f rad", servoID, positions[servoID-1])
-		}
+	for i, pos := range positions {
+		s.logger.Infof("Arm servo %d position: %.3f rad", s.armServoIDs[i], pos)
 	}
 
 	return nil
@@ -722,18 +712,18 @@ func (s *so101) diagnoseConnection() error {
 
 // verifyServoConfig checks servo configuration
 func (s *so101) verifyServoConfig() error {
-	s.logger.Info("Verifying servo configuration...")
+	s.logger.Info("Verifying arm servo configuration...")
 
 	// Try to read all positions to verify communication
-	positions, err := s.controller.GetJointPositions()
+	positions, err := s.controller.GetJointPositionsForServos(s.armServoIDs)
 	if err != nil {
 		return fmt.Errorf("failed to verify servo config: %w", err)
 	}
 
-	if len(positions) != 5 {
-		return fmt.Errorf("config verification failed: expected 5 servos, got %d", len(positions))
+	if len(positions) != len(s.armServoIDs) {
+		return fmt.Errorf("config verification failed: expected %d servos, got %d", len(s.armServoIDs), len(positions))
 	}
 
-	s.logger.Infof("Servo configuration verified. Current positions: %v", positions)
+	s.logger.Infof("Arm servo configuration verified. Current positions: %v", positions)
 	return nil
 }

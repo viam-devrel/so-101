@@ -7,13 +7,13 @@
   "models": [
     {
       "api": "rdk:component:arm",
-      "model": "devrel:so-arm:so-101-leader",
+      "model": "devrel:so101:arm",
       "short_description": "Control the first 5 joints of the SO-101: base/pan, shoulder, elbow, wrist flex, and wrist roll",
       "markdown_link": "README.md#model-devrelarmso-101"
     },
     {
-      "api": "rdk:component:arm",
-      "model": "devrel:so-arm:so-101-follower",
+      "api": "rdk:component:gripper",
+      "model": "devrel:so101:gripper",
       "short_description": "Control the first 5 joints of the SO-101: base/pan, shoulder, elbow, wrist flex, and wrist roll",
       "markdown_link": "README.md#model-devrelarmso-101"
     }
@@ -27,6 +27,8 @@
     "setup": "make setup",
     "path": "bin/module.tar.gz",
     "arch": [
+      "darwin/arm64",
+      "windows/amd64",
       "linux/amd64",
       "linux/arm64"
     ]

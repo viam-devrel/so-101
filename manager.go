@@ -9,10 +9,10 @@ import (
 var (
 	globalController   *SafeSoArmController
 	controllerMutex    sync.RWMutex
-	refCount           int64 // Changed to int64 for atomic operations
+	refCount           int64
 	lastError          error
 	currentConfig      *SoArm101Config
-	currentCalibration SO101Calibration
+	currentCalibration SO101FullCalibration
 )
 
 // SafeSoArmController wraps the low-level controller with thread-safe access
@@ -29,10 +29,22 @@ func (s *SafeSoArmController) MoveToJointPositions(jointAngles []float64, speed,
 	return s.SoArmController.MoveToJointPositions(jointAngles, speed, acc)
 }
 
+func (s *SafeSoArmController) MoveServosToPositions(servoIDs []int, jointAngles []float64, speed, acc int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.SoArmController.MoveServosToPositions(servoIDs, jointAngles, speed, acc)
+}
+
 func (s *SafeSoArmController) GetJointPositions() ([]float64, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.SoArmController.GetJointPositions()
+}
+
+func (s *SafeSoArmController) GetJointPositionsForServos(servoIDs []int) ([]float64, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.SoArmController.GetJointPositionsForServos(servoIDs)
 }
 
 func (s *SafeSoArmController) SetTorqueEnable(enable bool) error {
@@ -59,11 +71,10 @@ func (s *SafeSoArmController) Ping() error {
 	return s.SoArmController.Ping()
 }
 
-func (s *SafeSoArmController) SetCalibration(calibration SO101Calibration) error {
+func (s *SafeSoArmController) SetCalibration(calibration SO101FullCalibration) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Update both the controller and the global calibration
 	if err := s.SoArmController.SetCalibration(calibration); err != nil {
 		return err
 	}
@@ -76,7 +87,7 @@ func (s *SafeSoArmController) SetCalibration(calibration SO101Calibration) error
 	return nil
 }
 
-func (s *SafeSoArmController) GetCalibration() SO101Calibration {
+func (s *SafeSoArmController) GetCalibration() SO101FullCalibration {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.SoArmController.GetCalibration()
@@ -96,21 +107,22 @@ func configsEqual(a, b *SoArm101Config) bool {
 }
 
 // Compare calibrations for equality
-func calibrationsEqual(a, b SO101Calibration) bool {
+func calibrationsEqual(a, b SO101FullCalibration) bool {
 	return a.ShoulderPan == b.ShoulderPan &&
 		a.ShoulderLift == b.ShoulderLift &&
 		a.ElbowFlex == b.ElbowFlex &&
 		a.WristFlex == b.WristFlex &&
-		a.WristRoll == b.WristRoll
+		a.WristRoll == b.WristRoll &&
+		a.Gripper == b.Gripper
 }
 
 // GetSharedController gets a shared controller using default calibration
 func GetSharedController(config *SoArm101Config) (*SafeSoArmController, error) {
-	return GetSharedControllerWithCalibration(config, DefaultSO101Calibration)
+	return GetSharedControllerWithCalibration(config, DefaultSO101FullCalibration)
 }
 
 // GetSharedControllerWithCalibration gets a shared controller with specified calibration
-func GetSharedControllerWithCalibration(config *SoArm101Config, calibration SO101Calibration) (*SafeSoArmController, error) {
+func GetSharedControllerWithCalibration(config *SoArm101Config, calibration SO101FullCalibration) (*SafeSoArmController, error) {
 	controllerMutex.Lock()
 	defer controllerMutex.Unlock()
 
@@ -140,7 +152,10 @@ func GetSharedControllerWithCalibration(config *SoArm101Config, calibration SO10
 		return globalController, nil
 	}
 
-	controller, err := NewSoArmController(config.Port, config.Baudrate, config.ServoIDs, calibration, config.Logger)
+	// Always initialize controller with all 6 servos, but let components specify which ones they use
+	allServoIDs := []int{1, 2, 3, 4, 5, 6}
+
+	controller, err := NewSoArmController(config.Port, config.Baudrate, allServoIDs, calibration, config.Logger)
 	if err != nil {
 		lastError = err
 		return nil, err
@@ -168,7 +183,7 @@ func ReleaseSharedController() {
 		}
 		globalController = nil
 		currentConfig = nil
-		currentCalibration = SO101Calibration{} // Reset calibration
+		currentCalibration = SO101FullCalibration{}
 		atomic.StoreInt64(&refCount, 0)
 		lastError = nil
 	}
@@ -183,14 +198,13 @@ func ForceCloseSharedController() error {
 		err = globalController.Close()
 		globalController = nil
 		currentConfig = nil
-		currentCalibration = SO101Calibration{} // Reset calibration
+		currentCalibration = SO101FullCalibration{}
 		atomic.StoreInt64(&refCount, 0)
 		lastError = nil
 	}
 	return err
 }
 
-// Updated function signature to avoid variable shadowing
 func GetControllerStatus() (int64, bool, string) {
 	controllerMutex.RLock()
 	defer controllerMutex.RUnlock()
@@ -201,7 +215,7 @@ func GetControllerStatus() (int64, bool, string) {
 
 	if currentConfig != nil {
 		calibrationInfo := "default"
-		if currentCalibration.ShoulderPan.HomingOffset != DefaultSO101Calibration.ShoulderPan.HomingOffset {
+		if currentCalibration.ShoulderPan.HomingOffset != DefaultSO101FullCalibration.ShoulderPan.HomingOffset {
 			calibrationInfo = "custom"
 		}
 		configSummary = fmt.Sprintf("Serial: %s@%d, Calibration: %s",
@@ -212,7 +226,7 @@ func GetControllerStatus() (int64, bool, string) {
 }
 
 // GetCurrentCalibration returns the current calibration being used
-func GetCurrentCalibration() SO101Calibration {
+func GetCurrentCalibration() SO101FullCalibration {
 	controllerMutex.RLock()
 	defer controllerMutex.RUnlock()
 	return currentCalibration
