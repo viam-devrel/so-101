@@ -25,7 +25,7 @@
   "build": {
     "build": "make module.tar.gz",
     "setup": "make setup",
-    "path": "bin/module.tar.gz",
+    "path": "module.tar.gz",
     "arch": [
       "darwin/arm64",
       "windows/amd64",
