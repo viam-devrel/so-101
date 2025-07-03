@@ -1,5 +1,5 @@
   {
-    "name": "so101",
+    "name": "soarm_101",
     "joints": [
       {
         "axis": {
@@ -10,7 +10,7 @@
         "id": "wrist_roll",
         "max": 162.7893417103646,
         "min": -157.21102461697095,
-        "parent": "wrist",
+        "parent": "wrist_link",
         "type": "revolute"
       },
       {
@@ -22,7 +22,7 @@
         "id": "wrist_flex",
         "max": 94.99984017946129,
         "min": -94.99984017946129,
-        "parent": "lower_arm",
+        "parent": "lower_arm_link",
         "type": "revolute"
       },
       {
@@ -34,7 +34,7 @@
         "id": "elbow_flex",
         "max": 96.82986737710912,
         "min": -96.82986737710912,
-        "parent": "upper_arm",
+        "parent": "upper_arm_link",
         "type": "revolute"
       },
       {
@@ -46,7 +46,7 @@
         "id": "shoulder_lift",
         "max": 100.00004285756798,
         "min": -100.00004285756798,
-        "parent": "shoulder",
+        "parent": "shoulder_link",
         "type": "revolute"
       },
       {
@@ -58,7 +58,7 @@
         "id": "shoulder_pan",
         "max": 109.99987525598623,
         "min": -109.99987525598623,
-        "parent": "base",
+        "parent": "base_link",
         "type": "revolute"
       }
     ],
@@ -66,14 +66,54 @@
       {
         "geometry": {
           "type": "box",
-          "x": 64,
-          "y": 30,
-          "z": 64,
+          "x": 156,
+          "y": 37,
+          "z": 60,
           "r": 0,
           "l": 0,
           "translation": {
-            "X": -40,
-            "Y": -30,
+            "X": -50,
+            "Y": 0,
+            "Z": 20
+          },
+          "orientation": {
+            "type": "quaternion",
+            "value": {
+              "W": 0.000001326794896677533,
+              "X": 0.9999999999991198,
+              "Y": 3.336009999997064e-31,
+              "Z": 4.426201043265217e-37
+            }
+          },
+          "Label": ""
+        },
+        "id": "lower_arm_link",
+        "orientation": {
+          "type": "euler_angles",
+          "value": {
+            "pitch": 8.67362e-16,
+            "roll": 4.02456e-15,
+            "yaw": -1.5708
+          }
+        },
+        "parent": "elbow_flex",
+        "translation": {
+          "x": -134.9,
+          "y": 5.2,
+          "z": 3.62355e-14
+        }
+      },
+      {
+        "geometry": {
+          "type": "box",
+          "x": 65,
+          "y": 33,
+          "z": 75,
+          "r": 0,
+          "l": 0,
+          "translation": {
+            "X": 0,
+            "Y": -15,
             "Z": 30.6
           },
           "orientation": {
@@ -87,18 +127,18 @@
           },
           "Label": ""
         },
-        "id": "wrist",
+        "id": "wrist_link",
         "orientation": {
           "type": "euler_angles",
           "value": {
-            "pitch": -9.38083e-8,
+            "pitch": 0.0486795,
             "roll": 1.5708,
             "yaw": 3.14159
           }
         },
         "parent": "wrist_flex",
         "translation": {
-          "x": 0,
+          "x": 5.5511199999999994e-14,
           "y": -61.1,
           "z": 18.1
         }
@@ -106,55 +146,55 @@
       {
         "geometry": {
           "type": "box",
-          "x": 87,
-          "y": 72,
-          "z": 110,
+          "x": 100,
+          "y": 75,
+          "z": 95,
           "r": 0,
           "l": 0,
           "translation": {
-            "X": 20.6915,
-            "Y": 22.125500000000002,
-            "Z": 30.0817
+            "X": 0,
+            "Y": 0,
+            "Z": 42.5
           },
           "orientation": {
             "type": "quaternion",
             "value": {
-              "W": 0.7071054825112364,
-              "X": 0.7071080798594735,
-              "Y": 7.80492270858741e-16,
-              "Z": 8.681061371888899e-16
+              "W": 0.499998163397448,
+              "X": 0.49999999999662736,
+              "Y": 0.5000018366025512,
+              "Z": 0.49999999999662736
             }
           },
           "Label": ""
         },
-        "id": "base",
+        "id": "base_link",
         "orientation": {
           "type": "euler_angles",
           "value": {
-            "pitch": 6.03684e-16,
-            "roll": -3.14159,
-            "yaw": 1.5708
+            "pitch": 4.18253e-17,
+            "roll": 3.14159,
+            "yaw": -3.14159
           }
         },
-        "parent": "world",
+        "parent": "",
         "translation": {
-          "x": 20.7909,
-          "y": -23.0745,
-          "z": 94.8817
+          "x": 38.835300000000004,
+          "y": -0.00000897657,
+          "z": 62.4
         }
       },
       {
         "geometry": {
           "type": "box",
-          "x": 100,
+          "x": 110,
           "y": 60,
           "z": 50,
           "r": 0,
           "l": 0,
           "translation": {
-            "X": -30.399200000000004,
-            "Y": 0.42224099999999953,
-            "Z": -41.70000000000001
+            "X": -20,
+            "Y": 0,
+            "Z": -10
           },
           "orientation": {
             "type": "quaternion",
@@ -167,7 +207,7 @@
           },
           "Label": ""
         },
-        "id": "shoulder",
+        "id": "shoulder_link",
         "orientation": {
           "type": "euler_angles",
           "value": {
@@ -186,33 +226,33 @@
       {
         "geometry": {
           "type": "box",
-          "x": 24,
-          "y": 130,
+          "x": 50,
+          "y": 142,
           "z": 70,
           "r": 0,
           "l": 0,
           "translation": {
-            "X": -112.57000000000002,
-            "Y": -15.499999999999996,
-            "Z": 18.700000000000006
+            "X": -71,
+            "Y": 0,
+            "Z": 15
           },
           "orientation": {
             "type": "quaternion",
             "value": {
-              "W": 9.38183945365739e-7,
+              "W": 9.381839454221642e-7,
               "X": -0.707105482510614,
               "Y": 0.7071080798588512,
-              "Z": -9.381873919998721e-7
+              "Z": -9.381873919434472e-7
             }
           },
           "Label": ""
         },
-        "id": "upper_arm",
+        "id": "upper_arm_link",
         "orientation": {
           "type": "euler_angles",
           "value": {
-            "pitch": 5.75928e-16,
-            "roll": -1.22818e-15,
+            "pitch": 8.74301e-16,
+            "roll": -3.63608e-16,
             "yaw": 1.5708
           }
         },
@@ -220,47 +260,7 @@
         "translation": {
           "x": -112.57000000000001,
           "y": -28,
-          "z": 2.46331e-13
-        }
-      },
-      {
-        "geometry": {
-          "type": "box",
-          "x": 120,
-          "y": 35,
-          "z": 60,
-          "r": 0,
-          "l": 0,
-          "translation": {
-            "X": -64.84989999999999,
-            "Y": 40,
-            "Z": 18.2
-          },
-          "orientation": {
-            "type": "quaternion",
-            "value": {
-              "W": 0.000001326794896677533,
-              "X": -0.9999999999991198,
-              "Y": -1.9721499999982641e-31,
-              "Z": 2.616638555482597e-37
-            }
-          },
-          "Label": ""
-        },
-        "id": "lower_arm",
-        "orientation": {
-          "type": "euler_angles",
-          "value": {
-            "pitch": 2.86219e-15,
-            "roll": 3.2474e-15,
-            "yaw": -1.5708
-          }
-        },
-        "parent": "elbow_flex",
-        "translation": {
-          "x": -134.9,
-          "y": 5.2,
-          "z": 1.65232e-13
+          "z": 1.73763e-13
         }
       }
     ]

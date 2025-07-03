@@ -114,7 +114,7 @@ func makeSO101ModelFrame() (referenceframe.Model, error) {
 		return nil, errors.Wrap(err, "failed to unmarshal json file")
 	}
 
-	return m.ParseConfig("so101")
+	return m.ParseConfig("soarm_101")
 }
 
 // calculateJointLimits dynamically calculates joint limits from calibration data
