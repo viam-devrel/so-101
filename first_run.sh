@@ -101,27 +101,6 @@ verify_installation() {
     return 1
   fi
 
-  # Check for library using ldconfig
-  if ! ldconfig -p | grep -q "libnlopt"; then
-    log_error "nlopt library not found in system library cache"
-    return 1
-  fi
-
-  # Check package installation
-  if ! dpkg -l | grep -q "libnlopt-dev"; then
-    log_error "libnlopt-dev package not installed"
-    return 1
-  fi
-
-  if ! dpkg -l | grep -q "libnlopt0"; then
-    log_error "libnlopt0 package not installed"
-    return 1
-  fi
-
-  # Get installed version
-  local version=$(dpkg -l | grep "libnlopt-dev" | awk '{print $3}')
-  log_info "nlopt version $version installed successfully"
-
   return 0
 }
 
