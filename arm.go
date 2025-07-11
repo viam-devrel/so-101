@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/hipsterbrown/feetech-servo"
 	"github.com/pkg/errors"
 	"go.viam.com/rdk/components/arm"
 	"go.viam.com/rdk/logging"
@@ -95,8 +96,8 @@ type so101 struct {
 	armServoIDs []int
 
 	// Motion configuration
-	defaultSpeed int
-	defaultAcc   int
+	defaultSpeed float32
+	defaultAcc   float32
 
 	cancelCtx  context.Context
 	cancelFunc func()
@@ -117,21 +118,39 @@ func makeSO101ModelFrame() (referenceframe.Model, error) {
 	return m.ParseConfig("soarm_101")
 }
 
+// calculateJointLimits dynamically calculates joint limits from calibration data
 func (s *so101) calculateJointLimits() [][2]float64 {
 	limits := make([][2]float64, len(s.armServoIDs))
 
-	for i, servoID := range s.armServoIDs {
-		cal := s.controller.getCalibrationForServo(servoID)
+	calibration := s.controller.GetCalibration()
 
-		// Calculate the actual physical range in radians
-		// Each servo unit represents 360°/4096 = 0.087890625°
-		mid := float64(cal.RangeMin+cal.RangeMax) / 2
+	// Map servo IDs to calibration data
+	jointCals := []*feetech.MotorCalibration{
+		calibration.ShoulderPan,
+		calibration.ShoulderLift,
+		calibration.ElbowFlex,
+		calibration.WristFlex,
+		calibration.WristRoll,
+	}
 
-		minDegrees := (float64(cal.RangeMin) - mid) * 360.0 / 4095.0
-		maxDegrees := (float64(cal.RangeMax) - mid) * 360.0 / 4095.0
+	for i, cal := range jointCals {
+		if cal == nil {
+			// Use default limits if calibration is missing
+			limits[i] = [2]float64{-math.Pi, math.Pi}
+			continue
+		}
 
-		minRadians := minDegrees * math.Pi / 180.0
-		maxRadians := maxDegrees * math.Pi / 180.0
+		// Convert calibration range to radians using the same logic as before
+		center := float64(cal.RangeMin+cal.RangeMax) / 2
+		halfRange := float64(cal.RangeMax-cal.RangeMin) / 2
+
+		// Calculate min limit (RangeMin -> radians)
+		minNormalized := (float64(cal.RangeMin) - center) / halfRange
+		minRadians := minNormalized * math.Pi
+
+		// Calculate max limit (RangeMax -> radians)
+		maxNormalized := (float64(cal.RangeMax) - center) / halfRange
+		maxRadians := maxNormalized * math.Pi
 
 		limits[i] = [2]float64{minRadians, maxRadians}
 	}
@@ -162,24 +181,6 @@ func NewSO101(ctx context.Context, deps resource.Dependencies, rawConf resource.
 		return nil, fmt.Errorf("acceleration_degs_per_sec_per_sec must be between 10 and 500 degrees/second^2, got %.1f", accelerationDegsPerSec)
 	}
 
-	// Convert degrees/sec to internal speed units (approximate conversion)
-	defaultSpeed := int(speedDegsPerSec * 10)
-	if defaultSpeed < 30 {
-		defaultSpeed = 30
-	}
-	if defaultSpeed > 4096 {
-		defaultSpeed = 4096
-	}
-
-	// Convert degrees/sec^2 to internal acceleration units
-	defaultAcc := int(accelerationDegsPerSec * 0.5)
-	if defaultAcc < 1 {
-		defaultAcc = 1
-	}
-	if defaultAcc > 254 {
-		defaultAcc = 254
-	}
-
 	if conf.Baudrate == 0 {
 		conf.Baudrate = 1000000
 	}
@@ -202,7 +203,11 @@ func NewSO101(ctx context.Context, deps resource.Dependencies, rawConf resource.
 
 	// Load full calibration (includes gripper for shared controller)
 	calibration := controllerConfig.LoadCalibration(logger)
-	logger.Infof("Using calibration for SO-101 with shoulder_pan homing_offset: %d", calibration.ShoulderPan.HomingOffset)
+	if calibration.ShoulderPan != nil {
+		logger.Infof("Using calibration for SO-101 with shoulder_pan homing_offset: %d", calibration.ShoulderPan.HomingOffset)
+	} else {
+		logger.Info("Using default calibration for SO-101")
+	}
 
 	controller, err := GetSharedControllerWithCalibration(controllerConfig, calibration)
 	if err != nil {
@@ -225,14 +230,14 @@ func NewSO101(ctx context.Context, deps resource.Dependencies, rawConf resource.
 		controller:   controller,
 		model:        model,
 		armServoIDs:  conf.ServoIDs, // Store which servos this arm controls
-		defaultSpeed: defaultSpeed,
-		defaultAcc:   defaultAcc,
+		defaultSpeed: speedDegsPerSec,
+		defaultAcc:   accelerationDegsPerSec,
 		cancelCtx:    cancelCtx,
 		cancelFunc:   cancelFunc,
 	}
 
-	logger.Infof("SO-101 configured with speed: %.1f deg/s (internal: %d), acceleration: %.1f deg/s² (internal: %d)",
-		speedDegsPerSec, defaultSpeed, accelerationDegsPerSec, defaultAcc)
+	logger.Infof("SO-101 configured with speed: %.1f deg/s, acceleration: %.1f deg/s²",
+		speedDegsPerSec, accelerationDegsPerSec)
 	logger.Infof("Arm controlling servo IDs: %v", arm.armServoIDs)
 
 	// Initialize and verify servo connections
@@ -308,38 +313,9 @@ func (s *so101) MoveToJointPositions(ctx context.Context, positions []referencef
 		clampedPositions[i] = math.Max(min, math.Min(max, pos))
 	}
 
-	// Use configured speed and acceleration
-	speed := s.defaultSpeed
-	acc := s.defaultAcc
-
-	// Check for speed/acceleration overrides in extra parameters
-	if extra != nil {
-		if speedOverride, ok := extra["speed"]; ok {
-			if speedVal, ok := speedOverride.(float64); ok {
-				speed = int(speedVal * 10)
-				if speed < 30 {
-					speed = 30
-				}
-				if speed > 4096 {
-					speed = 4096
-				}
-			}
-		}
-		if accOverride, ok := extra["acceleration"]; ok {
-			if accVal, ok := accOverride.(float64); ok {
-				acc = int(accVal * 0.5)
-				if acc < 1 {
-					acc = 1
-				}
-				if acc > 254 {
-					acc = 254
-				}
-			}
-		}
-	}
-
 	// Send command to controller with specific servo IDs
-	if err := s.controller.MoveServosToPositions(s.armServoIDs, clampedPositions, speed, acc); err != nil {
+	// Note: The controller now handles the conversion internally through feetech-servo
+	if err := s.controller.MoveServosToPositions(s.armServoIDs, clampedPositions, 0, 0); err != nil {
 		return fmt.Errorf("failed to move SO-101 arm: %w", err)
 	}
 
@@ -360,8 +336,8 @@ func (s *so101) MoveToJointPositions(ctx context.Context, positions []referencef
 		}
 	}
 
-	// Calculate move time based on configured speed (convert internal units back to rad/sec)
-	speedRadPerSec := float64(speed) / 10.0 * math.Pi / 180.0 // Convert to rad/sec
+	// Calculate move time based on configured speed
+	speedRadPerSec := float64(s.defaultSpeed) * math.Pi / 180.0 // Convert to rad/sec
 	moveTimeSeconds := maxMovement / speedRadPerSec
 	if moveTimeSeconds < 0.1 {
 		moveTimeSeconds = 0.1 // Minimum move time
@@ -544,13 +520,7 @@ func (s *so101) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[
 					return nil, fmt.Errorf("speed must be between 3 and 180 degrees/second, got %.1f", speed)
 				}
 				s.mu.Lock()
-				s.defaultSpeed = int(speed * 10)
-				if s.defaultSpeed < 30 {
-					s.defaultSpeed = 30
-				}
-				if s.defaultSpeed > 4096 {
-					s.defaultSpeed = 4096
-				}
+				s.defaultSpeed = float32(speed)
 				s.mu.Unlock()
 				result["speed_set"] = speed
 				changed = true
@@ -565,13 +535,7 @@ func (s *so101) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[
 					return nil, fmt.Errorf("acceleration must be between 10 and 500 degrees/second^2, got %.1f", acc)
 				}
 				s.mu.Lock()
-				s.defaultAcc = int(acc * 0.5)
-				if s.defaultAcc < 1 {
-					s.defaultAcc = 1
-				}
-				if s.defaultAcc > 254 {
-					s.defaultAcc = 254
-				}
+				s.defaultAcc = float32(acc)
 				s.mu.Unlock()
 				result["acceleration_set"] = acc
 				changed = true
@@ -582,8 +546,8 @@ func (s *so101) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[
 
 		if getParams, ok := cmd["get_motion_params"]; ok && getParams.(bool) {
 			s.mu.RLock()
-			speedDegsPerSec := float64(s.defaultSpeed) / 10.0
-			accDegsPerSec := float64(s.defaultAcc) / 0.5
+			speedDegsPerSec := float64(s.defaultSpeed)
+			accDegsPerSec := float64(s.defaultAcc)
 			s.mu.RUnlock()
 
 			result["current_speed_degs_per_sec"] = speedDegsPerSec
@@ -655,14 +619,12 @@ func (s *so101) initializeServosWithRetry(maxRetries int) error {
 
 // doServoInitialization performs the actual initialization steps
 func (s *so101) doServoInitialization() error {
-	// Ping each arm servo to ensure it's responding
-	for _, servoID := range s.armServoIDs {
-		s.logger.Debugf("Pinging servo %d...", servoID)
-		if err := s.controller.Ping(); err != nil {
-			return fmt.Errorf("servo %d ping failed: %w", servoID, err)
-		}
-		s.logger.Debugf("Servo %d ping successful", servoID)
+	// Ping all servos to ensure they're responding
+	s.logger.Debug("Pinging all servos...")
+	if err := s.controller.Ping(); err != nil {
+		return fmt.Errorf("servo ping failed: %w", err)
 	}
+	s.logger.Debug("All servos ping successful")
 
 	// Enable torque for all servos (controller manages all 6)
 	s.logger.Debug("Enabling torque for all servos...")
@@ -692,17 +654,13 @@ func (s *so101) doServoInitialization() error {
 func (s *so101) diagnoseConnection() error {
 	s.logger.Info("Starting SO-101 arm connection diagnosis...")
 
-	// Test each arm servo individually
-	for _, servoID := range s.armServoIDs {
-		s.logger.Infof("Testing arm servo %d...", servoID)
-
-		// Try ping first
-		if err := s.controller.Ping(); err != nil {
-			s.logger.Errorf("Servo %d ping failed: %v", servoID, err)
-			continue
-		}
-		s.logger.Infof("Servo %d ping successful", servoID)
+	// Test overall ping
+	s.logger.Info("Testing overall servo communication...")
+	if err := s.controller.Ping(); err != nil {
+		s.logger.Errorf("Overall ping failed: %v", err)
+		return err
 	}
+	s.logger.Info("Overall ping successful")
 
 	// Try reading all arm positions at once
 	positions, err := s.controller.GetJointPositionsForServos(s.armServoIDs)

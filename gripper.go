@@ -70,13 +70,13 @@ type so101Gripper struct {
 	mu       sync.Mutex
 	isMoving atomic.Bool
 
-	// Gripper positions (in servo units, calculated from calibration)
-	openPosition   int
-	closedPosition int
+	// Gripper positions (in percentage, 0-100%)
+	openPosition   float64 // Percentage value for open position
+	closedPosition float64 // Percentage value for closed position
 
-	// Motion parameters (optimized for gripper)
-	speed        int // Fixed speed for gripper operations
-	acceleration int // Fixed acceleration for gripper operations
+	// Motion parameters
+	speed        float32 // Speed in degrees/second
+	acceleration float32 // Acceleration in degrees/second^2
 }
 
 func init() {
@@ -131,25 +131,18 @@ func newSO101Gripper(ctx context.Context, deps resource.Dependencies, conf resou
 	}
 
 	g := &so101Gripper{
-		name:         conf.ResourceName(),
-		logger:       logger,
-		controller:   controller,
-		model:        referenceframe.NewSimpleModel("so101_gripper"),
-		servoID:      cfg.ServoID,
-		speed:        200, // Fixed speed optimized for gripper (slower for precision)
-		acceleration: 50,  // Fixed acceleration optimized for gripper
+		name:           conf.ResourceName(),
+		logger:         logger,
+		controller:     controller,
+		model:          referenceframe.NewSimpleModel("so101_gripper"),
+		servoID:        cfg.ServoID,
+		speed:          30,   // Slower speed for precision (degrees/second)
+		acceleration:   50,   // Moderate acceleration for gripper
+		openPosition:   85.0, // 85% open (near max range)
+		closedPosition: 10.0, // 10% closed (near min range)
 	}
 
-	// Calculate open and closed positions from calibration
-	gripperCalibration := fullCalibration.Gripper
-
-	// Open position: near the maximum of the range
-	g.openPosition = gripperCalibration.RangeMax - 200 // Leave some margin
-
-	// Closed position: near the minimum of the range
-	g.closedPosition = gripperCalibration.RangeMin
-
-	logger.Infof("SO-101 gripper initialized with servo ID %d, open=%d, closed=%d",
+	logger.Infof("SO-101 gripper initialized with servo ID %d, open=%.1f%%, closed=%.1f%%",
 		cfg.ServoID, g.openPosition, g.closedPosition)
 
 	return g, nil
@@ -169,11 +162,8 @@ func (g *so101Gripper) Open(ctx context.Context, extra map[string]interface{}) e
 
 	g.logger.Debug("Opening gripper")
 
-	// Convert servo position to radians using calibration
-	openRadians := g.controller.SoArmController.servoPositionToRadiansCalibrated(g.openPosition, g.servoID)
-
 	// Move to open position using specific servo
-	if err := g.controller.MoveServosToPositions([]int{g.servoID}, []float64{openRadians}, g.speed, g.acceleration); err != nil {
+	if err := g.controller.MoveServosToPositions([]int{g.servoID}, []float64{g.openPositionRadians()}, 0, 0); err != nil {
 		return fmt.Errorf("failed to open gripper: %w", err)
 	}
 
@@ -194,11 +184,8 @@ func (g *so101Gripper) Grab(ctx context.Context, extra map[string]interface{}) (
 
 	g.logger.Debug("Attempting to grab with gripper")
 
-	// Convert servo position to radians using calibration
-	closedRadians := g.controller.SoArmController.servoPositionToRadiansCalibrated(g.closedPosition, g.servoID)
-
 	// Move to closed position using specific servo
-	if err := g.controller.MoveServosToPositions([]int{g.servoID}, []float64{closedRadians}, g.speed, g.acceleration); err != nil {
+	if err := g.controller.MoveServosToPositions([]int{g.servoID}, []float64{g.closedPositionRadians()}, 0, 0); err != nil {
 		return false, fmt.Errorf("failed to close gripper: %w", err)
 	}
 
@@ -218,17 +205,17 @@ func (g *so101Gripper) Grab(ctx context.Context, extra map[string]interface{}) (
 		return false, nil
 	}
 
-	// Convert current position back to servo units for comparison
-	currentServoPos := g.controller.SoArmController.radiansToServoPositionCalibrated(currentPositions[0], g.servoID)
+	// Convert current position to percentage for comparison
+	currentPercent := g.radiansToPercent(currentPositions[0])
 
 	// If the gripper couldn't close fully, something is blocking it (i.e., gripped)
-	positionDifference := currentServoPos - g.closedPosition
-	threshold := 100 // Servo units - if gripper is more than this distance from closed position
+	positionDifference := currentPercent - g.closedPosition
+	threshold := 15.0 // Percentage - if gripper is more than this distance from closed position
 
 	grabbed := positionDifference > threshold
 
 	if grabbed {
-		g.logger.Debugf("Gripper successfully grabbed an object (position difference: %d)", positionDifference)
+		g.logger.Debugf("Gripper successfully grabbed an object (position difference: %.1f%%)", positionDifference)
 	} else {
 		g.logger.Debug("Gripper closed but may not have grabbed anything")
 	}
@@ -269,20 +256,43 @@ func (g *so101Gripper) DoCommand(ctx context.Context, cmd map[string]interface{}
 			return nil, fmt.Errorf("no position data available")
 		}
 
-		// Convert to servo units for easier interpretation
-		servoPos := g.controller.SoArmController.radiansToServoPositionCalibrated(positions[0], g.servoID)
+		// Convert to percentage for easier interpretation
+		percentPos := g.radiansToPercent(positions[0])
 
 		return map[string]interface{}{
-			"position_radians":     positions[0],
-			"position_servo_units": servoPos,
-			"open_position":        g.openPosition,
-			"closed_position":      g.closedPosition,
+			"position_radians":    positions[0],
+			"position_percentage": percentPos,
+			"open_position":       g.openPosition,
+			"closed_position":     g.closedPosition,
 		}, nil
 
 	case "set_position":
-		servoPos, ok := cmd["servo_position"].(float64)
-		if !ok {
-			return nil, fmt.Errorf("set_position command requires 'servo_position' parameter")
+		var targetPercent float64
+
+		// Accept either percentage or servo position
+		if percentPos, ok := cmd["percentage"].(float64); ok {
+			targetPercent = percentPos
+		} else if servoPos, ok := cmd["servo_position"].(float64); ok {
+			// Convert servo position to percentage using calibration
+			// This is a rough conversion for backward compatibility
+			cal := g.controller.getCalibrationForServo(g.servoID)
+			if cal != nil {
+				normalizedPos := (servoPos - float64(cal.RangeMin)) / float64(cal.RangeMax-cal.RangeMin)
+				targetPercent = normalizedPos * 100.0
+			} else {
+				// Fallback conversion
+				targetPercent = (servoPos / 4095.0) * 100.0
+			}
+		} else {
+			return nil, fmt.Errorf("set_position command requires 'percentage' or 'servo_position' parameter")
+		}
+
+		// Clamp to valid range
+		if targetPercent < 0 {
+			targetPercent = 0
+		}
+		if targetPercent > 100 {
+			targetPercent = 100
 		}
 
 		g.mu.Lock()
@@ -291,11 +301,9 @@ func (g *so101Gripper) DoCommand(ctx context.Context, cmd map[string]interface{}
 		g.isMoving.Store(true)
 		defer g.isMoving.Store(false)
 
-		// Convert servo position to radians
-		radians := g.controller.SoArmController.servoPositionToRadiansCalibrated(int(servoPos), g.servoID)
-
-		// Move to position using specific servo
-		err := g.controller.MoveServosToPositions([]int{g.servoID}, []float64{radians}, g.speed, g.acceleration)
+		// Convert percentage to radians and move
+		targetRadians := g.percentToRadians(targetPercent)
+		err := g.controller.MoveServosToPositions([]int{g.servoID}, []float64{targetRadians}, 0, 0)
 		return map[string]interface{}{"success": err == nil}, err
 
 	case "controller_status":
@@ -310,18 +318,47 @@ func (g *so101Gripper) DoCommand(ctx context.Context, cmd map[string]interface{}
 	case "calibrate_positions":
 		// Allow manual calibration of open/closed positions
 		if openPos, ok := cmd["open_position"].(float64); ok {
-			g.openPosition = int(openPos)
+			if openPos >= 0 && openPos <= 100 {
+				g.openPosition = openPos
+			}
 		}
 		if closedPos, ok := cmd["closed_position"].(float64); ok {
-			g.closedPosition = int(closedPos)
+			if closedPos >= 0 && closedPos <= 100 {
+				g.closedPosition = closedPos
+			}
 		}
 
-		g.logger.Infof("Gripper positions calibrated: open=%d, closed=%d", g.openPosition, g.closedPosition)
+		g.logger.Infof("Gripper positions calibrated: open=%.1f%%, closed=%.1f%%", g.openPosition, g.closedPosition)
 
 		return map[string]interface{}{
 			"success":         true,
 			"open_position":   g.openPosition,
 			"closed_position": g.closedPosition,
+		}, nil
+
+	case "set_motion_params":
+		// Allow adjustment of motion parameters
+		if speed, ok := cmd["speed"].(float64); ok {
+			if speed > 0 && speed <= 180 {
+				g.speed = float32(speed)
+			}
+		}
+		if acc, ok := cmd["acceleration"].(float64); ok {
+			if acc > 0 && acc <= 500 {
+				g.acceleration = float32(acc)
+			}
+		}
+
+		return map[string]interface{}{
+			"success":      true,
+			"speed":        g.speed,
+			"acceleration": g.acceleration,
+		}, nil
+
+	case "get_motion_params":
+		return map[string]interface{}{
+			"speed":        g.speed,
+			"acceleration": g.acceleration,
 		}, nil
 
 	default:
@@ -365,7 +402,7 @@ func (g *so101Gripper) GoToInputs(ctx context.Context, inputs ...[]referencefram
 		g.mu.Lock()
 		g.isMoving.Store(true)
 
-		err := g.controller.MoveServosToPositions([]int{g.servoID}, []float64{inputSet[0].Value}, g.speed, g.acceleration)
+		err := g.controller.MoveServosToPositions([]int{g.servoID}, []float64{inputSet[0].Value}, 0, 0)
 
 		g.isMoving.Store(false)
 		g.mu.Unlock()
@@ -388,4 +425,75 @@ func (g *so101Gripper) Kinematics(ctx context.Context) (referenceframe.Model, er
 
 func (g *so101Gripper) IsHoldingSomething(ctx context.Context, extra map[string]interface{}) (gripper.HoldingStatus, error) {
 	return gripper.HoldingStatus{}, errors.ErrUnsupported
+}
+
+// Helper methods for position conversion
+
+// openPositionRadians converts the open position percentage to radians
+func (g *so101Gripper) openPositionRadians() float64 {
+	return g.percentToRadians(g.openPosition)
+}
+
+// closedPositionRadians converts the closed position percentage to radians
+func (g *so101Gripper) closedPositionRadians() float64 {
+	return g.percentToRadians(g.closedPosition)
+}
+
+// percentToRadians converts percentage (0-100) to radians using calibration
+// The feetech-servo package handles the actual calibration conversion internally
+func (g *so101Gripper) percentToRadians(percent float64) float64 {
+	// Since the gripper calibration uses NormModeRange100 (0-100%),
+	// we can directly use the percentage value and let feetech-servo handle conversion
+	// But we need to convert to the expected format for the controller
+
+	// For now, we'll do a simple mapping based on the calibration range
+	cal := g.controller.getCalibrationForServo(g.servoID)
+	if cal == nil {
+		// Fallback to default behavior
+		return (percent - 50.0) / 50.0 * 3.14159265359
+	}
+
+	// Convert percentage to normalized position within the calibrated range
+	normalizedPos := percent / 100.0
+
+	// Convert to radians (assuming ±π range)
+	radians := (normalizedPos*2.0 - 1.0) * 3.14159265359 // Convert 0-1 to -π to +π
+
+	// Apply drive mode if needed
+	if cal.DriveMode != 0 {
+		radians = -radians
+	}
+
+	return radians
+}
+
+// radiansToPercent converts radians to percentage (0-100) using calibration
+func (g *so101Gripper) radiansToPercent(radians float64) float64 {
+	cal := g.controller.getCalibrationForServo(g.servoID)
+	if cal == nil {
+		// Fallback to default behavior
+		return (radians/3.14159265359)*50.0 + 50.0
+	}
+
+	// Apply drive mode if needed
+	adjustedRadians := radians
+	if cal.DriveMode != 0 {
+		adjustedRadians = -radians
+	}
+
+	// Convert radians to normalized position (-1 to 1)
+	normalizedPos := adjustedRadians / 3.14159265359
+
+	// Convert to percentage (0-100)
+	percent := (normalizedPos + 1.0) / 2.0 * 100.0
+
+	// Clamp to valid range
+	if percent < 0 {
+		percent = 0
+	}
+	if percent > 100 {
+		percent = 100
+	}
+
+	return percent
 }

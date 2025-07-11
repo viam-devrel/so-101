@@ -3,10 +3,12 @@ package so_arm
 import (
 	"encoding/json"
 	"fmt"
-	"go.viam.com/rdk/logging"
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/hipsterbrown/feetech-servo"
+	"go.viam.com/rdk/logging"
 )
 
 // SoArm101Config represents the configuration for the SO-101 arm component
@@ -30,6 +32,50 @@ type SoArm101Config struct {
 
 	// Logger for debugging (not serialized)
 	Logger logging.Logger `json:"-"`
+}
+
+// SO101FullCalibration holds calibration data for all joints using feetech MotorCalibration
+type SO101FullCalibration struct {
+	ShoulderPan  *feetech.MotorCalibration `json:"shoulder_pan"`
+	ShoulderLift *feetech.MotorCalibration `json:"shoulder_lift"`
+	ElbowFlex    *feetech.MotorCalibration `json:"elbow_flex"`
+	WristFlex    *feetech.MotorCalibration `json:"wrist_flex"`
+	WristRoll    *feetech.MotorCalibration `json:"wrist_roll"`
+	Gripper      *feetech.MotorCalibration `json:"gripper"`
+}
+
+// Default calibration data for SO-101 (all 6 joints)
+var DefaultSO101FullCalibration = SO101FullCalibration{
+	ShoulderPan: &feetech.MotorCalibration{
+		ID: 1, DriveMode: 0, HomingOffset: 0,
+		RangeMin: 500, RangeMax: 3500,
+		NormMode: feetech.NormModeDegrees,
+	},
+	ShoulderLift: &feetech.MotorCalibration{
+		ID: 2, DriveMode: 0, HomingOffset: 0,
+		RangeMin: 500, RangeMax: 3500,
+		NormMode: feetech.NormModeDegrees,
+	},
+	ElbowFlex: &feetech.MotorCalibration{
+		ID: 3, DriveMode: 0, HomingOffset: 0,
+		RangeMin: 500, RangeMax: 3500,
+		NormMode: feetech.NormModeDegrees,
+	},
+	WristFlex: &feetech.MotorCalibration{
+		ID: 4, DriveMode: 0, HomingOffset: 0,
+		RangeMin: 500, RangeMax: 3500,
+		NormMode: feetech.NormModeDegrees,
+	},
+	WristRoll: &feetech.MotorCalibration{
+		ID: 5, DriveMode: 0, HomingOffset: 0,
+		RangeMin: 500, RangeMax: 3500,
+		NormMode: feetech.NormModeDegrees,
+	},
+	Gripper: &feetech.MotorCalibration{
+		ID: 6, DriveMode: 0, HomingOffset: 0,
+		RangeMin: 500, RangeMax: 3500,
+		NormMode: feetech.NormModeRange100, // 0-100% for gripper
+	},
 }
 
 // Validate ensures all parts of the config are valid
@@ -85,23 +131,60 @@ func (cfg *SoArm101Config) LoadCalibration(logger logging.Logger) SO101FullCalib
 	return calibration
 }
 
-// SO101Calibration holds calibration data for arm joints (backwards compatibility)
-type SO101Calibration struct {
-	ShoulderPan  SO101JointCalibration `json:"shoulder_pan"`
-	ShoulderLift SO101JointCalibration `json:"shoulder_lift"`
-	ElbowFlex    SO101JointCalibration `json:"elbow_flex"`
-	WristFlex    SO101JointCalibration `json:"wrist_flex"`
-	WristRoll    SO101JointCalibration `json:"wrist_roll"`
+// CalibrationFileFormat represents the JSON structure for calibration files
+// This maintains backward compatibility with existing calibration files
+type CalibrationFileFormat struct {
+	ShoulderPan  *CalibrationEntry `json:"shoulder_pan"`
+	ShoulderLift *CalibrationEntry `json:"shoulder_lift"`
+	ElbowFlex    *CalibrationEntry `json:"elbow_flex"`
+	WristFlex    *CalibrationEntry `json:"wrist_flex"`
+	WristRoll    *CalibrationEntry `json:"wrist_roll"`
+	Gripper      *CalibrationEntry `json:"gripper"`
 }
 
-// CalibrationFileFormat represents the JSON structure for calibration files
-type CalibrationFileFormat struct {
-	ShoulderPan  SO101JointCalibration `json:"shoulder_pan"`
-	ShoulderLift SO101JointCalibration `json:"shoulder_lift"`
-	ElbowFlex    SO101JointCalibration `json:"elbow_flex"`
-	WristFlex    SO101JointCalibration `json:"wrist_flex"`
-	WristRoll    SO101JointCalibration `json:"wrist_roll"`
-	Gripper      SO101JointCalibration `json:"gripper"`
+// CalibrationEntry represents a single calibration entry in the file
+// This allows for backward compatibility while using MotorCalibration internally
+type CalibrationEntry struct {
+	ID           int `json:"id"`
+	DriveMode    int `json:"drive_mode"`
+	HomingOffset int `json:"homing_offset"`
+	RangeMin     int `json:"range_min"`
+	RangeMax     int `json:"range_max"`
+	NormMode     int `json:"norm_mode,omitempty"` // Optional for backward compatibility
+}
+
+// ToMotorCalibration converts CalibrationEntry to feetech.MotorCalibration
+func (ce *CalibrationEntry) ToMotorCalibration() *feetech.MotorCalibration {
+	normMode := ce.NormMode
+	if normMode == 0 {
+		// Default normalization mode based on servo ID
+		if ce.ID == 6 {
+			normMode = feetech.NormModeRange100 // Gripper uses 0-100%
+		} else {
+			normMode = feetech.NormModeDegrees // Joints use degrees
+		}
+	}
+
+	return &feetech.MotorCalibration{
+		ID:           ce.ID,
+		DriveMode:    ce.DriveMode,
+		HomingOffset: ce.HomingOffset,
+		RangeMin:     ce.RangeMin,
+		RangeMax:     ce.RangeMax,
+		NormMode:     normMode,
+	}
+}
+
+// FromMotorCalibration converts feetech.MotorCalibration to CalibrationEntry
+func FromMotorCalibration(mc *feetech.MotorCalibration) *CalibrationEntry {
+	return &CalibrationEntry{
+		ID:           mc.ID,
+		DriveMode:    mc.DriveMode,
+		HomingOffset: mc.HomingOffset,
+		RangeMin:     mc.RangeMin,
+		RangeMax:     mc.RangeMax,
+		NormMode:     mc.NormMode,
+	}
 }
 
 // LoadFullCalibrationFromFile loads and validates full calibration from a JSON file
@@ -118,14 +201,22 @@ func LoadFullCalibrationFromFile(filePath string, logger logging.Logger) (SO101F
 		return SO101FullCalibration{}, fmt.Errorf("failed to parse calibration JSON: %w", err)
 	}
 
-	// Convert to internal format
+	// Helper function to convert or use default
+	convertOrDefault := func(entry *CalibrationEntry, defaultCal *feetech.MotorCalibration) *feetech.MotorCalibration {
+		if entry != nil {
+			return entry.ToMotorCalibration()
+		}
+		return defaultCal
+	}
+
+	// Convert to internal format with defaults for missing entries
 	calibration := SO101FullCalibration{
-		ShoulderPan:  fileFormat.ShoulderPan,
-		ShoulderLift: fileFormat.ShoulderLift,
-		ElbowFlex:    fileFormat.ElbowFlex,
-		WristFlex:    fileFormat.WristFlex,
-		WristRoll:    fileFormat.WristRoll,
-		Gripper:      fileFormat.Gripper,
+		ShoulderPan:  convertOrDefault(fileFormat.ShoulderPan, DefaultSO101FullCalibration.ShoulderPan),
+		ShoulderLift: convertOrDefault(fileFormat.ShoulderLift, DefaultSO101FullCalibration.ShoulderLift),
+		ElbowFlex:    convertOrDefault(fileFormat.ElbowFlex, DefaultSO101FullCalibration.ElbowFlex),
+		WristFlex:    convertOrDefault(fileFormat.WristFlex, DefaultSO101FullCalibration.WristFlex),
+		WristRoll:    convertOrDefault(fileFormat.WristRoll, DefaultSO101FullCalibration.WristRoll),
+		Gripper:      convertOrDefault(fileFormat.Gripper, DefaultSO101FullCalibration.Gripper),
 	}
 
 	// Validate calibration
@@ -136,11 +227,43 @@ func LoadFullCalibrationFromFile(filePath string, logger logging.Logger) (SO101F
 	return calibration, nil
 }
 
+// SaveFullCalibrationToFile saves calibration to a JSON file
+func SaveFullCalibrationToFile(filePath string, calibration SO101FullCalibration) error {
+	// Helper function to convert or nil
+	convertOrNil := func(mc *feetech.MotorCalibration) *CalibrationEntry {
+		if mc != nil {
+			return FromMotorCalibration(mc)
+		}
+		return nil
+	}
+
+	// Convert to file format
+	fileFormat := CalibrationFileFormat{
+		ShoulderPan:  convertOrNil(calibration.ShoulderPan),
+		ShoulderLift: convertOrNil(calibration.ShoulderLift),
+		ElbowFlex:    convertOrNil(calibration.ElbowFlex),
+		WristFlex:    convertOrNil(calibration.WristFlex),
+		WristRoll:    convertOrNil(calibration.WristRoll),
+		Gripper:      convertOrNil(calibration.Gripper),
+	}
+
+	data, err := json.MarshalIndent(fileFormat, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal calibration: %w", err)
+	}
+
+	if err := os.WriteFile(filePath, data, 0644); err != nil {
+		return fmt.Errorf("failed to write calibration file: %w", err)
+	}
+
+	return nil
+}
+
 // ValidateFullCalibration validates that all calibration values are reasonable
 func ValidateFullCalibration(cal SO101FullCalibration, logger logging.Logger) error {
 	joints := []struct {
 		name   string
-		config SO101JointCalibration
+		config *feetech.MotorCalibration
 	}{
 		{"shoulder_pan", cal.ShoulderPan},
 		{"shoulder_lift", cal.ShoulderLift},
@@ -151,8 +274,11 @@ func ValidateFullCalibration(cal SO101FullCalibration, logger logging.Logger) er
 	}
 
 	for _, joint := range joints {
-		if err := validateJointCalibration(joint.name, joint.config); err != nil {
-			return err
+		if joint.config == nil {
+			return fmt.Errorf("joint %s: calibration is nil", joint.name)
+		}
+		if err := joint.config.Validate(); err != nil {
+			return fmt.Errorf("joint %s: %w", joint.name, err)
 		}
 	}
 
@@ -163,47 +289,80 @@ func ValidateFullCalibration(cal SO101FullCalibration, logger logging.Logger) er
 	return nil
 }
 
-// validateJointCalibration validates a single joint's calibration
-func validateJointCalibration(jointName string, cal SO101JointCalibration) error {
-	// Validate servo ID range (1-6 for typical setups)
-	if cal.ID < 1 || cal.ID > 6 {
-		return fmt.Errorf("joint %s: invalid servo ID %d, must be 1-6", jointName, cal.ID)
+// GetMotorCalibrationByID returns the motor calibration for a specific servo ID
+func (cal SO101FullCalibration) GetMotorCalibrationByID(servoID int) *feetech.MotorCalibration {
+	switch servoID {
+	case 1:
+		return cal.ShoulderPan
+	case 2:
+		return cal.ShoulderLift
+	case 3:
+		return cal.ElbowFlex
+	case 4:
+		return cal.WristFlex
+	case 5:
+		return cal.WristRoll
+	case 6:
+		return cal.Gripper
+	default:
+		return nil
+	}
+}
+
+// ToFeetechCalibrationMap converts SO101FullCalibration to a map for feetech-servo
+func (cal SO101FullCalibration) ToFeetechCalibrationMap() map[int]*feetech.MotorCalibration {
+	return map[int]*feetech.MotorCalibration{
+		1: cal.ShoulderPan,
+		2: cal.ShoulderLift,
+		3: cal.ElbowFlex,
+		4: cal.WristFlex,
+		5: cal.WristRoll,
+		6: cal.Gripper,
+	}
+}
+
+// FromFeetechCalibrationMap creates SO101FullCalibration from a feetech calibration map
+func FromFeetechCalibrationMap(calibrations map[int]*feetech.MotorCalibration) SO101FullCalibration {
+	// Helper function to get calibration or default
+	getOrDefault := func(id int, defaultCal *feetech.MotorCalibration) *feetech.MotorCalibration {
+		if mc, exists := calibrations[id]; exists && mc != nil {
+			return mc
+		}
+		return defaultCal
 	}
 
-	// Validate drive mode (typically 0 or 1)
-	if cal.DriveMode < 0 || cal.DriveMode > 1 {
-		return fmt.Errorf("joint %s: invalid drive_mode %d, must be 0 or 1", jointName, cal.DriveMode)
+	return SO101FullCalibration{
+		ShoulderPan:  getOrDefault(1, DefaultSO101FullCalibration.ShoulderPan),
+		ShoulderLift: getOrDefault(2, DefaultSO101FullCalibration.ShoulderLift),
+		ElbowFlex:    getOrDefault(3, DefaultSO101FullCalibration.ElbowFlex),
+		WristFlex:    getOrDefault(4, DefaultSO101FullCalibration.WristFlex),
+		WristRoll:    getOrDefault(5, DefaultSO101FullCalibration.WristRoll),
+		Gripper:      getOrDefault(6, DefaultSO101FullCalibration.Gripper),
 	}
+}
 
-	// Validate position range
-	if cal.RangeMin < 0 || cal.RangeMax > 4095 {
-		return fmt.Errorf("joint %s: position range [%d, %d] outside valid servo range [0, 4095]",
-			jointName, cal.RangeMin, cal.RangeMax)
+// Compare calibrations for equality
+func (cal SO101FullCalibration) Equal(other SO101FullCalibration) bool {
+	return calibrationsEqual(cal.ShoulderPan, other.ShoulderPan) &&
+		calibrationsEqual(cal.ShoulderLift, other.ShoulderLift) &&
+		calibrationsEqual(cal.ElbowFlex, other.ElbowFlex) &&
+		calibrationsEqual(cal.WristFlex, other.WristFlex) &&
+		calibrationsEqual(cal.WristRoll, other.WristRoll) &&
+		calibrationsEqual(cal.Gripper, other.Gripper)
+}
+
+// Helper function to compare two motor calibrations
+func calibrationsEqual(a, b *feetech.MotorCalibration) bool {
+	if a == nil && b == nil {
+		return true
 	}
-
-	if cal.RangeMin >= cal.RangeMax {
-		return fmt.Errorf("joint %s: range_min (%d) must be less than range_max (%d)",
-			jointName, cal.RangeMin, cal.RangeMax)
+	if a == nil || b == nil {
+		return false
 	}
-
-	// For gripper, allow smaller range as it might have limited motion
-	minRangeSize := 500
-	if jointName == "gripper" {
-		minRangeSize = 200 // Grippers often have smaller ranges
-	}
-
-	// Validate range size
-	rangeSize := cal.RangeMax - cal.RangeMin
-	if rangeSize < minRangeSize {
-		return fmt.Errorf("joint %s: range size %d is too small (< %d), check range_min/range_max values",
-			jointName, rangeSize, minRangeSize)
-	}
-
-	// Validate homing offset is reasonable (shouldn't be extremely large)
-	if cal.HomingOffset < -4095 || cal.HomingOffset > 4095 {
-		return fmt.Errorf("joint %s: homing_offset %d is outside reasonable range [-4095, 4095]",
-			jointName, cal.HomingOffset)
-	}
-
-	return nil
+	return a.ID == b.ID &&
+		a.DriveMode == b.DriveMode &&
+		a.HomingOffset == b.HomingOffset &&
+		a.RangeMin == b.RangeMin &&
+		a.RangeMax == b.RangeMax &&
+		a.NormMode == b.NormMode
 }
