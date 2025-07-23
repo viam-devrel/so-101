@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	soarm "arm"
+	soarm "so_arm"
 
 	"go.viam.com/rdk/components/arm"
 	"go.viam.com/rdk/logging"

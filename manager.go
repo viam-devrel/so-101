@@ -4,29 +4,21 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/hipsterbrown/feetech-servo"
 	"go.viam.com/rdk/logging"
 )
 
-var (
-	globalBus           *feetech.Bus
-	globalServos        map[int]*feetech.Servo
-	controllerMutex     sync.RWMutex
-	refCount            int64
-	lastError           error
-	currentConfig       *SoArm101Config
-	currentCalibration  SO101FullCalibration
-	feetechCalibrations map[int]*feetech.MotorCalibration
-)
+// Global registry instance for managing controllers by port
+var globalRegistry = NewControllerRegistry()
 
 // SafeSoArmController wraps the feetech servo bus with thread-safe access
 type SafeSoArmController struct {
-	bus    *feetech.Bus
-	servos map[int]*feetech.Servo
-	logger logging.Logger
-	mu     sync.RWMutex
+	bus         *feetech.Bus
+	servos      map[int]*feetech.Servo
+	logger      logging.Logger
+	calibration SO101FullCalibration // Store calibration locally
+	mu          sync.RWMutex
 }
 
 // Thread-safe controller methods
@@ -211,11 +203,8 @@ func (s *SafeSoArmController) SetCalibration(calibration SO101FullCalibration) e
 		s.bus.SetCalibration(id, cal)
 	}
 
-	// Update global calibration
-	controllerMutex.Lock()
-	currentCalibration = calibration
-	feetechCalibrations = feetechCals
-	controllerMutex.Unlock()
+	// Update local calibration
+	s.calibration = calibration
 
 	return nil
 }
@@ -223,10 +212,7 @@ func (s *SafeSoArmController) SetCalibration(calibration SO101FullCalibration) e
 func (s *SafeSoArmController) GetCalibration() SO101FullCalibration {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-
-	controllerMutex.RLock()
-	defer controllerMutex.RUnlock()
-	return currentCalibration
+	return s.calibration
 }
 
 // Helper function to get calibration for a specific servo (for backward compatibility)
@@ -260,160 +246,74 @@ func GetSharedController(config *SoArm101Config) (*SafeSoArmController, error) {
 
 // GetSharedControllerWithCalibration gets a shared controller with specified calibration
 func GetSharedControllerWithCalibration(config *SoArm101Config, calibration SO101FullCalibration) (*SafeSoArmController, error) {
-	controllerMutex.Lock()
-	defer controllerMutex.Unlock()
-
-	currentRefCount := atomic.LoadInt64(&refCount)
-
-	if globalBus == nil && lastError != nil {
-		return nil, fmt.Errorf("cached controller creation error: %w", lastError)
-	}
-
-	if globalBus != nil {
-		if !configsEqual(currentConfig, config) {
-			return nil, fmt.Errorf("conflict: existing controller uses different config (refCount: %d)", currentRefCount)
-		}
-
-		// Check if calibration is different - if so, update it
-		if !fullCalibrationsEqual(currentCalibration, calibration) {
-			if config.Logger != nil {
-				config.Logger.Info("Updating controller calibration")
-			}
-
-			// Apply new calibration directly
-			feetechCals := calibration.ToFeetechCalibrationMap()
-			for id, cal := range feetechCals {
-				globalBus.SetCalibration(id, cal)
-			}
-			currentCalibration = calibration
-			feetechCalibrations = feetechCals
-		}
-
-		atomic.AddInt64(&refCount, 1)
-		return &SafeSoArmController{
-			bus:    globalBus,
-			servos: globalServos,
-			logger: config.Logger,
-		}, nil
-	}
-
-	// Create new feetech-servo bus
-	feetechCalibrations = calibration.ToFeetechCalibrationMap()
-
-	config.Logger.Info("Calibration map: ", feetechCalibrations)
-
-	busConfig := feetech.BusConfig{
-		Port:         config.Port,
-		Baudrate:     config.Baudrate,
-		Protocol:     feetech.ProtocolV0, // SO-101 uses Protocol 0
-		Timeout:      config.Timeout,
-		Calibrations: feetechCalibrations,
-	}
-
-	if busConfig.Timeout == 0 {
-		busConfig.Timeout = time.Second
-	}
-	if busConfig.Baudrate == 0 {
-		busConfig.Baudrate = 1000000
-	}
-
-	bus, err := feetech.NewBus(busConfig)
-	if err != nil {
-		lastError = err
-		return nil, fmt.Errorf("failed to create feetech servo bus: %w", err)
-	}
-
-	// Create servo instances for all 6 servos
-	servos := make(map[int]*feetech.Servo)
-	for id := 1; id <= 6; id++ {
-		servo, err := bus.ServoWithModel(id, "sts3215") // SO-101 uses STS3215 servos
-		if err != nil {
-			bus.Close()
-			lastError = err
-			return nil, fmt.Errorf("failed to create servo %d: %w", id, err)
-		}
-		servos[id] = servo
-	}
-
-	globalBus = bus
-	globalServos = servos
-	currentConfig = config
-	currentCalibration = calibration
-	lastError = nil
-	atomic.StoreInt64(&refCount, 1)
-
-	if config.Logger != nil {
-		config.Logger.Infof("Created new feetech servo bus with %d servos", len(servos))
-	}
-
-	return &SafeSoArmController{
-		bus:    bus,
-		servos: servos,
-		logger: config.Logger,
-	}, nil
+	return globalRegistry.GetController(config.Port, config, calibration)
 }
 
 func ReleaseSharedController() {
-	controllerMutex.Lock()
-	defer controllerMutex.Unlock()
-
-	currentRefCount := atomic.AddInt64(&refCount, -1)
-	if currentRefCount <= 0 && globalBus != nil {
-		if err := globalBus.Close(); err != nil && currentConfig != nil && currentConfig.Logger != nil {
-			currentConfig.Logger.Warnf("error closing shared controller: %v", err)
-		}
-		globalBus = nil
-		globalServos = nil
-		currentConfig = nil
-		currentCalibration = SO101FullCalibration{}
-		feetechCalibrations = nil
-		atomic.StoreInt64(&refCount, 0)
-		lastError = nil
-	}
+	globalRegistry.releaseFromCaller()
 }
 
 func ForceCloseSharedController() error {
-	controllerMutex.Lock()
-	defer controllerMutex.Unlock()
-
-	var err error
-	if globalBus != nil {
-		err = globalBus.Close()
-		globalBus = nil
-		globalServos = nil
-		currentConfig = nil
-		currentCalibration = SO101FullCalibration{}
-		feetechCalibrations = nil
-		atomic.StoreInt64(&refCount, 0)
-		lastError = nil
+	// Force close all controllers in registry
+	globalRegistry.mu.RLock()
+	portPaths := make([]string, 0, len(globalRegistry.entries))
+	for portPath := range globalRegistry.entries {
+		portPaths = append(portPaths, portPath)
 	}
-	return err
+	globalRegistry.mu.RUnlock()
+
+	var lastErr error
+	for _, portPath := range portPaths {
+		if err := globalRegistry.ForceCloseController(portPath); err != nil {
+			lastErr = err
+		}
+	}
+	return lastErr
 }
 
 func GetControllerStatus() (int64, bool, string) {
-	controllerMutex.RLock()
-	defer controllerMutex.RUnlock()
+	// Return aggregated status across all controllers
+	globalRegistry.mu.RLock()
+	defer globalRegistry.mu.RUnlock()
 
-	currentRefCount := atomic.LoadInt64(&refCount)
-	hasController := globalBus != nil
-	configSummary := ""
+	var totalRefCount int64
+	hasController := len(globalRegistry.entries) > 0
+	configSummaries := make([]string, 0, len(globalRegistry.entries))
 
-	if currentConfig != nil {
-		calibrationInfo := "default"
-		if currentCalibration.ShoulderPan != nil &&
-			currentCalibration.ShoulderPan.HomingOffset != DefaultSO101FullCalibration.ShoulderPan.HomingOffset {
-			calibrationInfo = "custom"
+	for _, entry := range globalRegistry.entries {
+		entry.mu.RLock()
+		refCount := atomic.LoadInt64(&entry.refCount)
+		totalRefCount += refCount
+
+		if entry.config != nil {
+			calibrationInfo := "default"
+			if entry.calibration.ShoulderPan != nil &&
+				entry.calibration.ShoulderPan.HomingOffset != DefaultSO101FullCalibration.ShoulderPan.HomingOffset {
+				calibrationInfo = "custom"
+			}
+			summary := fmt.Sprintf("%s@%d(refs:%d,cal:%s)",
+				entry.config.Port, entry.config.Baudrate, refCount, calibrationInfo)
+			configSummaries = append(configSummaries, summary)
 		}
-		configSummary = fmt.Sprintf("Serial: %s@%d, Calibration: %s",
-			currentConfig.Port, currentConfig.Baudrate, calibrationInfo)
+		entry.mu.RUnlock()
 	}
 
-	return currentRefCount, hasController, configSummary
+	configSummary := ""
+	if len(configSummaries) > 0 {
+		configSummary = "Controllers: " + fmt.Sprintf("%v", configSummaries)
+	}
+
+	return totalRefCount, hasController, configSummary
 }
 
 // GetCurrentCalibration returns the current calibration being used
+// Note: With multiple controllers, this returns the default calibration
+// Use GetCurrentCalibrationForPort for port-specific calibration
 func GetCurrentCalibration() SO101FullCalibration {
-	controllerMutex.RLock()
-	defer controllerMutex.RUnlock()
-	return currentCalibration
+	return DefaultSO101FullCalibration
+}
+
+// GetCurrentCalibrationForPort returns the current calibration for a specific port
+func GetCurrentCalibrationForPort(portPath string) SO101FullCalibration {
+	return globalRegistry.GetCurrentCalibration(portPath)
 }
