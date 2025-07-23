@@ -3,7 +3,7 @@ module so_arm
 go 1.24.4
 
 require (
-	github.com/hipsterbrown/feetech-servo v0.2.3
+	github.com/hipsterbrown/feetech-servo v0.2.4
 	github.com/pkg/errors v0.9.1
 	go.bug.st/serial v1.6.4
 	go.viam.com/rdk v0.81.0

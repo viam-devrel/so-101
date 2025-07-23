@@ -16,6 +16,12 @@
       "model": "devrel:so101:gripper",
       "short_description": "Control the gripper joint of the SO-101 arm",
       "markdown_link": "README.md#model-devrelso101gripper"
+    },
+    {
+      "api": "rdk:component:sensor",
+      "model": "devrel:so101:calibration",
+      "short_description": "Calibrate the joints of the SO-101 arm",
+      "markdown_link": "README.md#model-devrelso101calibration"
     }
   ],
   "applications": null,

@@ -187,58 +187,136 @@ Check the shared controller status:
 }
 ```
 
-## Calibration
+## Model devrel:so101:calibration
 
-The SO-101 requires calibration to map servo positions to joint angles. Follow [LeRobot's calibration docs](https://huggingface.co/docs/lerobot/so101#calibrate) to generate this file.
+The SO-101 requires calibration to map servo positions to joint angles based on how the arm was assembled.
 
-Calibration data is stored in JSON format:
+The SO-101 Calibration Sensor provides a calibration workflow integrated into Viam's component system. It guides you through the calibration process using DoCommand calls and provides status updates through sensor readings.
+
+### Configuration
+
+```json
+{
+    "port": "/dev/ttyUSB0",
+    "calibration_file": "my_awesome_arm.json",
+}
+```
+
+#### Attributes
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `port` | string | **Required** | Serial port for servo communication (e.g., `/dev/ttyUSB0`) |
+| `baudrate` | int | Optional | Serial communication speed. Default: `1000000` |
+| `servo_ids` | []int | Optional | List of servo IDs to calibrate. Default: `[1,2,3,4,5]` (arm only) |
+| `calibration_file` | string | Optional | Path where calibration will be saved. If relative path, uses `$VIAM_MODULE_DATA` directory. Default: `"so101_calibration.json"` |
+| `timeout` | duration | Optional | Communication timeout. Default: `"5s"` |
+
+### Usage
+
+#### Monitor Progress
+
+Example output:
+
+```json
+{
+  "calibration_state": "range_recording",
+  "instruction": "Recording range of motion. Move all joints through their full ranges.",
+  "available_commands": ["stop_range_recording", "abort"],
+  "servo_count": 5,
+  "recording_time_seconds": 15.3,
+  "position_samples": 306,
+  "joints": {
+    "shoulder_pan": {
+      "id": 1,
+      "current_position": 2150,
+      "homing_offset": -103,
+      "recorded_min": 758,
+      "recorded_max": 3292,
+      "is_completed": false
+    }
+  }
+}
+```
+
+### Available Commands
+
+```json
+{
+    "command": "command_name"
+}
+```
+
+#### Workflow Commands
+
+| Command | Description | Required State |
+|---------|-------------|----------------|
+| `start` | Begin calibration workflow | `idle`, `completed`, `error` |
+| `set_homing` | Set homing offsets and write to servo registers | `started` |
+| `start_range_recording` | Begin recording servo ranges | `homing_position` |
+| `stop_range_recording` | Complete range recording | `range_recording` |
+| `save_calibration` | Write limits to servos and save file | `completed` |
+| `abort` | Cancel calibration | Any |
+| `reset` | Reset to initial state | `error` |
+
+#### Utility Commands
+
+| Command | Description |
+|---------|-------------|
+| `get_current_positions` | Read current servo positions |
+
+### State Machine
+
+The calibration sensor operates as a state machine:
+
+- **`idle`**: Ready to start calibration
+- **`started`**: Torque disabled, ready for homing position
+- **`homing_position`**: Homing set, ready for range recording  
+- **`range_recording`**: Recording min/max positions
+- **`completed`**: Calibration data ready to save
+- **`error`**: Error occurred, use reset command
+
+### Calibration File Output
+
+The sensor saves calibration in the standard format:
 
 ```json
 {
   "shoulder_pan": {
     "id": 1,
     "drive_mode": 0,
-    "homing_offset": 0,
-    "range_min": 500,
-    "range_max": 3500
+    "homing_offset": -1470,
+    "range_min": 758,
+    "range_max": 3292,
+    "norm_mode": 3
   },
   "shoulder_lift": {
     "id": 2,
-    "drive_mode": 0,
-    "homing_offset": 0,
-    "range_min": 500,
-    "range_max": 3500
-  },
-  "elbow_flex": {
-    "id": 3,
-    "drive_mode": 0,
-    "homing_offset": 0,
-    "range_min": 500,
-    "range_max": 3500
-  },
-  "wrist_flex": {
-    "id": 4,
-    "drive_mode": 0,
-    "homing_offset": 0,
-    "range_min": 500,
-    "range_max": 3500
-  },
-  "wrist_roll": {
-    "id": 5,
-    "drive_mode": 0,
-    "homing_offset": 0,
-    "range_min": 500,
-    "range_max": 3500
+    "drive_mode": 0, 
+    "homing_offset": 157,
+    "range_min": 612,
+    "range_max": 3401,
+    "norm_mode": 3
   },
   "gripper": {
     "id": 6,
     "drive_mode": 0,
-    "homing_offset": 0,
-    "range_min": 500,
-    "range_max": 3500
+    "homing_offset": 1407,
+    "range_min": 2031,
+    "range_max": 3476,
+    "norm_mode": 1
   }
 }
 ```
+
+### Troubleshooting
+
+#### Common Issues
+
+- **Range recording not working**: Ensure you call `start_range_recording` and manually move joints
+- **Invalid ranges**: Move joints through their complete range of motion  
+- **Servo communication errors**: Check port, baudrate, and servo connections
+- **Permission denied**: Ensure proper access to serial port (`sudo chmod 666 /dev/ttyUSB0`)
 
 ## Troubleshooting
 

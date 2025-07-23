@@ -191,6 +191,19 @@ func (s *SafeSoArmController) Ping() error {
 	return nil
 }
 
+// WriteServoRegister writes to a specific servo register by name
+func (s *SafeSoArmController) WriteServoRegister(servoID int, registerName string, data []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	servo, exists := s.servos[servoID]
+	if !exists {
+		return fmt.Errorf("servo %d not available", servoID)
+	}
+
+	return servo.WriteRegisterByName(registerName, data)
+}
+
 func (s *SafeSoArmController) SetCalibration(calibration SO101FullCalibration) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
