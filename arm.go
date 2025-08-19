@@ -37,23 +37,18 @@ func init() {
 	)
 }
 
-// SO101ArmConfig represents the configuration for the SO-101 arm component
 type SO101ArmConfig struct {
-	// Serial configuration
 	Port     string `json:"port,omitempty"`
 	Baudrate int    `json:"baudrate,omitempty"`
 
-	// Servo configuration - arm uses servos 1-5
+	// Arm uses servos 1-5
 	ServoIDs []int `json:"servo_ids,omitempty"`
 
-	// Common configuration
 	Timeout time.Duration `json:"timeout,omitempty"`
 
-	// Motion configuration
 	SpeedDegsPerSec        float32 `json:"speed_degs_per_sec,omitempty"`
 	AccelerationDegsPerSec float32 `json:"acceleration_degs_per_sec_per_sec,omitempty"`
 
-	// Arm calibration file
 	CalibrationFile string `json:"calibration_file,omitempty"`
 }
 
@@ -92,10 +87,9 @@ type so101 struct {
 	isMoving atomic.Bool
 	model    referenceframe.Model
 
-	// Arm-specific servo IDs (1-5)
+	// Servo IDs controlled by this arm (1-5)
 	armServoIDs []int
 
-	// Motion configuration
 	defaultSpeed float32
 	defaultAcc   float32
 
@@ -313,13 +307,10 @@ func (s *so101) MoveToJointPositions(ctx context.Context, positions []referencef
 		clampedPositions[i] = math.Max(min, math.Min(max, pos))
 	}
 
-	// Send command to controller with specific servo IDs
-	// Note: The controller now handles the conversion internally through feetech-servo
 	if err := s.controller.MoveServosToPositions(s.armServoIDs, clampedPositions, 0, 0); err != nil {
 		return fmt.Errorf("failed to move SO-101 arm: %w", err)
 	}
 
-	// Calculate wait time based on movement distance and configured speed
 	currentPositions, err := s.controller.GetJointPositionsForServos(s.armServoIDs)
 	if err != nil {
 		s.logger.Warnf("Failed to get current positions for timing calculation: %v", err)
@@ -336,8 +327,7 @@ func (s *so101) MoveToJointPositions(ctx context.Context, positions []referencef
 		}
 	}
 
-	// Calculate move time based on configured speed
-	speedRadPerSec := float64(s.defaultSpeed) * math.Pi / 180.0 // Convert to rad/sec
+	speedRadPerSec := float64(s.defaultSpeed) * math.Pi / 180.0
 	moveTimeSeconds := maxMovement / speedRadPerSec
 	if moveTimeSeconds < 0.1 {
 		moveTimeSeconds = 0.1 // Minimum move time
@@ -346,7 +336,6 @@ func (s *so101) MoveToJointPositions(ctx context.Context, positions []referencef
 		moveTimeSeconds = 10.0 // Maximum move time for safety
 	}
 
-	// Wait for movement to complete
 	time.Sleep(time.Duration(moveTimeSeconds * float64(time.Second)))
 
 	return nil
@@ -369,19 +358,16 @@ func (s *so101) JointPositions(ctx context.Context, extra map[string]interface{}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	// Get joint positions for only the arm servos
 	radians, err := s.controller.GetJointPositionsForServos(s.armServoIDs)
 	if err != nil {
 		s.logger.Warnf("Failed to read joint positions: %v", err)
 		return nil, fmt.Errorf("failed to read joint positions: %w. Try running 'diagnose' command for more details", err)
 	}
 
-	// Ensure we have the expected number of joints for the arm
 	if len(radians) != len(s.armServoIDs) {
 		return nil, fmt.Errorf("expected %d joint positions for SO-101 arm, got %d", len(s.armServoIDs), len(radians))
 	}
 
-	// Convert to Viam input format
 	positions := make([]referenceframe.Input, len(radians))
 	for i, radian := range radians {
 		positions[i] = referenceframe.Input{Value: radian}
@@ -632,10 +618,8 @@ func (s *so101) doServoInitialization() error {
 		return fmt.Errorf("failed to enable torque: %w", err)
 	}
 
-	// Brief delay to allow torque to stabilize
 	time.Sleep(100 * time.Millisecond)
 
-	// Verify we can read positions from arm servos
 	s.logger.Debug("Verifying position reading from arm servos...")
 	positions, err := s.controller.GetJointPositionsForServos(s.armServoIDs)
 	if err != nil {
@@ -662,7 +646,6 @@ func (s *so101) diagnoseConnection() error {
 	}
 	s.logger.Info("Overall ping successful")
 
-	// Try reading all arm positions at once
 	positions, err := s.controller.GetJointPositionsForServos(s.armServoIDs)
 	if err != nil {
 		s.logger.Errorf("Failed to read arm positions: %v", err)
@@ -680,7 +663,6 @@ func (s *so101) diagnoseConnection() error {
 func (s *so101) verifyServoConfig() error {
 	s.logger.Info("Verifying arm servo configuration...")
 
-	// Try to read all positions to verify communication
 	positions, err := s.controller.GetJointPositionsForServos(s.armServoIDs)
 	if err != nil {
 		return fmt.Errorf("failed to verify servo config: %w", err)

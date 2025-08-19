@@ -9,25 +9,20 @@ import (
 	"go.viam.com/rdk/logging"
 )
 
-// Global registry instance for managing controllers by port
 var globalRegistry = NewControllerRegistry()
 
-// SafeSoArmController wraps the feetech servo bus with thread-safe access
 type SafeSoArmController struct {
 	bus         *feetech.Bus
 	servos      map[int]*feetech.Servo
 	logger      logging.Logger
-	calibration SO101FullCalibration // Store calibration locally
+	calibration SO101FullCalibration
 	mu          sync.RWMutex
 }
-
-// Thread-safe controller methods
 
 func (s *SafeSoArmController) MoveToJointPositions(jointAngles []float64, speed, acc int) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Use the first 5 servos for arm movement
 	armServoIDs := []int{1, 2, 3, 4, 5}
 	if len(jointAngles) != len(armServoIDs) {
 		return fmt.Errorf("expected %d joint angles, got %d", len(armServoIDs), len(jointAngles))
@@ -42,14 +37,12 @@ func (s *SafeSoArmController) MoveToJointPositions(jointAngles []float64, speed,
 		}
 	}
 
-	// Convert positions to degrees for feetech-servo (it handles calibration internally)
 	positions := make([]float64, len(jointAngles))
 	for i, angle := range jointAngles {
-		// Convert from radians to degrees
 		positions[i] = angle * 180.0 / 3.14159265359
 	}
 
-	return s.bus.SyncWritePositions(servos, positions, true) // true = use calibrated/normalized positions
+	return s.bus.SyncWritePositions(servos, positions, true)
 }
 
 func (s *SafeSoArmController) MoveServosToPositions(servoIDs []int, jointAngles []float64, speed, acc int) error {
@@ -69,7 +62,6 @@ func (s *SafeSoArmController) MoveServosToPositions(servoIDs []int, jointAngles 
 		}
 	}
 
-	// Convert positions to degrees for feetech-servo
 	positions := make([]float64, len(jointAngles))
 	for i, angle := range jointAngles {
 		positions[i] = angle * 180.0 / 3.14159265359
@@ -82,7 +74,6 @@ func (s *SafeSoArmController) GetJointPositions() ([]float64, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	// Get positions for servos 1-6
 	servoIDs := []int{1, 2, 3, 4, 5, 6}
 	var servos []*feetech.Servo
 	for _, id := range servoIDs {
@@ -93,16 +84,14 @@ func (s *SafeSoArmController) GetJointPositions() ([]float64, error) {
 		}
 	}
 
-	positionMap, err := s.bus.SyncReadPositions(servos, true) // true = use calibrated/normalized positions
+	positionMap, err := s.bus.SyncReadPositions(servos, true)
 	if err != nil {
 		return nil, err
 	}
 
-	// Convert map to ordered slice and degrees to radians
 	positions := make([]float64, len(servoIDs))
 	for i, id := range servoIDs {
 		if pos, exists := positionMap[id]; exists {
-			// Convert from degrees to radians
 			positions[i] = pos * 3.14159265359 / 180.0
 		} else {
 			return nil, fmt.Errorf("no position data for servo %d", id)
@@ -130,7 +119,6 @@ func (s *SafeSoArmController) GetJointPositionsForServos(servoIDs []int) ([]floa
 		return nil, err
 	}
 
-	// Convert map to ordered slice and degrees to radians
 	positions := make([]float64, len(servoIDs))
 	for i, id := range servoIDs {
 		if pos, exists := positionMap[id]; exists {
@@ -147,7 +135,6 @@ func (s *SafeSoArmController) SetTorqueEnable(enable bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Enable/disable torque for all servos
 	for _, servo := range s.servos {
 		if err := servo.SetTorqueEnable(enable); err != nil {
 			return fmt.Errorf("failed to set torque enable for servo %d: %w", servo.ID, err)
@@ -160,7 +147,6 @@ func (s *SafeSoArmController) Stop() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Stop all servos by setting velocity to 0
 	for _, servo := range s.servos {
 		if err := servo.WriteVelocity(0, false); err != nil {
 			s.logger.Warnf("Failed to stop servo %d: %v", servo.ID, err)
@@ -208,15 +194,12 @@ func (s *SafeSoArmController) SetCalibration(calibration SO101FullCalibration) e
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Get feetech calibration map directly
 	feetechCals := calibration.ToFeetechCalibrationMap()
 
-	// Update calibrations in the bus
 	for id, cal := range feetechCals {
 		s.bus.SetCalibration(id, cal)
 	}
 
-	// Update local calibration
 	s.calibration = calibration
 
 	return nil
@@ -228,13 +211,11 @@ func (s *SafeSoArmController) GetCalibration() SO101FullCalibration {
 	return s.calibration
 }
 
-// Helper function to get calibration for a specific servo (for backward compatibility)
 func (s *SafeSoArmController) getCalibrationForServo(servoID int) *feetech.MotorCalibration {
 	cal := s.GetCalibration()
 	return cal.GetMotorCalibrationByID(servoID)
 }
 
-// Compare configs for compatibility
 func configsEqual(a, b *SoArm101Config) bool {
 	if a == nil && b == nil {
 		return true
@@ -247,17 +228,14 @@ func configsEqual(a, b *SoArm101Config) bool {
 		a.Timeout == b.Timeout
 }
 
-// Compare calibrations for equality
 func fullCalibrationsEqual(a, b SO101FullCalibration) bool {
 	return a.Equal(b)
 }
 
-// GetSharedController gets a shared controller using default calibration
 func GetSharedController(config *SoArm101Config) (*SafeSoArmController, error) {
 	return GetSharedControllerWithCalibration(config, DefaultSO101FullCalibration)
 }
 
-// GetSharedControllerWithCalibration gets a shared controller with specified calibration
 func GetSharedControllerWithCalibration(config *SoArm101Config, calibration SO101FullCalibration) (*SafeSoArmController, error) {
 	return globalRegistry.GetController(config.Port, config, calibration)
 }
@@ -267,7 +245,6 @@ func ReleaseSharedController() {
 }
 
 func ForceCloseSharedController() error {
-	// Force close all controllers in registry
 	globalRegistry.mu.RLock()
 	portPaths := make([]string, 0, len(globalRegistry.entries))
 	for portPath := range globalRegistry.entries {
@@ -285,7 +262,6 @@ func ForceCloseSharedController() error {
 }
 
 func GetControllerStatus() (int64, bool, string) {
-	// Return aggregated status across all controllers
 	globalRegistry.mu.RLock()
 	defer globalRegistry.mu.RUnlock()
 
@@ -319,14 +295,12 @@ func GetControllerStatus() (int64, bool, string) {
 	return totalRefCount, hasController, configSummary
 }
 
-// GetCurrentCalibration returns the current calibration being used
-// Note: With multiple controllers, this returns the default calibration
+// With multiple controllers, this returns the default calibration
 // Use GetCurrentCalibrationForPort for port-specific calibration
 func GetCurrentCalibration() SO101FullCalibration {
 	return DefaultSO101FullCalibration
 }
 
-// GetCurrentCalibrationForPort returns the current calibration for a specific port
 func GetCurrentCalibrationForPort(portPath string) SO101FullCalibration {
 	return globalRegistry.GetCurrentCalibration(portPath)
 }

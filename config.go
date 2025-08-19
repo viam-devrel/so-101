@@ -11,30 +11,23 @@ import (
 	"go.viam.com/rdk/logging"
 )
 
-// SoArm101Config represents the configuration for the SO-101 arm component
 type SoArm101Config struct {
-	// Serial configuration
 	Port     string `json:"port,omitempty"`
 	Baudrate int    `json:"baudrate,omitempty"`
 
-	// Servo configuration
 	ServoIDs []int `json:"servo_ids,omitempty"`
 
-	// Common configuration
 	Timeout time.Duration `json:"timeout,omitempty"`
 
-	// Motion configuration
 	SpeedDegsPerSec        float32 `json:"speed_degs_per_sec,omitempty"`
 	AccelerationDegsPerSec float32 `json:"acceleration_degs_per_sec_per_sec,omitempty"`
 
-	// Calibration configuration
 	CalibrationFile string `json:"calibration_file,omitempty"`
 
-	// Logger for debugging (not serialized)
+	// Not serialized
 	Logger logging.Logger `json:"-"`
 }
 
-// SO101FullCalibration holds calibration data for all joints using feetech MotorCalibration
 type SO101FullCalibration struct {
 	ShoulderPan  *feetech.MotorCalibration `json:"shoulder_pan"`
 	ShoulderLift *feetech.MotorCalibration `json:"shoulder_lift"`
@@ -44,7 +37,6 @@ type SO101FullCalibration struct {
 	Gripper      *feetech.MotorCalibration `json:"gripper"`
 }
 
-// Default calibration data for SO-101 (all 6 joints)
 var DefaultSO101FullCalibration = SO101FullCalibration{
 	ShoulderPan: &feetech.MotorCalibration{
 		ID: 1, DriveMode: 0, HomingOffset: 0,
@@ -85,21 +77,18 @@ func (cfg *SoArm101Config) Validate(path string) ([]string, []string, error) {
 	}
 
 	if len(cfg.ServoIDs) == 0 {
-		// Set default servo IDs if not specified (arm joints only)
 		cfg.ServoIDs = []int{1, 2, 3, 4, 5}
 	}
 
 	if cfg.Baudrate == 0 {
-		cfg.Baudrate = 1000000 // Default baudrate
+		cfg.Baudrate = 1000000
 	}
 
-	// Validate calibration file if provided
 	if cfg.CalibrationFile != "" {
 		if !filepath.IsAbs(cfg.CalibrationFile) {
 			return nil, nil, fmt.Errorf("calibration_file must be an absolute path, got: %s", cfg.CalibrationFile)
 		}
 
-		// Check if file exists and is readable
 		if _, err := os.Stat(cfg.CalibrationFile); err != nil {
 			return nil, []string{fmt.Sprintf("calibration file not accessible: %v (will use defaults)", err)}, nil
 		}
@@ -131,8 +120,7 @@ func (cfg *SoArm101Config) LoadCalibration(logger logging.Logger) SO101FullCalib
 	return calibration
 }
 
-// CalibrationFileFormat represents the JSON structure for calibration files
-// This maintains backward compatibility with existing calibration files
+// Maintains backward compatibility with existing calibration files
 type CalibrationFileFormat struct {
 	ShoulderPan  *CalibrationEntry `json:"shoulder_pan"`
 	ShoulderLift *CalibrationEntry `json:"shoulder_lift"`
@@ -142,26 +130,23 @@ type CalibrationFileFormat struct {
 	Gripper      *CalibrationEntry `json:"gripper"`
 }
 
-// CalibrationEntry represents a single calibration entry in the file
-// This allows for backward compatibility while using MotorCalibration internally
 type CalibrationEntry struct {
 	ID           int `json:"id"`
 	DriveMode    int `json:"drive_mode"`
 	HomingOffset int `json:"homing_offset"`
 	RangeMin     int `json:"range_min"`
 	RangeMax     int `json:"range_max"`
-	NormMode     int `json:"norm_mode,omitempty"` // Optional for backward compatibility
+	NormMode     int `json:"norm_mode,omitempty"`
 }
 
 // ToMotorCalibration converts CalibrationEntry to feetech.MotorCalibration
 func (ce *CalibrationEntry) ToMotorCalibration() *feetech.MotorCalibration {
 	normMode := ce.NormMode
 	if normMode == 0 {
-		// Default normalization mode based on servo ID
 		if ce.ID == 6 {
-			normMode = feetech.NormModeRange100 // Gripper uses 0-100%
+			normMode = feetech.NormModeRange100
 		} else {
-			normMode = feetech.NormModeDegrees // Joints use degrees
+			normMode = feetech.NormModeDegrees
 		}
 	}
 
@@ -189,19 +174,16 @@ func FromMotorCalibration(mc *feetech.MotorCalibration) *CalibrationEntry {
 
 // LoadFullCalibrationFromFile loads and validates full calibration from a JSON file
 func LoadFullCalibrationFromFile(filePath string, logger logging.Logger) (SO101FullCalibration, error) {
-	// Read file
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		return SO101FullCalibration{}, fmt.Errorf("failed to read calibration file: %w", err)
 	}
 
-	// Parse JSON
 	var fileFormat CalibrationFileFormat
 	if err := json.Unmarshal(data, &fileFormat); err != nil {
 		return SO101FullCalibration{}, fmt.Errorf("failed to parse calibration JSON: %w", err)
 	}
 
-	// Helper function to convert or use default
 	convertOrDefault := func(entry *CalibrationEntry, defaultCal *feetech.MotorCalibration) *feetech.MotorCalibration {
 		if entry != nil {
 			return entry.ToMotorCalibration()
@@ -209,7 +191,6 @@ func LoadFullCalibrationFromFile(filePath string, logger logging.Logger) (SO101F
 		return defaultCal
 	}
 
-	// Convert to internal format with defaults for missing entries
 	calibration := SO101FullCalibration{
 		ShoulderPan:  convertOrDefault(fileFormat.ShoulderPan, DefaultSO101FullCalibration.ShoulderPan),
 		ShoulderLift: convertOrDefault(fileFormat.ShoulderLift, DefaultSO101FullCalibration.ShoulderLift),
@@ -219,7 +200,6 @@ func LoadFullCalibrationFromFile(filePath string, logger logging.Logger) (SO101F
 		Gripper:      convertOrDefault(fileFormat.Gripper, DefaultSO101FullCalibration.Gripper),
 	}
 
-	// Validate calibration
 	if err := ValidateFullCalibration(calibration, logger); err != nil {
 		return SO101FullCalibration{}, fmt.Errorf("calibration validation failed: %w", err)
 	}
@@ -229,7 +209,6 @@ func LoadFullCalibrationFromFile(filePath string, logger logging.Logger) (SO101F
 
 // SaveFullCalibrationToFile saves calibration to a JSON file
 func SaveFullCalibrationToFile(filePath string, calibration SO101FullCalibration) error {
-	// Helper function to convert or nil
 	convertOrNil := func(mc *feetech.MotorCalibration) *CalibrationEntry {
 		if mc != nil {
 			return FromMotorCalibration(mc)
@@ -237,7 +216,6 @@ func SaveFullCalibrationToFile(filePath string, calibration SO101FullCalibration
 		return nil
 	}
 
-	// Convert to file format
 	fileFormat := CalibrationFileFormat{
 		ShoulderPan:  convertOrNil(calibration.ShoulderPan),
 		ShoulderLift: convertOrNil(calibration.ShoulderLift),
@@ -323,7 +301,6 @@ func (cal SO101FullCalibration) ToFeetechCalibrationMap() map[int]*feetech.Motor
 
 // FromFeetechCalibrationMap creates SO101FullCalibration from a feetech calibration map
 func FromFeetechCalibrationMap(calibrations map[int]*feetech.MotorCalibration) SO101FullCalibration {
-	// Helper function to get calibration or default
 	getOrDefault := func(id int, defaultCal *feetech.MotorCalibration) *feetech.MotorCalibration {
 		if mc, exists := calibrations[id]; exists && mc != nil {
 			return mc
@@ -341,7 +318,6 @@ func FromFeetechCalibrationMap(calibrations map[int]*feetech.MotorCalibration) S
 	}
 }
 
-// Compare calibrations for equality
 func (cal SO101FullCalibration) Equal(other SO101FullCalibration) bool {
 	return calibrationsEqual(cal.ShoulderPan, other.ShoulderPan) &&
 		calibrationsEqual(cal.ShoulderLift, other.ShoulderLift) &&
@@ -351,7 +327,6 @@ func (cal SO101FullCalibration) Equal(other SO101FullCalibration) bool {
 		calibrationsEqual(cal.Gripper, other.Gripper)
 }
 
-// Helper function to compare two motor calibrations
 func calibrationsEqual(a, b *feetech.MotorCalibration) bool {
 	if a == nil && b == nil {
 		return true

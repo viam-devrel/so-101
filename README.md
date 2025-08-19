@@ -265,6 +265,42 @@ Example output:
 |---------|-------------|
 | `get_current_positions` | Read current servo positions |
 
+#### Motor Setup Commands
+
+The calibration sensor also provides motor setup commands for initial SO-101 servo configuration. These commands implement the systematic motor setup process described in `MOTOR_SETUP.md` and are separate from the calibration workflow.
+
+| Command | Description | Parameters |
+|---------|-------------|------------|
+| `motor_setup_discover` | Discover a single motor connected to the bus | `motor_name` (string): Motor name (e.g., "gripper", "wrist_roll") |
+| `motor_setup_assign_id` | Assign target ID and baudrate to discovered motor | `motor_name` (string), `current_id` (int), `target_id` (int), `current_baudrate` (int) |
+| `motor_setup_verify` | Verify all SO-101 motors are properly configured | None |
+| `motor_setup_scan_bus` | Scan the entire bus for connected servos | None |
+| `motor_setup_reset_status` | Reset motor setup status | None |
+
+#### Motor Setup Workflow
+
+The motor setup process should be performed in reverse order (gripper → shoulder_pan) to avoid ID conflicts:
+
+1. **Connect only one motor** (e.g., gripper) to the controller
+2. **Discover**: `{"command": "motor_setup_discover", "motor_name": "gripper"}`
+3. **Assign ID**: `{"command": "motor_setup_assign_id", "motor_name": "gripper", "current_id": 1, "target_id": 6, "current_baudrate": 57600}`
+4. Repeat for each motor in order: wrist_roll → wrist_flex → elbow_flex → shoulder_lift → shoulder_pan
+5. **Verify**: `{"command": "motor_setup_verify"}` (connect all motors)
+
+#### Motor Setup Status
+
+Motor setup status is included in sensor readings:
+
+```json
+{
+  "motor_setup": {
+    "in_progress": false,
+    "step": 0,
+    "status": "Motor setup ready"
+  }
+}
+```
+
 ### State Machine
 
 The calibration sensor operates as a state machine:
