@@ -23,18 +23,21 @@ A SvelteKit web application that provides a setup wizard for the SO-101 5-DOF ro
 ### Core Components
 
 #### Connection Management (`src/routes/+layout.svelte`)
+
 - Parses connection details from browser cookies
 - Creates `DialConf` for ViamProvider setup
 - Handles connection errors and loading states
 - Expected cookie structure: `{ apiKey: { id, key }, machineId, hostname }`
 
 #### Setup Wizard (`src/lib/components/SetupWizard.svelte`)
+
 - Orchestrates 8-step workflow with state management
 - Progress tracking and navigation between steps
 - Error handling with retry mechanisms
 - Motor setup results persistence across steps
 
 #### Step Components (`src/lib/components/steps/`)
+
 - **StepOverview**: Introduction and safety information
 - **StepMotorSetup**: Motor ID discovery and configuration
 - **StepMotorVerify**: Motor verification and validation
@@ -47,12 +50,14 @@ A SvelteKit web application that provides a setup wizard for the SO-101 5-DOF ro
 ## Development Commands
 
 ### Setup
+
 ```bash
 pnpm install          # Install dependencies (preferred)
 npm install           # Alternative package manager
 ```
 
 ### Development
+
 ```bash
 pnpm dev              # Start development server
 npm run dev           # Alternative with npm
@@ -63,6 +68,7 @@ npm run dev -- --open
 ```
 
 ### Building
+
 ```bash
 pnpm build            # Build production application
 npm run build         # Alternative with npm
@@ -72,6 +78,7 @@ npm run preview       # Alternative with npm
 ```
 
 ### Code Quality
+
 ```bash
 pnpm check            # Run Svelte type checking
 npm run check         # Alternative with npm
@@ -95,6 +102,7 @@ viam module local-app-testing --app-url http://localhost:5173 --machine-id <mach
 Replace `<machine-id>` with your robot's machine ID from the Viam platform.
 
 This command:
+
 1. Creates a secure tunnel between your local development server and the Viam platform
 2. Allows the web app to authenticate and connect to your robot
 3. Enables testing of the full setup workflow with real hardware
@@ -122,6 +130,7 @@ Each motor follows: discover → configure → verify pattern using sensor DoCom
 ## Calibration State Machine
 
 The SO-101 calibration sensor implements a state machine:
+
 - `idle` → `started` → `homing_position` → `range_recording` → `completed` → `idle`
 - UI tracks state transitions and provides appropriate controls
 - Real-time progress feedback during range recording phase
@@ -132,9 +141,3 @@ The SO-101 calibration sensor implements a state machine:
 - Clear torque disable notifications during manual positioning
 - Emergency abort functionality always available
 - Workspace safety requirements prominently displayed
-
-## Documentation
-
-For comprehensive implementation details, see:
-- `docs/so101-setup-wizard.md` - Complete implementation guide
-- `docs/so101-api-reference.md` - Detailed API reference for sensor commands

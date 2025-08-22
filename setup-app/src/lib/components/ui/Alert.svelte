@@ -8,7 +8,7 @@
 	}
 
 	let { type, variant, title, dismissible = false, children }: Props = $props();
-	
+
 	// Support both 'type' and 'variant' props for flexibility
 	const alertType = variant || type || 'info';
 	let isVisible = $state(true);

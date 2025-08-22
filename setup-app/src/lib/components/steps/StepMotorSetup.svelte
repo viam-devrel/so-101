@@ -245,11 +245,7 @@
 
 				<div class="flex flex-wrap gap-3">
 					{#if !discoveredMotor}
-						<Button
-							onclick={discoverMotor}
-							disabled={isLoading}
-							variant="primary"
-						>
+						<Button onclick={discoverMotor} disabled={isLoading} variant="primary">
 							{#if isLoading}
 								<LoadingSpinner size="sm" className="mr-2" />
 								Discovering...
@@ -266,11 +262,7 @@
 							{/if}
 						</Button>
 					{:else}
-						<Button
-							onclick={assignMotorId}
-							disabled={isLoading}
-							variant="success"
-						>
+						<Button onclick={assignMotorId} disabled={isLoading} variant="success">
 							{#if isLoading}
 								<LoadingSpinner size="sm" className="mr-2" />
 								Configuring...
@@ -297,23 +289,13 @@
 					{/if}
 
 					{#if currentMotorIndex > 0}
-						<Button
-							onclick={prevMotor}
-							disabled={isLoading}
-							variant="ghost"
-						>
+						<Button onclick={prevMotor} disabled={isLoading} variant="ghost">
 							← Previous Motor
 						</Button>
 					{/if}
 
 					{#if currentMotorIndex < MOTOR_SETUP_ORDER.length - 1}
-						<Button
-							onclick={nextMotor}
-							disabled={isLoading}
-							variant="ghost"
-						>
-							Skip Motor →
-						</Button>
+						<Button onclick={nextMotor} disabled={isLoading} variant="ghost">Skip Motor →</Button>
 					{/if}
 				</div>
 			</div>
@@ -345,11 +327,7 @@
 		</div>
 
 		<div class="text-center">
-			<Button
-				onclick={nextStep}
-				variant="primary"
-				size="lg"
-			>
+			<Button onclick={nextStep} variant="primary" size="lg">
 				Continue to Verification
 				<svg class="ml-2 -mr-1 w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
 					<path
