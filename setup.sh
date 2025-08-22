@@ -52,6 +52,8 @@ echo "✅ Node.js $(node --version) installed"
 echo "📦 Installing pnpm..."
 mise use -g pnpm
 
+eval "$(mise activate bash)"
+
 # Verify pnpm installation
 if ! command -v pnpm &> /dev/null; then
     echo "❌ pnpm installation failed"
