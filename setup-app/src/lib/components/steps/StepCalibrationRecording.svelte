@@ -83,7 +83,7 @@
 		if (joint.is_completed) return 'bg-green-100 border-green-300 text-green-800';
 		if (joint.recorded_min !== undefined && joint.recorded_max !== undefined) {
 			const range = joint.recorded_max - joint.recorded_min;
-			if (range > 1500) return 'bg-yellow-100 border-yellow-300 text-yellow-800';
+			if (range < 1000) return 'bg-yellow-100 border-yellow-300 text-yellow-800';
 			if (range > 500) return 'bg-blue-100 border-blue-300 text-blue-800';
 		}
 		return 'bg-gray-100 border-gray-300 text-gray-600';
@@ -192,7 +192,7 @@
 			</div>
 
 			<div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-				{#each Object.entries(joints) as [jointName, joint]}
+				{#each Object.entries(joints) as [jointName, joint] (jointName)}
 					{@const range = joint.recorded_max - joint.recorded_min}
 					{@const progressWidth = getJointProgressWidth(joint)}
 

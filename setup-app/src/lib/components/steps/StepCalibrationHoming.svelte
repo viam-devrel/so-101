@@ -70,7 +70,7 @@
 					<li>• <strong>Elbow:</strong> Bent approximately 90 degrees</li>
 					<li>• <strong>Wrist Flex:</strong> Neutral, not bent up or down</li>
 					<li>• <strong>Wrist Roll:</strong> Neutral rotation</li>
-					<li>• <strong>Gripper:</strong> Half-open position</li>
+					<li>• <strong>Gripper:</strong> Closed position</li>
 				</ul>
 			</div>
 

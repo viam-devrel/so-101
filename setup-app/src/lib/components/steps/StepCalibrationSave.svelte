@@ -36,11 +36,6 @@
 			if (result.calibration_file) {
 				calibrationFile = result.calibration_file;
 			}
-
-			// Auto-advance to next step after a short delay
-			setTimeout(() => {
-				nextStep();
-			}, 2500);
 		} catch (error) {
 			setError(error instanceof Error ? error.message : 'Failed to save calibration');
 		} finally {
@@ -62,7 +57,7 @@
 		}
 
 		const span = joint.recorded_max - joint.recorded_min;
-		if (joint.is_completed && span > 2000) {
+		if (joint.is_completed && span > 1000) {
 			return { label: 'Excellent', color: 'text-green-600' };
 		} else if (span > 1500) {
 			return { label: 'Good', color: 'text-blue-600' };
