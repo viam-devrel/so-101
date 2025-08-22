@@ -1,6 +1,7 @@
 import { page } from '$app/state';
 import type { SensorConfig, SessionState } from '$lib/types';
 import { logger } from '$lib/utils/logger';
+import { parseConnectionFromCookies } from '$lib/utils/connection';
 
 /**
  * Composable for managing workflow configuration across all workflow pages
@@ -34,12 +35,14 @@ export function useWorkflowConfig() {
 	 * Only returns valid data that's less than 1 hour old
 	 */
 	function getSensorConfigFromSession(): SensorConfig | null {
+		const { machineId } = parseConnectionFromCookies();
+		const sessionKey = `so101-setup-state-${machineId}`;
 		try {
 			if (typeof window === 'undefined') {
 				return null; // SSR guard
 			}
 
-			const stored = sessionStorage.getItem('so101-setup-state');
+			const stored = sessionStorage.getItem(sessionKey);
 			if (!stored) {
 				logger.debug('No session storage data found');
 				return null;
@@ -53,7 +56,7 @@ export function useWorkflowConfig() {
 
 			if (isExpired) {
 				logger.debug('Session storage data expired, clearing');
-				sessionStorage.removeItem('so101-setup-state');
+				sessionStorage.removeItem(sessionKey);
 				return null;
 			}
 
@@ -66,34 +69,9 @@ export function useWorkflowConfig() {
 		} catch (error) {
 			logger.warn('Error parsing session storage data, clearing', error as Error);
 			if (typeof window !== 'undefined') {
-				sessionStorage.removeItem('so101-setup-state');
+				sessionStorage.removeItem(sessionKey);
 			}
 			return null;
-		}
-	}
-
-	/**
-	 * Save sensor configuration to session storage
-	 */
-	function saveSensorConfigToSession(
-		sensorConfig: SensorConfig,
-		completedWorkflows: string[] = []
-	): void {
-		try {
-			if (typeof window === 'undefined') {
-				return; // SSR guard
-			}
-
-			const sessionState: SessionState = {
-				sensorConfig,
-				completedWorkflows,
-				timestamp: Date.now()
-			};
-
-			sessionStorage.setItem('so101-setup-state', JSON.stringify(sessionState));
-			logger.debug('Saved sensor config to session storage', sessionState);
-		} catch (error) {
-			logger.error('Failed to save to session storage', error as Error);
 		}
 	}
 
@@ -124,79 +102,9 @@ export function useWorkflowConfig() {
 		return { sensorConfig: null, source: 'none' };
 	}
 
-	/**
-	 * Update session storage with completed workflow
-	 */
-	function markWorkflowCompleted(workflowType: string): void {
-		try {
-			if (typeof window === 'undefined') {
-				return;
-			}
-
-			const stored = sessionStorage.getItem('so101-setup-state');
-			if (!stored) {
-				return;
-			}
-
-			const sessionState: SessionState = JSON.parse(stored);
-			const completedWorkflows = sessionState.completedWorkflows || [];
-
-			if (!completedWorkflows.includes(workflowType)) {
-				completedWorkflows.push(workflowType);
-				sessionState.completedWorkflows = completedWorkflows;
-				sessionState.timestamp = Date.now();
-
-				sessionStorage.setItem('so101-setup-state', JSON.stringify(sessionState));
-				logger.info('Marked workflow as completed', { workflowType, completedWorkflows });
-			}
-		} catch (error) {
-			logger.error('Failed to mark workflow as completed', error as Error);
-		}
-	}
-
-	/**
-	 * Clear all session data
-	 */
-	function clearSessionData(): void {
-		try {
-			if (typeof window !== 'undefined') {
-				sessionStorage.removeItem('so101-setup-state');
-				logger.info('Cleared session storage data');
-			}
-		} catch (error) {
-			logger.error('Failed to clear session data', error as Error);
-		}
-	}
-
-	/**
-	 * Get list of completed workflows from session
-	 */
-	function getCompletedWorkflows(): string[] {
-		try {
-			if (typeof window === 'undefined') {
-				return [];
-			}
-
-			const stored = sessionStorage.getItem('so101-setup-state');
-			if (!stored) {
-				return [];
-			}
-
-			const sessionState: SessionState = JSON.parse(stored);
-			return sessionState.completedWorkflows || [];
-		} catch (error) {
-			logger.warn('Failed to get completed workflows', error as Error);
-			return [];
-		}
-	}
-
 	return {
 		getSensorConfigFromURL,
 		getSensorConfigFromSession,
-		saveSensorConfigToSession,
-		initializeSensorConfig,
-		markWorkflowCompleted,
-		clearSessionData,
-		getCompletedWorkflows
+		initializeSensorConfig
 	};
 }

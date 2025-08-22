@@ -1,59 +1,29 @@
 <script lang="ts">
-	import { page } from '$app/state';
 	import { goto } from '$app/navigation';
 	import { onMount } from 'svelte';
 	import SensorProvider from '$lib/components/SensorProvider.svelte';
 	import MotorSetupWizard from '$lib/components/MotorSetupWizard.svelte';
+	import { useWorkflowConfig } from '$lib/composables/useWorkflowConfig';
 	import { getMachineRootPath } from '$lib/utils/connection';
+	import { logger } from '$lib/utils/logger';
 	import type { SensorConfig } from '$lib/types';
 
 	// Sensor configuration state
 	let sensorConfig = $state<SensorConfig | null>(null);
 	let configError = $state<string | null>(null);
 
-	// Get sensor config from URL parameters
-	function getSensorConfigFromURL(): SensorConfig | null {
-		const urlParams = page.url.searchParams;
-		const partId = urlParams.get('part');
-		const sensorName = urlParams.get('sensor');
+	const { initializeSensorConfig } = useWorkflowConfig();
 
-		if (partId && sensorName) {
-			return { partId, sensorName };
-		}
-		return null;
-	}
-
-	// Get sensor config from session storage
-	function getSensorConfigFromSession(): SensorConfig | null {
-		try {
-			const stored = sessionStorage.getItem('so101-setup-state');
-			if (stored) {
-				const sessionState = JSON.parse(stored);
-				// Only use if less than 1 hour old
-				if (Date.now() - (sessionState.timestamp || 0) < 3600000) {
-					return sessionState.sensorConfig;
-				}
-			}
-		} catch (error) {
-			console.warn('Invalid session data');
-		}
-		return null;
-	}
-
-	// Initialize sensor configuration
-	function initializeSensorConfig() {
-		// Try URL parameters first
-		let config = getSensorConfigFromURL();
-
-		// Fall back to session storage
-		if (!config) {
-			config = getSensorConfigFromSession();
-		}
+	function initConfig() {
+		logger.info('Initializing calibration workflow configuration');
+		const { sensorConfig: config, source } = initializeSensorConfig();
 
 		if (config) {
 			sensorConfig = config;
+			logger.debug('Sensor config loaded from', source);
 		} else {
 			configError = 'No sensor configuration found. Please configure your sensor first.';
+			logger.warn('No sensor configuration available');
 		}
 	}
 
@@ -64,7 +34,7 @@
 
 	// Initialize on mount
 	onMount(() => {
-		initializeSensorConfig();
+		initConfig();
 	});
 </script>
 

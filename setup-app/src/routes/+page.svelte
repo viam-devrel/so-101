@@ -3,6 +3,7 @@
 	import SensorConfigForm from '$lib/components/SensorConfigForm.svelte';
 	import WorkflowSelector from '$lib/components/WorkflowSelector.svelte';
 	import type { SensorConfig, WorkflowType } from '$lib/types';
+	import { getMachineRootPath, parseConnectionFromCookies } from '$lib/utils/connection';
 
 	// Landing page state
 	let sensorConfig = $state<SensorConfig | null>(null);
@@ -11,13 +12,14 @@
 	function handleConfigValid(config: SensorConfig) {
 		sensorConfig = config;
 
+		const { machineId } = parseConnectionFromCookies();
 		// Store config in sessionStorage for workflow pages to use
 		const sessionState = {
 			sensorConfig: config,
 			completedWorkflows: [],
 			timestamp: Date.now()
 		};
-		sessionStorage.setItem('so101-setup-state', JSON.stringify(sessionState));
+		sessionStorage.setItem(`so101-setup-state-${machineId}`, JSON.stringify(sessionState));
 	}
 
 	// Handle workflow selection
@@ -30,7 +32,7 @@
 			sensor: sensorConfig.sensorName
 		});
 
-		goto(`${window.location.pathname}workflows/${workflow}?${params}`);
+		goto(`${getMachineRootPath()}workflows/${workflow}?${params}`);
 	}
 
 	// Check for existing session state on page load

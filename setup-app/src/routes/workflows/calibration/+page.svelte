@@ -13,7 +13,7 @@
 	let configError = $state<string | null>(null);
 
 	// Use workflow configuration composable
-	const { initializeSensorConfig, markWorkflowCompleted } = useWorkflowConfig();
+	const { initializeSensorConfig } = useWorkflowConfig();
 
 	// Initialize sensor configuration
 	function initConfig() {
@@ -27,12 +27,6 @@
 			configError = 'No sensor configuration found. Please configure your sensor first.';
 			logger.warn('No sensor configuration available');
 		}
-	}
-
-	// Mark workflow as completed when done
-	function handleWorkflowComplete() {
-		markWorkflowCompleted('calibration');
-		logger.info('Calibration workflow completed');
 	}
 
 	// Handle navigation back to landing page
