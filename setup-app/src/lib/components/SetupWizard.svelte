@@ -126,7 +126,7 @@
 
 		<!-- Progress Bar -->
 		<div class="w-full bg-gray-200 rounded-full h-2">
-			<div 
+			<div
 				class="bg-blue-600 h-2 rounded-full transition-all duration-300 ease-in-out"
 				style="width: {progressPercentage}%"
 			></div>
@@ -141,13 +141,12 @@
 				<button
 					onclick={() => goToStep(index)}
 					disabled={index > currentStep}
-					class="text-xs px-2 py-1 rounded-full border transition-colors duration-200 {
-						index === currentStep
-							? 'bg-blue-600 text-white border-blue-600'
-							: index < currentStep
+					class="text-xs px-2 py-1 rounded-full border transition-colors duration-200 {index ===
+					currentStep
+						? 'bg-blue-600 text-white border-blue-600'
+						: index < currentStep
 							? 'bg-green-100 text-green-800 border-green-300 hover:bg-green-200'
-							: 'bg-gray-100 text-gray-500 border-gray-300 cursor-not-allowed'
-					}"
+							: 'bg-gray-100 text-gray-500 border-gray-300 cursor-not-allowed'}"
 				>
 					{index + 1}. {STEP_TITLES[step]}
 				</button>
@@ -161,7 +160,11 @@
 			<div class="flex items-start">
 				<div class="flex-shrink-0">
 					<svg class="h-5 w-5 text-red-400" viewBox="0 0 20 20" fill="currentColor">
-						<path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd" />
+						<path
+							fill-rule="evenodd"
+							d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z"
+							clip-rule="evenodd"
+						/>
 					</svg>
 				</div>
 				<div class="ml-3">

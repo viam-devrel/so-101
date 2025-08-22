@@ -1,12 +1,7 @@
 <script lang="ts">
 	import type { StepProps, MotorVerificationResult } from '$lib/types';
 
-	let { 
-		sendCommand, 
-		setError, 
-		clearError, 
-		nextStep 
-	}: StepProps = $props();
+	let { sendCommand, setError, clearError, nextStep }: StepProps = $props();
 
 	// Component state
 	let isLoading = $state(false);
@@ -25,8 +20,8 @@
 
 	// Computed values
 	const allMotorsOk = $derived(
-		verificationResults && 
-		Object.values(verificationResults).every(motor => motor.status === 'ok')
+		verificationResults &&
+			Object.values(verificationResults).every((motor) => motor.status === 'ok')
 	);
 
 	const totalMotorsFound = $derived(
@@ -45,7 +40,6 @@
 			});
 
 			verificationResults = result.motors;
-
 		} catch (error) {
 			setError(error instanceof Error ? error.message : 'Verification failed');
 			verificationResults = null;
@@ -57,20 +51,28 @@
 	// Get status color for motor
 	function getMotorStatusColor(status: string): string {
 		switch (status) {
-			case 'ok': return 'bg-green-100 border-green-300 text-green-800';
-			case 'not_responding': return 'bg-red-100 border-red-300 text-red-800';
-			case 'not_found': return 'bg-gray-100 border-gray-300 text-gray-600';
-			default: return 'bg-gray-100 border-gray-300 text-gray-600';
+			case 'ok':
+				return 'bg-green-100 border-green-300 text-green-800';
+			case 'not_responding':
+				return 'bg-red-100 border-red-300 text-red-800';
+			case 'not_found':
+				return 'bg-gray-100 border-gray-300 text-gray-600';
+			default:
+				return 'bg-gray-100 border-gray-300 text-gray-600';
 		}
 	}
 
 	// Get status icon
 	function getStatusIcon(status: string): string {
 		switch (status) {
-			case 'ok': return '✅';
-			case 'not_responding': return '❌';
-			case 'not_found': return '⚠️';
-			default: return '❓';
+			case 'ok':
+				return '✅';
+			case 'not_responding':
+				return '❌';
+			case 'not_found':
+				return '⚠️';
+			default:
+				return '❓';
 		}
 	}
 </script>
@@ -83,17 +85,25 @@
 			<div class="flex items-start">
 				<div class="flex-shrink-0">
 					<svg class="w-6 h-6 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+						<path
+							stroke-linecap="round"
+							stroke-linejoin="round"
+							stroke-width="2"
+							d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+						></path>
 					</svg>
 				</div>
 				<div class="ml-3">
 					<h4 class="font-semibold text-blue-900 mb-2">Ready for Verification</h4>
 					<p class="text-blue-800 text-sm mb-2">
-						Now connect ALL servo motors in a daisy chain configuration and verify they communicate properly.
+						Now connect ALL servo motors in a daisy chain configuration and verify they communicate
+						properly.
 					</p>
 					<div class="text-blue-800 text-sm">
 						<p><strong>Connection Order:</strong></p>
-						<p>Controller → Shoulder Pan → Shoulder Lift → Elbow → Wrist Flex → Wrist Roll → Gripper</p>
+						<p>
+							Controller → Shoulder Pan → Shoulder Lift → Elbow → Wrist Flex → Wrist Roll → Gripper
+						</p>
 					</div>
 				</div>
 			</div>
@@ -113,7 +123,12 @@
 					Verifying Motors...
 				{:else}
 					<svg class="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+						<path
+							stroke-linecap="round"
+							stroke-linejoin="round"
+							stroke-width="2"
+							d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"
+						></path>
 					</svg>
 					Verify All Motors
 				{/if}
@@ -131,16 +146,28 @@
 						{totalMotorsFound} / 6 motors found
 					</span>
 					{#if allMotorsOk}
-						<span class="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium bg-green-100 text-green-800">
+						<span
+							class="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium bg-green-100 text-green-800"
+						>
 							<svg class="w-4 h-4 mr-1" fill="currentColor" viewBox="0 0 20 20">
-								<path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd" />
+								<path
+									fill-rule="evenodd"
+									d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
+									clip-rule="evenodd"
+								/>
 							</svg>
 							All Motors OK
 						</span>
 					{:else}
-						<span class="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium bg-red-100 text-red-800">
+						<span
+							class="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium bg-red-100 text-red-800"
+						>
 							<svg class="w-4 h-4 mr-1" fill="currentColor" viewBox="0 0 20 20">
-								<path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd" />
+								<path
+									fill-rule="evenodd"
+									d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z"
+									clip-rule="evenodd"
+								/>
 							</svg>
 							Issues Found
 						</span>
@@ -153,7 +180,7 @@
 				{#each EXPECTED_MOTORS as expectedMotor}
 					{@const motorResult = verificationResults[expectedMotor.name]}
 					{@const status = motorResult?.status || 'not_found'}
-					
+
 					<div class="border-2 rounded-lg p-4 {getMotorStatusColor(status)}">
 						<div class="flex items-center justify-between mb-2">
 							<h5 class="font-medium">
@@ -163,7 +190,7 @@
 								{getStatusIcon(status)}
 							</span>
 						</div>
-						
+
 						<div class="text-sm space-y-1">
 							<div class="flex justify-between">
 								<span>Expected ID:</span>
@@ -186,9 +213,7 @@
 									</div>
 								{/if}
 							{:else}
-								<div class="text-xs mt-2">
-									Motor not found or not responding
-								</div>
+								<div class="text-xs mt-2">Motor not found or not responding</div>
 							{/if}
 						</div>
 					</div>
@@ -208,7 +233,12 @@
 							Retrying...
 						{:else}
 							<svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+								<path
+									stroke-linecap="round"
+									stroke-linejoin="round"
+									stroke-width="2"
+									d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
+								></path>
 							</svg>
 							Retry Verification
 						{/if}
@@ -226,8 +256,18 @@
 				{:else}
 					<!-- Success - all motors verified -->
 					<div class="bg-green-50 p-6 rounded-lg border border-green-200 max-w-md text-center">
-						<svg class="w-12 h-12 text-green-600 mx-auto mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+						<svg
+							class="w-12 h-12 text-green-600 mx-auto mb-4"
+							fill="none"
+							stroke="currentColor"
+							viewBox="0 0 24 24"
+						>
+							<path
+								stroke-linecap="round"
+								stroke-linejoin="round"
+								stroke-width="2"
+								d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"
+							></path>
 						</svg>
 						<h5 class="font-semibold text-green-900 mb-2">Verification Complete!</h5>
 						<p class="text-green-800 text-sm mb-4">
@@ -239,7 +279,11 @@
 						>
 							Start Calibration
 							<svg class="ml-2 -mr-1 w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
-								<path fill-rule="evenodd" d="M10.293 3.293a1 1 0 011.414 0l6 6a1 1 0 010 1.414l-6 6a1 1 0 01-1.414-1.414L14.586 11H3a1 1 0 110-2h11.586l-4.293-4.293a1 1 0 010-1.414z" clip-rule="evenodd" />
+								<path
+									fill-rule="evenodd"
+									d="M10.293 3.293a1 1 0 011.414 0l6 6a1 1 0 010 1.414l-6 6a1 1 0 01-1.414-1.414L14.586 11H3a1 1 0 110-2h11.586l-4.293-4.293a1 1 0 010-1.414z"
+									clip-rule="evenodd"
+								/>
 							</svg>
 						</button>
 					</div>

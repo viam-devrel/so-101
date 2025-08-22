@@ -1,13 +1,14 @@
 <script lang="ts">
 	import type { StepProps, MotorSetupConfig, MotorSetupResult } from '$lib/types';
+	import { Button, LoadingSpinner } from '$lib/components/ui';
 
-	let { 
-		sendCommand, 
-		setError, 
-		clearError, 
-		nextStep, 
-		motorSetupResults, 
-		updateMotorSetupResult 
+	let {
+		sendCommand,
+		setError,
+		clearError,
+		nextStep,
+		motorSetupResults,
+		updateMotorSetupResult
 	}: StepProps = $props();
 
 	// Motor configuration order (reverse assembly order to avoid ID conflicts)
@@ -28,9 +29,7 @@
 	// Computed values
 	const currentMotor = $derived(MOTOR_SETUP_ORDER[currentMotorIndex]);
 	const allMotorsConfigured = $derived(
-		MOTOR_SETUP_ORDER.every(motor => 
-			motorSetupResults[motor.name]?.step === 'configured'
-		)
+		MOTOR_SETUP_ORDER.every((motor) => motorSetupResults[motor.name]?.step === 'configured')
 	);
 
 	// Get motor status for display
@@ -45,10 +44,14 @@
 	// Get status color class
 	function getStatusColor(status: string): string {
 		switch (status) {
-			case 'current': return 'bg-blue-100 border-blue-300 text-blue-800';
-			case 'discovered': return 'bg-yellow-100 border-yellow-300 text-yellow-800';
-			case 'configured': return 'bg-green-100 border-green-300 text-green-800';
-			default: return 'bg-gray-100 border-gray-300 text-gray-600';
+			case 'current':
+				return 'bg-blue-100 border-blue-300 text-blue-800';
+			case 'discovered':
+				return 'bg-yellow-100 border-yellow-300 text-yellow-800';
+			case 'configured':
+				return 'bg-green-100 border-green-300 text-green-800';
+			default:
+				return 'bg-gray-100 border-gray-300 text-gray-600';
 		}
 	}
 
@@ -64,7 +67,7 @@
 			});
 
 			discoveredMotor = result;
-			
+
 			// Update motor setup results
 			updateMotorSetupResult(currentMotor.name, {
 				motor_name: currentMotor.name,
@@ -75,7 +78,6 @@
 				step: 'discovered',
 				success: true
 			});
-
 		} catch (error) {
 			setError(error instanceof Error ? error.message : 'Discovery failed');
 			discoveredMotor = null;
@@ -111,7 +113,6 @@
 				currentMotorIndex++;
 				discoveredMotor = null;
 			}
-
 		} catch (error) {
 			setError(error instanceof Error ? error.message : 'Configuration failed');
 		} finally {
@@ -146,14 +147,19 @@
 			<div class="flex items-start">
 				<div class="flex-shrink-0">
 					<svg class="w-6 h-6 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+						<path
+							stroke-linecap="round"
+							stroke-linejoin="round"
+							stroke-width="2"
+							d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+						></path>
 					</svg>
 				</div>
 				<div class="ml-3">
 					<h4 class="font-semibold text-blue-900 mb-2">Important: Connect ONE Motor at a Time</h4>
 					<p class="text-blue-800 text-sm">
-						To avoid ID conflicts, connect only the motor you're currently configuring. 
-						Disconnect all other servo motors from the daisy chain during this process.
+						To avoid ID conflicts, connect only the motor you're currently configuring. Disconnect
+						all other servo motors from the daisy chain during this process.
 					</p>
 				</div>
 			</div>
@@ -167,7 +173,7 @@
 			{#each MOTOR_SETUP_ORDER as motor, index}
 				{@const status = getMotorStatus(motor.name)}
 				{@const result = motorSetupResults[motor.name]}
-				
+
 				<div class="border-2 rounded-lg p-4 {getStatusColor(status)}">
 					<div class="flex items-center justify-between mb-2">
 						<h5 class="font-medium">
@@ -177,12 +183,16 @@
 							ID: {motor.targetId}
 						</span>
 					</div>
-					
+
 					<div class="text-sm">
 						{#if status === 'configured'}
 							<div class="flex items-center text-green-700">
 								<svg class="w-4 h-4 mr-1" fill="currentColor" viewBox="0 0 20 20">
-									<path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd" />
+									<path
+										fill-rule="evenodd"
+										d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
+										clip-rule="evenodd"
+									/>
 								</svg>
 								Configured
 							</div>
@@ -191,13 +201,9 @@
 								Found: ID {result?.current_id} → {result?.target_id}
 							</div>
 						{:else if status === 'current'}
-							<div class="text-blue-700 font-medium">
-								← Current Motor
-							</div>
+							<div class="text-blue-700 font-medium">← Current Motor</div>
 						{:else}
-							<div class="text-gray-600">
-								Waiting...
-							</div>
+							<div class="text-gray-600">Waiting...</div>
 						{/if}
 					</div>
 				</div>
@@ -211,13 +217,15 @@
 			<h4 class="text-xl font-semibold text-gray-900 mb-4">
 				Configure {currentMotor.description}
 			</h4>
-			
+
 			<div class="mb-6">
 				<div class="bg-yellow-50 p-4 rounded-lg mb-4">
 					<h5 class="font-medium text-yellow-900 mb-2">Step-by-step Instructions:</h5>
 					<ol class="text-yellow-800 text-sm space-y-1">
 						<li>1. Disconnect ALL servo motors from the daisy chain</li>
-						<li>2. Connect ONLY the <strong>{currentMotor.description}</strong> to the controller</li>
+						<li>
+							2. Connect ONLY the <strong>{currentMotor.description}</strong> to the controller
+						</li>
 						<li>3. Click "Discover Motor" to find the connected servo</li>
 						<li>4. Click "Configure Motor" to set the correct ID and baudrate</li>
 					</ol>
@@ -237,65 +245,75 @@
 
 				<div class="flex flex-wrap gap-3">
 					{#if !discoveredMotor}
-						<button
+						<Button
 							onclick={discoverMotor}
 							disabled={isLoading}
-							class="flex items-center px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
+							variant="primary"
 						>
 							{#if isLoading}
-								<div class="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
+								<LoadingSpinner size="sm" className="mr-2" />
 								Discovering...
 							{:else}
 								<svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path>
+									<path
+										stroke-linecap="round"
+										stroke-linejoin="round"
+										stroke-width="2"
+										d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
+									></path>
 								</svg>
 								Discover Motor
 							{/if}
-						</button>
+						</Button>
 					{:else}
-						<button
+						<Button
 							onclick={assignMotorId}
 							disabled={isLoading}
-							class="flex items-center px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500 disabled:opacity-50 disabled:cursor-not-allowed"
+							variant="success"
 						>
 							{#if isLoading}
-								<div class="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
+								<LoadingSpinner size="sm" className="mr-2" />
 								Configuring...
 							{:else}
 								<svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+									<path
+										stroke-linecap="round"
+										stroke-linejoin="round"
+										stroke-width="2"
+										d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"
+									></path>
 								</svg>
 								Configure Motor
 							{/if}
-						</button>
+						</Button>
 
-						<button
-							onclick={() => discoveredMotor = null}
+						<Button
+							onclick={() => (discoveredMotor = null)}
 							disabled={isLoading}
-							class="px-4 py-2 bg-gray-600 text-white rounded-md hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-gray-500 disabled:opacity-50 disabled:cursor-not-allowed"
+							variant="secondary"
 						>
 							Rediscover
-						</button>
+						</Button>
 					{/if}
 
 					{#if currentMotorIndex > 0}
-						<button
+						<Button
 							onclick={prevMotor}
 							disabled={isLoading}
-							class="px-4 py-2 bg-gray-300 text-gray-700 rounded-md hover:bg-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-500 disabled:opacity-50 disabled:cursor-not-allowed"
+							variant="ghost"
 						>
 							← Previous Motor
-						</button>
+						</Button>
 					{/if}
 
 					{#if currentMotorIndex < MOTOR_SETUP_ORDER.length - 1}
-						<button
+						<Button
 							onclick={nextMotor}
 							disabled={isLoading}
-							class="px-4 py-2 bg-gray-300 text-gray-700 rounded-md hover:bg-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-500 disabled:opacity-50 disabled:cursor-not-allowed"
+							variant="ghost"
 						>
 							Skip Motor →
-						</button>
+						</Button>
 					{/if}
 				</div>
 			</div>
@@ -304,8 +322,18 @@
 		<!-- All motors configured -->
 		<div class="bg-green-50 p-6 rounded-lg mb-6">
 			<div class="flex items-center">
-				<svg class="w-8 h-8 text-green-600 mr-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+				<svg
+					class="w-8 h-8 text-green-600 mr-4"
+					fill="none"
+					stroke="currentColor"
+					viewBox="0 0 24 24"
+				>
+					<path
+						stroke-linecap="round"
+						stroke-linejoin="round"
+						stroke-width="2"
+						d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"
+					></path>
 				</svg>
 				<div>
 					<h4 class="text-lg font-semibold text-green-900">All Motors Configured!</h4>
@@ -317,15 +345,20 @@
 		</div>
 
 		<div class="text-center">
-			<button
+			<Button
 				onclick={nextStep}
-				class="inline-flex items-center px-6 py-3 border border-transparent text-base font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+				variant="primary"
+				size="lg"
 			>
 				Continue to Verification
 				<svg class="ml-2 -mr-1 w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
-					<path fill-rule="evenodd" d="M10.293 3.293a1 1 0 011.414 0l6 6a1 1 0 010 1.414l-6 6a1 1 0 01-1.414-1.414L14.586 11H3a1 1 0 110-2h11.586l-4.293-4.293a1 1 0 010-1.414z" clip-rule="evenodd" />
+					<path
+						fill-rule="evenodd"
+						d="M10.293 3.293a1 1 0 011.414 0l6 6a1 1 0 010 1.414l-6 6a1 1 0 01-1.414-1.414L14.586 11H3a1 1 0 110-2h11.586l-4.293-4.293a1 1 0 010-1.414z"
+						clip-rule="evenodd"
+					/>
 				</svg>
-			</button>
+			</Button>
 		</div>
 	{/if}
 </div>

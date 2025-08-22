@@ -1,7 +1,11 @@
 <script lang="ts">
-	import type { StepProps, CalibrationReadings } from '$lib/types';
+	import type { StepProps, CalibrationReadings, WorkflowType } from '$lib/types';
 
-	let { sensorReadings, motorSetupResults }: StepProps = $props();
+	interface Props extends StepProps {
+		workflowType?: WorkflowType;
+	}
+
+	let { sensorReadings, motorSetupResults, workflowType = 'full-setup' }: Props = $props();
 
 	// Get current sensor readings for final status
 	const readings = $derived(sensorReadings.current.data as CalibrationReadings | undefined);
@@ -252,4 +256,3 @@
 		</div>
 	</div>
 </div>
-

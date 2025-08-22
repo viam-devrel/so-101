@@ -1,3 +1,7 @@
+import type { CallOptions } from '@connectrpc/connect';
+import type { JsonValue, SensorClient, Struct } from '@viamrobotics/sdk';
+import type { CreateBaseMutationResult, QueryObserverResult } from '@tanstack/svelte-query';
+
 // Connection and authentication types
 export interface ConnectionDetails {
   apiKey: {
@@ -44,7 +48,13 @@ export interface CalibrationJoint {
 }
 
 export interface CalibrationReadings {
-  calibration_state: 'idle' | 'started' | 'homing_position' | 'range_recording' | 'completed' | 'error';
+  calibration_state:
+  | 'idle'
+  | 'started'
+  | 'homing_position'
+  | 'range_recording'
+  | 'completed'
+  | 'error';
   instruction: string;
   available_commands: string[];
   servo_count: number;
@@ -60,21 +70,30 @@ export interface CalibrationReadings {
 }
 
 // Wizard workflow types
-export type WorkflowStep = 
-  | 'overview' 
-  | 'motor_setup' 
-  | 'motor_verify' 
-  | 'calibration_start' 
-  | 'calibration_homing' 
-  | 'calibration_recording' 
-  | 'calibration_save' 
+export type WorkflowStep =
+  | 'overview'
+  | 'motor_setup'
+  | 'motor_verify'
+  | 'calibration_start'
+  | 'calibration_homing'
+  | 'calibration_recording'
+  | 'calibration_save'
   | 'complete';
 
+// Sensor context types
+export interface SensorContext {
+  sensorClient: { current: SensorClient };
+  sensorReadings: { current: QueryObserverResult<Record<string, JsonValue>> };
+  doCommand: { current: CreateBaseMutationResult<JsonValue, Error, [command: Struct, callOptions?: CallOptions | undefined], unknown> };
+  sendCommand: (cmd: Record<string, any>) => Promise<DoCommandResponse>;
+  sensorConfig: SensorConfig;
+}
+
 export interface StepProps {
-  sensorClient: any;
-  sensorReadings: any;
-  doCommand: any;
-  sendCommand: (cmd: any) => Promise<any>;
+  sensorClient: { current: SensorClient };
+  sensorReadings: { current: QueryObserverResult<Record<string, JsonValue>> };
+  doCommand: { current: CreateBaseMutationResult<JsonValue, Error, [command: Struct, callOptions?: CallOptions | undefined], unknown> };
+  sendCommand: (cmd: Record<string, any>) => Promise<DoCommandResponse>;
   error: string | null;
   setError: (error: string | null) => void;
   clearError: () => void;
@@ -118,4 +137,44 @@ export interface CalibrationCommandResponse extends DoCommandResponse {
   state?: string;
   message?: string;
   [key: string]: any;
+}
+
+// Sensor configuration types
+export interface SensorConfig {
+  partId: string; // Default: 'main'
+  sensorName: string; // User input, no default
+}
+
+// Workflow types
+export type WorkflowType = 'motor-setup' | 'calibration' | 'full-setup';
+
+export interface WorkflowInfo {
+  id: WorkflowType;
+  title: string;
+  description: string;
+  duration: string;
+  steps: number;
+  stepNames: string;
+}
+
+// Session state for workflow management
+export interface SessionState {
+  sensorConfig: SensorConfig;
+  completedWorkflows: string[];
+  motorSetupResults?: Record<string, MotorSetupResult>;
+  timestamp?: number;
+}
+
+// Validation types
+export interface ValidationResult {
+  isValid: boolean;
+  error?: string;
+}
+
+// Logger types
+export interface Logger {
+  debug(message: string, data?: any): void;
+  info(message: string, data?: any): void;
+  warn(message: string, data?: any): void;
+  error(message: string, error?: Error): void;
 }
