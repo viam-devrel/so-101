@@ -15,6 +15,9 @@ $(MODULE_BINARY): Makefile go.mod *.go cmd/module/*.go
 lint:
 	gofmt -s -w .
 
+build-app:
+	cd setup-app && pnpm run build && cd ..
+
 update:
 	go get go.viam.com/rdk@latest
 	go mod tidy
@@ -22,13 +25,13 @@ update:
 test:
 	go test ./...
 
-module.tar.gz: meta.json $(MODULE_BINARY) first_run.sh
+module.tar.gz: meta.json $(MODULE_BINARY) first_run.sh build-app
 ifeq ($(VIAM_TARGET_OS), windows)
 	jq '.entrypoint = "./bin/arm.exe"' meta.json > temp.json && mv temp.json meta.json
 else
 	strip $(MODULE_BINARY)
 endif
-	tar czf $@ meta.json first_run.sh $(MODULE_BINARY)
+	tar czf $@ meta.json first_run.sh $(MODULE_BINARY) setup-app/build/
 ifeq ($(VIAM_TARGET_OS), windows)
 	git checkout meta.json
 endif
@@ -39,3 +42,4 @@ all: test module.tar.gz
 
 setup:
 	go mod tidy
+	cd setup-app && pnpm install

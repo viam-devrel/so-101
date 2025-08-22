@@ -24,17 +24,28 @@
       "markdown_link": "README.md#model-devrelso101calibration"
     }
   ],
-  "applications": null,
+  "applications": [
+    {
+      "name": "so101-setup",
+      "type": "single_machine",
+      "entrypoint": "setup-app/build/index.html",
+      "customizations": {
+        "machinePicker": {
+          "heading": "SO101 Setup App",
+          "subheading": "Sign in and select your device to set up and calibrate your robot arm"
+        }
+      }
+    }
+  ],
   "markdown_link": "README.md",
   "entrypoint": "bin/arm",
   "first_run": "./first_run.sh",
   "build": {
-    "build": "make module.tar.gz",
-    "setup": "make setup",
+    "build": "./build.sh",
+    "setup": "./setup.sh",
     "path": "module.tar.gz",
     "arch": [
       "darwin/arm64",
-      "windows/amd64",
       "linux/amd64",
       "linux/arm64"
     ],

@@ -33,3 +33,5 @@ CLAUDE.md
 INITIAL.md
 PRPs/
 .DS_Store
+.pnpm-store/
+.canon.yaml

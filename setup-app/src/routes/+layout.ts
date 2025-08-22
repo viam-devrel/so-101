@@ -4,8 +4,3 @@ import type { LayoutLoad } from './$types';
 export const ssr = false;
 export const prerender = false;
 export const trailingSlash = 'ignore';
-
-export const load: LayoutLoad = (event) => {
-	console.log({ event });
-	return {};
-};
