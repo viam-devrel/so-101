@@ -130,7 +130,7 @@
 				</div>
 
 				<div class="divide-y divide-gray-200">
-					{#each Object.entries(joints) as [jointName, joint]}
+					{#each Object.entries(joints).sort(([, a], [, b]) => b.id - a.id) as [jointName, joint] (joint.id)}
 						{@const quality = getCalibrationQuality(joint)}
 
 						<div class="px-6 py-4 hover:bg-gray-50">

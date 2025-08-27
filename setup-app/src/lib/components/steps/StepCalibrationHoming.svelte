@@ -119,7 +119,7 @@
 		<div class="mb-6">
 			<h4 class="text-lg font-semibold text-gray-900 mb-3">Current Joint Positions:</h4>
 			<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-				{#each Object.entries(joints) as [jointName, joint]}
+				{#each Object.entries(joints).sort(([, a], [, b]) => b.id - a.id) as [jointName, joint] (joint.id)}
 					<div class="bg-white border border-gray-200 rounded-lg p-4">
 						<h5 class="font-medium text-gray-900 mb-2 capitalize">
 							{jointName.replace('_', ' ')}

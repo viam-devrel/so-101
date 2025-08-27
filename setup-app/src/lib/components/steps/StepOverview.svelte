@@ -130,7 +130,6 @@
 					<ul class="list-disc list-inside space-y-1 text-sm">
 						<li>The SO-101 arm is securely mounted to a stable surface</li>
 						<li>The workspace is clear of obstacles and people</li>
-						<li>You have easy access to the emergency stop button</li>
 						<li>All servo cables are properly connected</li>
 						<li>Power supply is connected and stable</li>
 					</ul>

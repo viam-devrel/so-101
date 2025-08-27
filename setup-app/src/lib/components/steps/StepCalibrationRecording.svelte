@@ -192,7 +192,7 @@
 			</div>
 
 			<div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-				{#each Object.entries(joints) as [jointName, joint] (jointName)}
+				{#each Object.entries(joints).sort(([, a], [, b]) => b.id - a.id) as [jointName, joint] (joint.id)}
 					{@const range = joint.recorded_max - joint.recorded_min}
 					{@const progressWidth = getJointProgressWidth(joint)}
 
