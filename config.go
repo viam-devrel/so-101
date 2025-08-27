@@ -84,16 +84,6 @@ func (cfg *SoArm101Config) Validate(path string) ([]string, []string, error) {
 		cfg.Baudrate = 1000000
 	}
 
-	if cfg.CalibrationFile != "" {
-		if !filepath.IsAbs(cfg.CalibrationFile) {
-			return nil, nil, fmt.Errorf("calibration_file must be an absolute path, got: %s", cfg.CalibrationFile)
-		}
-
-		if _, err := os.Stat(cfg.CalibrationFile); err != nil {
-			return nil, []string{fmt.Sprintf("calibration file not accessible: %v (will use defaults)", err)}, nil
-		}
-	}
-
 	return nil, nil, nil
 }
 
@@ -104,6 +94,15 @@ func (cfg *SoArm101Config) LoadCalibration(logger logging.Logger) SO101FullCalib
 			logger.Debug("No calibration file specified, using default calibration")
 		}
 		return DefaultSO101FullCalibration
+	}
+
+	// Handle relative paths using VIAM_MODULE_DATA
+	if !filepath.IsAbs(cfg.CalibrationFile) {
+		moduleDataDir := os.Getenv("VIAM_MODULE_DATA")
+		if moduleDataDir == "" {
+			moduleDataDir = "/tmp" // Fallback if VIAM_MODULE_DATA not set
+		}
+		cfg.CalibrationFile = filepath.Join(moduleDataDir, cfg.CalibrationFile)
 	}
 
 	calibration, err := LoadFullCalibrationFromFile(cfg.CalibrationFile, logger)

@@ -5,8 +5,6 @@ import (
 	"context"
 	"fmt"
 	"math"
-	"os"
-	"path/filepath"
 	"strconv"
 	"sync"
 	"time"
@@ -154,15 +152,6 @@ func NewSO101CalibrationSensor(
 
 	if conf.CalibrationFile == "" {
 		conf.CalibrationFile = "so101_calibration.json"
-	}
-
-	// Handle relative paths using VIAM_MODULE_DATA
-	if !filepath.IsAbs(conf.CalibrationFile) {
-		moduleDataDir := os.Getenv("VIAM_MODULE_DATA")
-		if moduleDataDir == "" {
-			moduleDataDir = "/tmp" // Fallback if VIAM_MODULE_DATA not set
-		}
-		conf.CalibrationFile = filepath.Join(moduleDataDir, conf.CalibrationFile)
 	}
 
 	// Create controller configuration
