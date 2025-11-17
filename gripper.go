@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/golang/geo/r3"
 	"go.viam.com/rdk/components/gripper"
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/referenceframe"
@@ -218,7 +219,16 @@ func (g *so101Gripper) ModelFrame() referenceframe.Model {
 }
 
 func (g *so101Gripper) Geometries(ctx context.Context, extra map[string]interface{}) ([]spatialmath.Geometry, error) {
-	return nil, errors.New("geometries not implemented for SO-101 gripper")
+	clawSize := r3.Vector{X: 20, Y: 48, Z: 130} // size open
+
+	claws, err := spatialmath.NewBox(spatialmath.NewPoseFromPoint(r3.Vector{X: 0, Y: 0, Z: clawSize.Z / -2}), clawSize, "claws")
+	if err != nil {
+		return nil, err
+	}
+
+	return []spatialmath.Geometry{
+		claws,
+	}, nil
 }
 
 func (g *so101Gripper) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
