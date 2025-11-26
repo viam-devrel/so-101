@@ -8,7 +8,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/golang/geo/r3"
 	"go.viam.com/rdk/components/gripper"
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/referenceframe"
@@ -123,14 +122,13 @@ func newSO101Gripper(ctx context.Context, deps resource.Dependencies, conf resou
 		return nil, fmt.Errorf("failed to get shared controller for gripper: %w", err)
 	}
 
-	clawSize := r3.Vector{X: 20, Y: 48, Z: 130} // size open
-
-	claws, err := spatialmath.NewBox(spatialmath.NewPoseFromPoint(r3.Vector{X: 0, Y: 0, Z: clawSize.Z / -2}), clawSize, "claws")
-	if err != nil {
-		return nil, err
-	}
-	geometries := []spatialmath.Geometry{
-		claws,
+	var geometries []spatialmath.Geometry
+	if conf.Frame != nil && conf.Frame.Geometry != nil {
+		geometry, err := conf.Frame.Geometry.ParseConfig()
+		if err != nil {
+			return nil, err
+		}
+		geometries = []spatialmath.Geometry{geometry}
 	}
 
 	model, err := gripper.MakeModel(conf.ResourceName().ShortName(), geometries)
@@ -231,10 +229,6 @@ func (g *so101Gripper) Stop(ctx context.Context, extra map[string]interface{}) e
 
 func (g *so101Gripper) IsMoving(ctx context.Context) (bool, error) {
 	return g.isMoving.Load(), nil
-}
-
-func (g *so101Gripper) ModelFrame() referenceframe.Model {
-	return g.model
 }
 
 func (g *so101Gripper) Geometries(ctx context.Context, extra map[string]interface{}) ([]spatialmath.Geometry, error) {
@@ -376,8 +370,7 @@ func (g *so101Gripper) GoToInputs(ctx context.Context, inputs ...[]referencefram
 }
 
 func (g *so101Gripper) Kinematics(ctx context.Context) (referenceframe.Model, error) {
-	// return g.model, nil
-	return nil, errors.ErrUnsupported
+	return g.model, nil
 }
 
 func (g *so101Gripper) IsHoldingSomething(ctx context.Context, extra map[string]interface{}) (gripper.HoldingStatus, error) {
