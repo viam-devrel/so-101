@@ -61,6 +61,7 @@ type so101Gripper struct {
 	logger     logging.Logger
 	controller *SafeSoArmController
 	model      referenceframe.Model
+	geometries []spatialmath.Geometry
 	servoID    int
 
 	mu       sync.Mutex
@@ -122,11 +123,29 @@ func newSO101Gripper(ctx context.Context, deps resource.Dependencies, conf resou
 		return nil, fmt.Errorf("failed to get shared controller for gripper: %w", err)
 	}
 
+	clawSize := r3.Vector{X: 20, Y: 48, Z: 130} // size open
+
+	claws, err := spatialmath.NewBox(spatialmath.NewPoseFromPoint(r3.Vector{X: 0, Y: 0, Z: clawSize.Z / -2}), clawSize, "claws")
+	if err != nil {
+		return nil, err
+	}
+	geometries := []spatialmath.Geometry{
+		claws,
+	}
+
+	model, err := gripper.MakeModel(conf.ResourceName().ShortName(), geometries)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create gripper model: %w", err)
+	}
+
+	logger.Infof("Created gripper model: name=%s, DoF=%d", model.Name(), len(model.DoF()))
+
 	g := &so101Gripper{
 		name:           conf.ResourceName(),
 		logger:         logger,
 		controller:     controller,
-		model:          referenceframe.NewSimpleModel("so101_gripper"),
+		model:          model,
+		geometries:     geometries,
 		servoID:        cfg.ServoID,
 		speed:          30,
 		acceleration:   50,
@@ -219,16 +238,10 @@ func (g *so101Gripper) ModelFrame() referenceframe.Model {
 }
 
 func (g *so101Gripper) Geometries(ctx context.Context, extra map[string]interface{}) ([]spatialmath.Geometry, error) {
-	clawSize := r3.Vector{X: 20, Y: 48, Z: 130} // size open
+	g.mu.Lock()
+	defer g.mu.Unlock()
 
-	claws, err := spatialmath.NewBox(spatialmath.NewPoseFromPoint(r3.Vector{X: 0, Y: 0, Z: clawSize.Z / -2}), clawSize, "claws")
-	if err != nil {
-		return nil, err
-	}
-
-	return []spatialmath.Geometry{
-		claws,
-	}, nil
+	return g.geometries, nil
 }
 
 func (g *so101Gripper) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
@@ -349,52 +362,22 @@ func (g *so101Gripper) Close(ctx context.Context) error {
 }
 
 func (g *so101Gripper) CurrentInputs(ctx context.Context) ([]referenceframe.Input, error) {
-	positions, err := g.controller.GetJointPositionsForServos([]int{g.servoID})
-	if err != nil {
-		return nil, err
+	if g.model != nil && len(g.model.DoF()) != 0 {
+		return nil, errors.New("CurrentInputs is unimplemented for gripper models with DoF != 0")
 	}
-
-	if len(positions) == 0 {
-		return []referenceframe.Input{}, nil
-	}
-
-	return []referenceframe.Input{
-		{Value: positions[0]},
-	}, nil
+	return []referenceframe.Input{}, nil
 }
 
 func (g *so101Gripper) GoToInputs(ctx context.Context, inputs ...[]referenceframe.Input) error {
-	if len(inputs) == 0 {
-		return nil
+	if g.model != nil && len(g.model.DoF()) != 0 {
+		return errors.New("GoToInputs is unimplemented for gripper models with DoF != 0")
 	}
-
-	for _, inputSet := range inputs {
-		if len(inputSet) != 1 {
-			return fmt.Errorf("expected 1 input for gripper, got %d", len(inputSet))
-		}
-
-		g.mu.Lock()
-		g.isMoving.Store(true)
-
-		err := g.controller.MoveServosToPositions([]int{g.servoID}, []float64{inputSet[0].Value}, 0, 0)
-
-		g.isMoving.Store(false)
-		g.mu.Unlock()
-
-		if err != nil {
-			return err
-		}
-
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-	}
-
 	return nil
 }
 
 func (g *so101Gripper) Kinematics(ctx context.Context) (referenceframe.Model, error) {
-	return g.model, nil
+	// return g.model, nil
+	return nil, errors.ErrUnsupported
 }
 
 func (g *so101Gripper) IsHoldingSomething(ctx context.Context, extra map[string]interface{}) (gripper.HoldingStatus, error) {

@@ -3,7 +3,6 @@ package so_arm
 import (
 	"context"
 	_ "embed"
-	"encoding/json"
 	"fmt"
 	"math"
 	"sync"
@@ -11,7 +10,7 @@ import (
 	"time"
 
 	"github.com/hipsterbrown/feetech-servo"
-	"github.com/pkg/errors"
+	commonpb "go.viam.com/api/common/v1"
 	"go.viam.com/rdk/components/arm"
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/operation"
@@ -26,13 +25,10 @@ var (
 	SO101Model = resource.NewModel("devrel", "so101", "arm")
 )
 
-//go:embed so101.json
-var so101ModelJson []byte
-
 func init() {
 	resource.RegisterComponent(arm.API, SO101Model,
 		resource.Registration[arm.Arm, *SO101ArmConfig]{
-			Constructor: NewSO101,
+			Constructor: newso101,
 		},
 	)
 }
@@ -48,6 +44,8 @@ type SO101ArmConfig struct {
 
 	SpeedDegsPerSec        float32 `json:"speed_degs_per_sec,omitempty"`
 	AccelerationDegsPerSec float32 `json:"acceleration_degs_per_sec_per_sec,omitempty"`
+
+	Motion string `json:"motion,omitempty"`
 
 	CalibrationFile string `json:"calibration_file,omitempty"`
 }
@@ -70,7 +68,16 @@ func (cfg *SO101ArmConfig) Validate(path string) ([]string, []string, error) {
 		}
 	}
 
-	return nil, nil, nil
+	deps := []string{}
+
+	if cfg.Motion != "" {
+		deps = append(deps, motion.Named(cfg.Motion).String())
+	} else {
+		// use builtin motion service
+		deps = append(deps, motion.Named("builtin").String())
+	}
+
+	return deps, nil, nil
 }
 
 type so101 struct {
@@ -93,23 +100,10 @@ type so101 struct {
 	defaultSpeed float32
 	defaultAcc   float32
 
+	motion motion.Service
+
 	cancelCtx  context.Context
 	cancelFunc func()
-}
-
-func makeSO101ModelFrame() (referenceframe.Model, error) {
-	m := &referenceframe.ModelConfigJSON{
-		OriginalFile: &referenceframe.ModelFile{
-			Bytes:     so101ModelJson,
-			Extension: "json",
-		},
-	}
-	err := json.Unmarshal(so101ModelJson, m)
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to unmarshal json file")
-	}
-
-	return m.ParseConfig("soarm_101")
 }
 
 // calculateJointLimits dynamically calculates joint limits from calibration data
@@ -152,12 +146,15 @@ func (s *so101) calculateJointLimits() [][2]float64 {
 	return limits
 }
 
-func NewSO101(ctx context.Context, deps resource.Dependencies, rawConf resource.Config, logger logging.Logger) (arm.Arm, error) {
-	conf, err := resource.NativeConfig[*SO101ArmConfig](rawConf)
+func newso101(ctx context.Context, deps resource.Dependencies, rawConf resource.Config, logger logging.Logger) (arm.Arm, error) {
+	newConf, err := resource.NativeConfig[*SO101ArmConfig](rawConf)
 	if err != nil {
 		return nil, err
 	}
+	return NewSO101(ctx, deps, rawConf.ResourceName(), newConf, logger)
+}
 
+func NewSO101(ctx context.Context, deps resource.Dependencies, name resource.Name, conf *SO101ArmConfig, logger logging.Logger) (arm.Arm, error) {
 	// Validate and set default motion parameters
 	speedDegsPerSec := conf.SpeedDegsPerSec
 	if speedDegsPerSec == 0 {
@@ -208,16 +205,32 @@ func NewSO101(ctx context.Context, deps resource.Dependencies, rawConf resource.
 		return nil, fmt.Errorf("failed to get shared SO-ARM controller: %w", err)
 	}
 
-	model, err := makeSO101ModelFrame()
+	model, err := referenceframe.KinematicModelFromFile("/Users/jalen.geason/devrel/so-101/so101.json", "soarm_101")
 	if err != nil {
 		ReleaseSharedController() // Clean up on error
 		return nil, fmt.Errorf("failed to create kinematic model: %w", err)
 	}
 
+	var ms motion.Service
+	if conf.Motion != "" {
+		if deps == nil {
+			return nil, fmt.Errorf("no deps")
+		}
+		ms, err = motion.FromProvider(deps, conf.Motion)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		ms, err = motion.FromProvider(deps, "builtin")
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	cancelCtx, cancelFunc := context.WithCancel(context.Background())
 
 	arm := &so101{
-		name:         rawConf.ResourceName(),
+		name:         name,
 		cfg:          conf,
 		opMgr:        operation.NewSingleOperationManager(),
 		logger:       logger,
@@ -226,6 +239,7 @@ func NewSO101(ctx context.Context, deps resource.Dependencies, rawConf resource.
 		armServoIDs:  conf.ServoIDs, // Store which servos this arm controls
 		defaultSpeed: speedDegsPerSec,
 		defaultAcc:   accelerationDegsPerSec,
+		motion:       ms,
 		cancelCtx:    cancelCtx,
 		cancelFunc:   cancelFunc,
 	}
@@ -269,10 +283,14 @@ func (s *so101) EndPosition(ctx context.Context, extra map[string]interface{}) (
 }
 
 func (s *so101) MoveToPosition(ctx context.Context, pose spatialmath.Pose, extra map[string]interface{}) error {
-	if err := motion.MoveArm(ctx, s.logger, s, pose); err != nil {
-		return err
-	}
-	return nil
+	_, err := s.motion.Move(
+		ctx,
+		motion.MoveReq{
+			ComponentName: s.Name().Name,
+			Destination:   referenceframe.NewPoseInFrame(fmt.Sprintf("%v_origin", s.Name().Name), pose),
+		},
+	)
+	return err
 }
 
 func (s *so101) MoveToJointPositions(ctx context.Context, positions []referenceframe.Input, extra map[string]interface{}) error {
@@ -287,9 +305,7 @@ func (s *so101) MoveToJointPositions(ctx context.Context, positions []referencef
 	}
 
 	values := make([]float64, len(positions))
-	for i, input := range positions {
-		values[i] = input.Value
-	}
+	copy(values, positions)
 
 	// Calculate joint limits dynamically from calibration
 	jointLimits := s.calculateJointLimits()
@@ -369,9 +385,7 @@ func (s *so101) JointPositions(ctx context.Context, extra map[string]interface{}
 	}
 
 	positions := make([]referenceframe.Input, len(radians))
-	for i, radian := range radians {
-		positions[i] = referenceframe.Input{Value: radian}
-	}
+	copy(positions, radians)
 
 	return positions, nil
 }
@@ -391,6 +405,10 @@ func (s *so101) CurrentInputs(ctx context.Context) ([]referenceframe.Input, erro
 
 func (s *so101) GoToInputs(ctx context.Context, inputSteps ...[]referenceframe.Input) error {
 	return s.MoveThroughJointPositions(ctx, inputSteps, nil, nil)
+}
+
+func (s *so101) Get3DModels(ctx context.Context, extra map[string]interface{}) (map[string]*commonpb.Mesh, error) {
+	return nil, fmt.Errorf("Get3DModels is unimplemented for SO-101 arm")
 }
 
 func (s *so101) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
