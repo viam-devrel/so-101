@@ -18,6 +18,7 @@ import (
 	"go.viam.com/rdk/resource"
 	"go.viam.com/rdk/services/motion"
 	"go.viam.com/rdk/spatialmath"
+	"go.viam.com/rdk/utils"
 	"go.viam.com/utils/rpc"
 )
 
@@ -205,7 +206,7 @@ func NewSO101(ctx context.Context, deps resource.Dependencies, name resource.Nam
 		return nil, fmt.Errorf("failed to get shared SO-ARM controller: %w", err)
 	}
 
-	model, err := referenceframe.KinematicModelFromFile("/Users/jalen.geason/devrel/so-101/so101.json", "soarm_101")
+	model, err := referenceframe.KinematicModelFromFile(utils.ResolveFile("so101.json"), "soarm_101")
 	if err != nil {
 		ReleaseSharedController() // Clean up on error
 		return nil, fmt.Errorf("failed to create kinematic model: %w", err)
