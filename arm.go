@@ -3,6 +3,7 @@ package so_arm
 import (
 	"context"
 	_ "embed"
+	"encoding/json"
 	"fmt"
 	"math"
 	"sync"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/hipsterbrown/feetech-servo"
+	"github.com/pkg/errors"
 	commonpb "go.viam.com/api/common/v1"
 	"go.viam.com/rdk/components/arm"
 	"go.viam.com/rdk/logging"
@@ -18,13 +20,15 @@ import (
 	"go.viam.com/rdk/resource"
 	"go.viam.com/rdk/services/motion"
 	"go.viam.com/rdk/spatialmath"
-	"go.viam.com/rdk/utils"
 	"go.viam.com/utils/rpc"
 )
 
 var (
 	SO101Model = resource.NewModel("devrel", "so101", "arm")
 )
+
+//go:embed so101.json
+var so101ModelJson []byte
 
 func init() {
 	resource.RegisterComponent(arm.API, SO101Model,
@@ -105,6 +109,21 @@ type so101 struct {
 
 	cancelCtx  context.Context
 	cancelFunc func()
+}
+
+func makeSO101ModelFrame() (referenceframe.Model, error) {
+	m := &referenceframe.ModelConfigJSON{
+		OriginalFile: &referenceframe.ModelFile{
+			Bytes:     so101ModelJson,
+			Extension: "json",
+		},
+	}
+	err := json.Unmarshal(so101ModelJson, m)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to unmarshal json file")
+	}
+
+	return m.ParseConfig("soarm_101")
 }
 
 // calculateJointLimits dynamically calculates joint limits from calibration data
@@ -206,7 +225,7 @@ func NewSO101(ctx context.Context, deps resource.Dependencies, name resource.Nam
 		return nil, fmt.Errorf("failed to get shared SO-ARM controller: %w", err)
 	}
 
-	model, err := referenceframe.KinematicModelFromFile(utils.ResolveFile("so101.json"), "soarm_101")
+	model, err := makeSO101ModelFrame()
 	if err != nil {
 		ReleaseSharedController() // Clean up on error
 		return nil, fmt.Errorf("failed to create kinematic model: %w", err)

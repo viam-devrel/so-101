@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/golang/geo/r3"
 	"go.viam.com/rdk/components/gripper"
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/referenceframe"
@@ -59,7 +60,6 @@ type so101Gripper struct {
 	name       resource.Name
 	logger     logging.Logger
 	controller *SafeSoArmController
-	model      referenceframe.Model
 	geometries []spatialmath.Geometry
 	servoID    int
 
@@ -122,27 +122,14 @@ func newSO101Gripper(ctx context.Context, deps resource.Dependencies, conf resou
 		return nil, fmt.Errorf("failed to get shared controller for gripper: %w", err)
 	}
 
-	var geometries []spatialmath.Geometry
-	if conf.Frame != nil && conf.Frame.Geometry != nil {
-		geometry, err := conf.Frame.Geometry.ParseConfig()
-		if err != nil {
-			return nil, err
-		}
-		geometries = []spatialmath.Geometry{geometry}
-	}
-
-	model, err := gripper.MakeModel(conf.ResourceName().ShortName(), geometries)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create gripper model: %w", err)
-	}
-
-	logger.Infof("Created gripper model: name=%s, DoF=%d", model.Name(), len(model.DoF()))
+	clawSize := r3.Vector{X: 52, Y: 65.2, Z: 105.43}
+	claws, err := spatialmath.NewBox(spatialmath.NewPoseFromPoint(r3.Vector{Z: clawSize.Z / -2}), clawSize, "claws")
+	geometries := []spatialmath.Geometry{claws}
 
 	g := &so101Gripper{
 		name:           conf.ResourceName(),
 		logger:         logger,
 		controller:     controller,
-		model:          model,
 		geometries:     geometries,
 		servoID:        cfg.ServoID,
 		speed:          30,
@@ -356,21 +343,15 @@ func (g *so101Gripper) Close(ctx context.Context) error {
 }
 
 func (g *so101Gripper) CurrentInputs(ctx context.Context) ([]referenceframe.Input, error) {
-	if g.model != nil && len(g.model.DoF()) != 0 {
-		return nil, errors.New("CurrentInputs is unimplemented for gripper models with DoF != 0")
-	}
-	return []referenceframe.Input{}, nil
+	return nil, errors.ErrUnsupported
 }
 
 func (g *so101Gripper) GoToInputs(ctx context.Context, inputs ...[]referenceframe.Input) error {
-	if g.model != nil && len(g.model.DoF()) != 0 {
-		return errors.New("GoToInputs is unimplemented for gripper models with DoF != 0")
-	}
-	return nil
+	return errors.ErrUnsupported
 }
 
 func (g *so101Gripper) Kinematics(ctx context.Context) (referenceframe.Model, error) {
-	return g.model, nil
+	return nil, errors.ErrUnsupported
 }
 
 func (g *so101Gripper) IsHoldingSomething(ctx context.Context, extra map[string]interface{}) (gripper.HoldingStatus, error) {

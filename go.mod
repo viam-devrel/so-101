@@ -3,7 +3,9 @@ module so_arm
 go 1.25.1
 
 require (
+	github.com/golang/geo v0.0.0-20230421003525-6adc56603217
 	github.com/hipsterbrown/feetech-servo v0.3.0
+	github.com/pkg/errors v0.9.1
 	go.bug.st/serial v1.6.4
 	go.viam.com/api v0.1.485
 	go.viam.com/rdk v0.102.0
@@ -61,7 +63,6 @@ require (
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/golang-jwt/jwt/v4 v4.5.2 // indirect
 	github.com/golang/freetype v0.0.0-20170609003504-e2365dfdc4a0 // indirect
-	github.com/golang/geo v0.0.0-20230421003525-6adc56603217 // indirect
 	github.com/golang/groupcache v0.0.0-20241129210726-2c02b8208cf8 // indirect
 	github.com/golang/protobuf v1.5.4 // indirect
 	github.com/golang/snappy v0.0.4 // indirect
@@ -113,7 +114,6 @@ require (
 	github.com/pion/transport/v2 v2.2.10 // indirect
 	github.com/pion/transport/v3 v3.0.7 // indirect
 	github.com/pion/turn/v2 v2.1.6 // indirect
-	github.com/pkg/errors v0.9.1 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/rs/cors v1.11.1 // indirect
 	github.com/samber/lo v1.51.0 // indirect
