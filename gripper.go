@@ -123,7 +123,7 @@ func newSO101Gripper(ctx context.Context, deps resource.Dependencies, conf resou
 	}
 
 	clawSize := r3.Vector{X: 52, Y: 65.2, Z: 105.43}
-	claws, err := spatialmath.NewBox(spatialmath.NewPoseFromPoint(r3.Vector{Z: clawSize.Z / -2}), clawSize, "claws")
+	claws, err := spatialmath.NewBox(spatialmath.NewPoseFromPoint(r3.Vector{X: 0, Y: 0, Z: clawSize.Z / 2}), clawSize, "claws")
 	geometries := []spatialmath.Geometry{claws}
 
 	g := &so101Gripper{
