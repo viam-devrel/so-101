@@ -67,8 +67,38 @@ func newSO101Discovery(
 
 // DiscoverResources scans for SO-101 arms on serial ports and returns component configurations
 func (dis *so101Discovery) DiscoverResources(ctx context.Context, extra map[string]any) ([]resource.Config, error) {
-	// TODO: Implementation will be added in later tasks
-	return nil, nil
+	dis.logger.Info("Starting SO-101 discovery")
+
+	// Phase 1: Enumerate all serial ports
+	allPorts := enumerateSerialPorts()
+	dis.logger.Debugf("Found %d total serial ports", len(allPorts))
+
+	// Phase 2: Filter to candidate ports
+	candidates := filterCandidatePorts(allPorts)
+	dis.logger.Debugf("Filtered to %d candidate ports", len(candidates))
+
+	// Phase 3: Validate each port and generate configs
+	var allConfigs []resource.Config
+	for _, portPath := range candidates {
+		// Check context cancellation
+		select {
+		case <-ctx.Done():
+			dis.logger.Info("Discovery cancelled")
+			return allConfigs, ctx.Err()
+		default:
+		}
+
+		portConfigs := dis.discoverPort(ctx, portPath)
+		allConfigs = append(allConfigs, portConfigs...)
+	}
+
+	if len(allConfigs) == 0 {
+		dis.logger.Info("No SO-101 arms discovered")
+	} else {
+		dis.logger.Infof("Discovered %d component configurations", len(allConfigs))
+	}
+
+	return allConfigs, nil
 }
 
 // discoverPort validates a single port and generates component configurations
