@@ -2,6 +2,7 @@
 package so_arm
 
 import (
+	"path/filepath"
 	"strings"
 )
 
@@ -31,4 +32,19 @@ func isCandidatePort(port string) bool {
 		return true
 	}
 	return false
+}
+
+// extractPortSuffix extracts a friendly suffix from port path for naming
+// /dev/ttyUSB0 -> "ttyUSB0"
+// COM3 -> "COM3"
+// /dev/tty.usbmodem123 -> "usbmodem123"
+func extractPortSuffix(portPath string) string {
+	base := filepath.Base(portPath)
+
+	// For macOS /dev/tty.usb* ports, strip the "tty." prefix
+	if strings.HasPrefix(base, "tty.usb") {
+		return strings.TrimPrefix(base, "tty.")
+	}
+
+	return base
 }

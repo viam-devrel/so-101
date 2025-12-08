@@ -47,3 +47,49 @@ func TestFilterCandidatePorts(t *testing.T) {
 		})
 	}
 }
+
+func TestExtractPortSuffix(t *testing.T) {
+	tests := []struct {
+		name     string
+		portPath string
+		expected string
+	}{
+		{
+			name:     "Linux ttyUSB",
+			portPath: "/dev/ttyUSB0",
+			expected: "ttyUSB0",
+		},
+		{
+			name:     "Linux ttyACM",
+			portPath: "/dev/ttyACM1",
+			expected: "ttyACM1",
+		},
+		{
+			name:     "macOS usbmodem",
+			portPath: "/dev/tty.usbmodem14201",
+			expected: "usbmodem14201",
+		},
+		{
+			name:     "macOS usbserial",
+			portPath: "/dev/tty.usbserial-AB123",
+			expected: "usbserial-AB123",
+		},
+		{
+			name:     "Windows COM port",
+			portPath: "COM3",
+			expected: "COM3",
+		},
+		{
+			name:     "Windows double digit COM",
+			portPath: "COM10",
+			expected: "COM10",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := extractPortSuffix(tt.portPath)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
