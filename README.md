@@ -56,7 +56,7 @@ This may also be necessary if you see inaccuracy issues while controlling the ar
 
 The SO-101 uses serial communication over USB with Feetech STS3215 servos. The module uses a shared controller architecture to manage all 6 servos while preventing resource conflicts when both arm and gripper components are used.
 
-You can find the available serial port options from your machine's command line.
+You can use the included [discovery service](#model-devrelso101discovery) or find the available serial port options from your machine's command line.
 
 On MacOS, look for `usbmodem` in the name:
 ```
@@ -193,7 +193,7 @@ Follow the [end-to-end tutorial](https://codelabs.viam.com/guide/so101/index.htm
 
 ### Communication
 
-You can find the available serial port options from your machine's command line.
+You can use the included [discovery service](#model-devrelso101discovery) or find the available serial port options from your machine's command line.
 
 On MacOS, look for `usbmodem` in the name:
 ```
@@ -277,7 +277,7 @@ Follow the [end-to-end tutorial](https://codelabs.viam.com/guide/so101/index.htm
 
 ### Communication
 
-You can find the available serial port options from your machine's command line.
+You can use the included [discovery service](#model-devrelso101discovery) or find the available serial port options from your machine's command line.
 
 On MacOS, look for `usbmodem` in the name:
 ```
