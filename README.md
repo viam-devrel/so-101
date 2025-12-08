@@ -8,22 +8,19 @@ It can be used to control either the leader or follower arm, as well as configur
 
 This SO-101 module is particularly useful in applications that require the SO-101 arm to be operated in conjunction with other resources (such as cameras, sensors, actuators, CV) offered by the [Viam Platform](https://www.viam.com/) and/or separately through your own code.
 
-Navigate to the **CONFIGURE** tab of your machine's page in [the Viam app](https://app.viam.com/). Click the **+** icon next to your machine part in the left-hand menu and select **Component**. Select the `arm` type, then search for and select the `arm / devrel:so101:arm` model. Click **Add module**, then enter a name or use the suggested name for your arm and click **Create**.
-
-> [!NOTE]
-> Before configuring your SO-101, you must [add a machine](https://docs.viam.com/fleet/machines/#add-a-new-machine).
+Follow the [end-to-end tutorial](https://codelabs.viam.com/guide/so101/index.html?index=..%2F..index#0) to learn how to set up the arm for the first time.
 
 ## Model devrel:so101:arm
 
 The arm component controls the first 5 joints of the SO-101: shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, and wrist_roll.
 
+Follow the [end-to-end tutorial](https://codelabs.viam.com/guide/so101/index.html?index=..%2F..index#0) to learn how to set up the arm for the first time.
+
 ### Configuration
 
 ```json
 {
-  "port": "/dev/ttyUSB0",
-  "baudrate": 1000000,
-  "calibration_file": "/path/to/calibration.json"
+  "port": "/dev/ttyUSB0"
 }
 ```
 
@@ -33,15 +30,41 @@ The following attributes are available for the arm component:
 
 | Name                | Type     | Inclusion | Description                                                                                    |
 |---------------------|----------|-----------|------------------------------------------------------------------------------------------------|
-| `port`              | string   | Required  | The serial port for communication with the SO-101 (e.g., `/dev/ttyUSB0`, `/dev/ttyACM0`).   |
+| `port`              | string   | **Required**  | The serial port for communication with the SO-101 (e.g., `/dev/ttyUSB0` or`/dev/ttyACM0` on Linux, `/dev/tty.usbmodem*` on MacOS).   |
+| `calibration_file`  | string   | Optional  | Path to the calibration file. If not provided, uses default calibration values.              |
 | `baudrate`          | int      | Optional  | The baud rate for serial communication. Default is `1000000`.                                |
 | `servo_ids`         | []int    | Optional  | List of servo IDs for the arm joints. Default is `[1, 2, 3, 4, 5]`.                         |
 | `timeout`           | duration | Optional  | Communication timeout. Default is system default.                                            |
-| `calibration_file`  | string   | Optional  | Path to the calibration file. If not provided, uses default calibration values.              |
+
+**If you're building and setting up an arm for the first time, please see the [calibration sensor component](#model-devrelso101calibration) for setup instructions.**
+
+This may also be necessary if you see inaccuracy issues while controlling the arm.
 
 ### Communication
 
 The SO-101 uses serial communication over USB with Feetech STS3215 servos. The module uses a shared controller architecture to manage all 6 servos while preventing resource conflicts when both arm and gripper components are used.
+
+You can find the available serial port options from your machine's command line.
+
+On MacOS, look for `usbmodem` in the name:
+```
+you@machine: ls /dev/tty.*
+/dev/tty.Bluetooth-Incoming-Port        /dev/tty.debug-console                  /dev/tty.usbmodem58CD1767051
+```
+
+On Linux, look for `ACM` or `USB` in the name:
+```
+you@machine: ls /dev/tty*
+/dev/ttyACM0
+/dev/ttyUSB0
+```
+
+On Windows, look for `COM` in the name:
+```
+you@machine: mode
+COM0
+COM1
+```
 
 ### DoCommand
 
@@ -134,26 +157,51 @@ Retrieve current calibration data:
 
 The gripper component controls the 6th servo of the SO-101, which functions as a parallel gripper.
 
+Follow the [end-to-end tutorial](https://codelabs.viam.com/guide/so101/index.html?index=..%2F..index#0) to learn how to set up the arm for the first time.
+
 ### Configuration
 
 ```json
 {
-  "port": "/dev/ttyUSB0",
-  "baudrate": 1000000,
-  "servo_id": 6,
-  "calibration_file": "/path/to/calibration.json"
+  "port": "/dev/ttyUSB0"
 }
 ```
+
+**Use the same `port` and `calibration_file` configuration as the associated arm component.**
 
 ### Attributes
 
 | Name               | Type     | Inclusion | Description                                                                                    |
 |--------------------|----------|-----------|------------------------------------------------------------------------------------------------|
 | `port`             | string   | Required  | The serial port for communication with the SO-101.                                           |
+| `calibration_file` | string   | Optional  | Path to the calibration file (shared with arm component).                                    |
 | `baudrate`         | int      | Optional  | The baud rate for serial communication. Default is `1000000`.                                |
 | `servo_id`         | int      | Optional  | The servo ID for the gripper. Default is `6`.                                                |
 | `timeout`          | duration | Optional  | Communication timeout. Default is system default.                                            |
-| `calibration_file` | string   | Optional  | Path to the calibration file (shared with arm component).                                    |
+
+### Communication
+
+You can find the available serial port options from your machine's command line.
+
+On MacOS, look for `usbmodem` in the name:
+```
+you@machine: ls /dev/tty.*
+/dev/tty.Bluetooth-Incoming-Port        /dev/tty.debug-console                  /dev/tty.usbmodem58CD1767051
+```
+
+On Linux, look for `ACM` or `USB` in the name:
+```
+you@machine: ls /dev/tty*
+/dev/ttyACM0
+/dev/ttyUSB0
+```
+
+On Windows, look for `COM` in the name:
+```
+you@machine: mode
+COM0
+COM1
+```
 
 ### DoCommand
 
@@ -193,6 +241,10 @@ The SO-101 requires calibration to map servo positions to joint angles based on 
 
 The SO-101 Calibration Sensor provides a calibration workflow integrated into Viam's component system. It guides you through the calibration process using DoCommand calls and provides status updates through sensor readings.
 
+**See the [Setup Application](#setup-application) for a visual walkthrough experience that uses this component.**
+
+Follow the [end-to-end tutorial](https://codelabs.viam.com/guide/so101/index.html?index=..%2F..index#0) to learn how to set up the arm for the first time.
+
 ### Configuration
 
 ```json
@@ -207,10 +259,33 @@ The SO-101 Calibration Sensor provides a calibration workflow integrated into Vi
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
 | `port` | string | **Required** | Serial port for servo communication (e.g., `/dev/ttyUSB0`) |
-| `baudrate` | int | Optional | Serial communication speed. Default: `1000000` |
-| `servo_ids` | []int | Optional | List of servo IDs to calibrate. Default: `[1,2,3,4,5]` (arm only) |
 | `calibration_file` | string | Optional | Path where calibration will be saved. If relative path, uses `$VIAM_MODULE_DATA` directory. Default: `"so101_calibration.json"` |
+| `baudrate` | int | Optional | Serial communication speed. Default: `1000000` |
 | `timeout` | duration | Optional | Communication timeout. Default: `"5s"` |
+
+### Communication
+
+You can find the available serial port options from your machine's command line.
+
+On MacOS, look for `usbmodem` in the name:
+```
+you@machine: ls /dev/tty.*
+/dev/tty.Bluetooth-Incoming-Port        /dev/tty.debug-console                  /dev/tty.usbmodem58CD1767051
+```
+
+On Linux, look for `ACM` or `USB` in the name:
+```
+you@machine: ls /dev/tty*
+/dev/ttyACM0
+/dev/ttyUSB0
+```
+
+On Windows, look for `COM` in the name:
+```
+you@machine: mode
+COM0
+COM1
+```
 
 ### Usage
 
