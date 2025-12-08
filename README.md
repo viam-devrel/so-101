@@ -472,6 +472,8 @@ This module includes a web-based setup application that provides guided workflow
 
 **Access the Setup App**: https://so101-setup_devrel.viamapplications.com
 
+_Add an extra `/` to the end of the URL if you see a "404 Not Found" after authenticating._
+
 ### Available Workflows
 
 The setup application provides three main workflows to guide you through different aspects of SO-101 configuration:
