@@ -2,9 +2,12 @@
 package so_arm
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"go.viam.com/rdk/logging"
 )
 
 func TestFilterCandidatePorts(t *testing.T) {
@@ -89,6 +92,57 @@ func TestExtractPortSuffix(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result := extractPortSuffix(tt.portPath)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestFindCalibrationFile(t *testing.T) {
+	// Create temp directory for test files
+	tempDir := t.TempDir()
+
+	tests := []struct {
+		name       string
+		setup      func(string) // Setup function to create test files
+		portSuffix string
+		expected   string
+	}{
+		{
+			name: "Port-specific file exists",
+			setup: func(dir string) {
+				os.WriteFile(filepath.Join(dir, "ttyUSB0_calibration.json"), []byte("{}"), 0644)
+				os.WriteFile(filepath.Join(dir, "so101_calibration.json"), []byte("{}"), 0644)
+			},
+			portSuffix: "ttyUSB0",
+			expected:   "ttyUSB0_calibration.json",
+		},
+		{
+			name: "Only default file exists",
+			setup: func(dir string) {
+				os.WriteFile(filepath.Join(dir, "so101_calibration.json"), []byte("{}"), 0644)
+			},
+			portSuffix: "ttyUSB0",
+			expected:   "so101_calibration.json",
+		},
+		{
+			name: "No calibration files",
+			setup: func(dir string) {
+				// No files created
+			},
+			portSuffix: "ttyUSB0",
+			expected:   "",
+		},
+	}
+
+	logger := logging.NewTestLogger(t)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			testDir := filepath.Join(tempDir, tt.name)
+			os.MkdirAll(testDir, 0755)
+			tt.setup(testDir)
+
+			result := findCalibrationFile(testDir, tt.portSuffix, logger)
 			assert.Equal(t, tt.expected, result)
 		})
 	}
