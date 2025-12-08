@@ -22,6 +22,12 @@
       "model": "devrel:so101:calibration",
       "short_description": "Calibrate the joints of the SO-101 arm",
       "markdown_link": "README.md#model-devrelso101calibration"
+    },
+    {
+      "api": "rdk:services:discovery",
+      "model": "devrel:so101:discovery",
+      "short_description": "Discover available arm, gripper, and calibration components related to SO101 ARM",
+      "markdown_link": "README.md#model-devrelso101discovery"
     }
   ],
   "applications": [
