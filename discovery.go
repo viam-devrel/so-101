@@ -6,8 +6,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
+	"github.com/hipsterbrown/feetech-servo"
 	"go.bug.st/serial/enumerator"
+	"go.viam.com/rdk/components/arm"
+	"go.viam.com/rdk/components/gripper"
+	"go.viam.com/rdk/components/sensor"
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/resource"
 	"go.viam.com/rdk/services/discovery"
@@ -64,6 +69,127 @@ func newSO101Discovery(
 func (dis *so101Discovery) DiscoverResources(ctx context.Context, extra map[string]any) ([]resource.Config, error) {
 	// TODO: Implementation will be added in later tasks
 	return nil, nil
+}
+
+// discoverPort validates a single port and generates component configurations
+func (dis *so101Discovery) discoverPort(ctx context.Context, portPath string) []resource.Config {
+	portSuffix := extractPortSuffix(portPath)
+	dis.logger.Debugf("Checking port %s", portPath)
+
+	// Try to open port and ping servos
+	hasArm, hasGripper := dis.pingServos(portPath)
+
+	if !hasArm && !hasGripper {
+		dis.logger.Debugf("No SO-101 servos detected on %s", portPath)
+		return nil
+	}
+
+	dis.logger.Infof("Discovered SO-101 on %s (arm: %v, gripper: %v)", portPath, hasArm, hasGripper)
+
+	// Find calibration file
+	moduleDataDir := os.Getenv("VIAM_MODULE_DATA")
+	if moduleDataDir == "" {
+		moduleDataDir = "/tmp"
+	}
+	calibrationFile := findCalibrationFile(moduleDataDir, portSuffix, dis.logger)
+
+	// Generate component configs
+	return dis.generateConfigs(portPath, portSuffix, hasArm, hasGripper, calibrationFile)
+}
+
+// pingServos attempts to ping servo 1 and servo 6 on the given port
+// Returns (hasArm, hasGripper)
+func (dis *so101Discovery) pingServos(portPath string) (bool, bool) {
+	busConfig := feetech.BusConfig{
+		Port:     portPath,
+		Baudrate: 1000000,
+		Protocol: feetech.ProtocolV0,
+		Timeout:  500 * time.Millisecond,
+	}
+
+	bus, err := feetech.NewBus(busConfig)
+	if err != nil {
+		dis.logger.Debugf("Failed to open port %s: %v", portPath, err)
+		return false, false
+	}
+	defer bus.Close()
+
+	// Ping servo 1 (arm)
+	servo1, err := bus.ServoWithModel(1, "sts3215")
+	hasArm := false
+	if err == nil {
+		if _, err := servo1.Ping(); err == nil {
+			hasArm = true
+		}
+	}
+
+	// Ping servo 6 (gripper)
+	servo6, err := bus.ServoWithModel(6, "sts3215")
+	hasGripper := false
+	if err == nil {
+		if _, err := servo6.Ping(); err == nil {
+			hasGripper = true
+		}
+	}
+
+	return hasArm, hasGripper
+}
+
+// generateConfigs creates component configurations based on discovered servos
+func (dis *so101Discovery) generateConfigs(
+	portPath, portSuffix string,
+	hasArm, hasGripper bool,
+	calibrationFile string,
+) []resource.Config {
+	var configs []resource.Config
+
+	// Generate arm config if servo 1 responded
+	if hasArm {
+		attrs := map[string]interface{}{
+			"port": portPath,
+		}
+		if calibrationFile != "" {
+			attrs["calibration_file"] = calibrationFile
+		}
+
+		configs = append(configs, resource.Config{
+			Name:       "so101-arm-" + portSuffix,
+			API:        arm.API,
+			Model:      SO101Model,
+			Attributes: attrs,
+		})
+	}
+
+	// Generate gripper config if servo 6 responded
+	if hasGripper {
+		attrs := map[string]interface{}{
+			"port": portPath,
+		}
+		if calibrationFile != "" {
+			attrs["calibration_file"] = calibrationFile
+		}
+
+		configs = append(configs, resource.Config{
+			Name:       "so101-gripper-" + portSuffix,
+			API:        gripper.API,
+			Model:      SO101GripperModel,
+			Attributes: attrs,
+		})
+	}
+
+	// Always generate calibration sensor if either servo responded
+	if hasArm || hasGripper {
+		configs = append(configs, resource.Config{
+			Name:  "so101-calibration-" + portSuffix,
+			API:   sensor.API,
+			Model: SO101CalibrationSensorModel,
+			Attributes: map[string]interface{}{
+				"port": portPath,
+			},
+		})
+	}
+
+	return configs
 }
 
 // filterCandidatePorts filters serial ports by platform-specific naming patterns
