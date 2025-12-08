@@ -35,3 +35,4 @@ PRPs/
 .DS_Store
 .pnpm-store/
 .canon.yaml
+reload-dist/

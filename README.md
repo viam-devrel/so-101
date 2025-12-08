@@ -10,6 +10,18 @@ This SO-101 module is particularly useful in applications that require the SO-10
 
 Follow the [end-to-end tutorial](https://codelabs.viam.com/guide/so101/index.html?index=..%2F..index#0) to learn how to set up the arm for the first time.
 
+## Model devrel:so101:discovery
+
+Automatic discovery service that detects connected arms and suggests component configurations for the calibration sensor, arm and gripper. It will also look for existing calibration files. 
+
+### Troubleshooting
+
+1. **Serial Connection Failed**:
+   - Check that the USB cable is properly connected
+   - Verify the correct port (Linux: `/dev/ttyUSB0`, `/dev/ttyACM0`; Windows: `COM3`, `COM4`, etc.)
+   - Ensure no other applications are using the serial port
+   - Check USB permissions on Linux: `sudo chmod 666 /dev/ttyUSB0`
+
 ## Model devrel:so101:arm
 
 The arm component controls the first 5 joints of the SO-101: shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, and wrist_roll.
