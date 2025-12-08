@@ -147,3 +147,11 @@ func TestFindCalibrationFile(t *testing.T) {
 		})
 	}
 }
+
+func TestEnumerateSerialPorts(t *testing.T) {
+	// This is a system-dependent test - just verify it doesn't panic and returns a slice
+	ports := enumerateSerialPorts()
+	assert.NotNil(t, ports)
+	// Ports list can be empty on systems without serial devices
+	t.Logf("Found %d serial ports", len(ports))
+}

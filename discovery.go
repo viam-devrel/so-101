@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"go.bug.st/serial/enumerator"
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/resource"
 	"go.viam.com/rdk/services/discovery"
@@ -128,4 +129,18 @@ func findCalibrationFile(moduleDataDir, portSuffix string, logger logging.Logger
 
 	logger.Debug("No calibration file found")
 	return ""
+}
+
+// enumerateSerialPorts returns a list of all serial ports on the system
+func enumerateSerialPorts() []string {
+	ports, err := enumerator.GetDetailedPortsList()
+	if err != nil {
+		return []string{}
+	}
+
+	var portPaths []string
+	for _, port := range ports {
+		portPaths = append(portPaths, port.Name)
+	}
+	return portPaths
 }
