@@ -2,12 +2,68 @@
 package so_arm
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"go.viam.com/rdk/logging"
+	"go.viam.com/rdk/resource"
+	"go.viam.com/rdk/services/discovery"
 )
+
+var SO101DiscoveryModel = resource.NewModel("devrel", "so101", "discovery")
+
+func init() {
+	resource.RegisterService(
+		discovery.API,
+		SO101DiscoveryModel,
+		resource.Registration[discovery.Service, *SO101DiscoveryConfig]{
+			Constructor: newSO101Discovery,
+		})
+}
+
+// SO101DiscoveryConfig is the configuration for the discovery service
+type SO101DiscoveryConfig struct {
+	// Empty for now - could add port filters or baudrate options later
+}
+
+// Validate ensures the config is valid
+func (cfg *SO101DiscoveryConfig) Validate(path string) ([]string, []string, error) {
+	return nil, nil, nil
+}
+
+// so101Discovery implements the discovery service
+type so101Discovery struct {
+	resource.Named
+	resource.AlwaysRebuild
+	resource.TriviallyCloseable
+	logger logging.Logger
+}
+
+// newSO101Discovery creates a new SO-101 discovery service
+func newSO101Discovery(
+	ctx context.Context,
+	deps resource.Dependencies,
+	conf resource.Config,
+	logger logging.Logger,
+) (discovery.Service, error) {
+	_, err := resource.NativeConfig[*SO101DiscoveryConfig](conf)
+	if err != nil {
+		return nil, err
+	}
+
+	return &so101Discovery{
+		Named:  conf.ResourceName().AsNamed(),
+		logger: logger,
+	}, nil
+}
+
+// DiscoverResources scans for SO-101 arms on serial ports and returns component configurations
+func (dis *so101Discovery) DiscoverResources(ctx context.Context, extra map[string]any) ([]resource.Config, error) {
+	// TODO: Implementation will be added in later tasks
+	return nil, nil
+}
 
 // filterCandidatePorts filters serial ports by platform-specific naming patterns
 func filterCandidatePorts(ports []string) []string {
