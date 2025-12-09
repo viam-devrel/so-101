@@ -35,19 +35,19 @@ func NewControllerRegistry() *ControllerRegistry {
 	}
 }
 
-func (r *ControllerRegistry) GetController(portPath string, config *SoArm101Config, calibration SO101FullCalibration) (*SafeSoArmController, error) {
+func (r *ControllerRegistry) GetController(portPath string, config *SoArm101Config, calibration SO101FullCalibration, fromFile bool) (*SafeSoArmController, error) {
 	r.mu.RLock()
 	entry, exists := r.entries[portPath]
 	r.mu.RUnlock()
 
 	if exists {
-		return r.getExistingController(entry, config, calibration)
+		return r.getExistingController(entry, config, calibration, fromFile)
 	}
 
-	return r.createNewController(portPath, config, calibration)
+	return r.createNewController(portPath, config, calibration, fromFile)
 }
 
-func (r *ControllerRegistry) getExistingController(entry *ControllerEntry, config *SoArm101Config, calibration SO101FullCalibration) (*SafeSoArmController, error) {
+func (r *ControllerRegistry) getExistingController(entry *ControllerEntry, config *SoArm101Config, calibration SO101FullCalibration, fromFile bool) (*SafeSoArmController, error) {
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
 
@@ -63,7 +63,9 @@ func (r *ControllerRegistry) getExistingController(entry *ControllerEntry, confi
 		return nil, fmt.Errorf("conflict: existing controller uses different config (refCount: %d)", currentRefCount)
 	}
 
-	if !fullCalibrationsEqual(entry.calibration, calibration) {
+	// Only update calibration if it's explicitly provided from a file
+	// Skip calibration update when fromFile=false to avoid overwriting with defaults
+	if fromFile && !fullCalibrationsEqual(entry.calibration, calibration) {
 		if config.Logger != nil {
 			config.Logger.Info("Updating controller calibration")
 		}
@@ -88,12 +90,12 @@ func (r *ControllerRegistry) getExistingController(entry *ControllerEntry, confi
 	}, nil
 }
 
-func (r *ControllerRegistry) createNewController(portPath string, config *SoArm101Config, calibration SO101FullCalibration) (*SafeSoArmController, error) {
+func (r *ControllerRegistry) createNewController(portPath string, config *SoArm101Config, calibration SO101FullCalibration, fromFile bool) (*SafeSoArmController, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	if entry, exists := r.entries[portPath]; exists {
-		return r.getExistingController(entry, config, calibration)
+		return r.getExistingController(entry, config, calibration, fromFile)
 	}
 
 	entry := &ControllerEntry{
@@ -141,12 +143,31 @@ func (r *ControllerRegistry) createNewController(portPath string, config *SoArm1
 		servos[id] = servo
 	}
 
+	// If using default calibration (not from file), try reading from servos
+	finalCalibration := calibration
+	if !fromFile {
+		if config.Logger != nil {
+			config.Logger.Info("No calibration file loaded, attempting to read from servo registers")
+		}
+		finalCalibration = ReadCalibrationFromServos(bus, config.ServoIDs, config.Logger)
+
+		// Set calibration on bus for normalization
+		feetechCals := finalCalibration.ToFeetechCalibrationMap()
+		for id, motorCal := range feetechCals {
+			if motorCal != nil {
+				bus.SetCalibration(id, motorCal)
+			}
+		}
+	}
+
 	entry.controller = &SafeSoArmController{
 		bus:         bus,
 		servos:      servos,
 		logger:      config.Logger,
-		calibration: calibration,
+		calibration: finalCalibration,
 	}
+	// Update entry calibration after controller creation for consistency
+	entry.calibration = finalCalibration
 	entry.lastError = nil
 	atomic.StoreInt64(&entry.refCount, 1)
 
@@ -162,7 +183,7 @@ func (r *ControllerRegistry) createNewController(portPath string, config *SoArm1
 		bus:         bus,
 		servos:      servos,
 		logger:      config.Logger,
-		calibration: calibration,
+		calibration: finalCalibration,
 	}, nil
 }
 

@@ -43,7 +43,7 @@ The following attributes are available for the arm component:
 | Name                | Type     | Inclusion | Description                                                                                    |
 |---------------------|----------|-----------|------------------------------------------------------------------------------------------------|
 | `port`              | string   | **Required**  | The serial port for communication with the SO-101 (see Communication section below).   |
-| `calibration_file`  | string   | Optional  | Path to the calibration file. If not provided, uses default calibration values.              |
+| `calibration_file`  | string   | Optional  | Path to the calibration file. If not provided, the module will attempt to read calibration from servo registers. If servo reads fail, uses default calibration values. |
 | `baudrate`          | int      | Optional  | The baud rate for serial communication. Default is `1000000`.                                |
 | `servo_ids`         | []int    | Optional  | List of servo IDs for the arm joints. Default is `[1, 2, 3, 4, 5]`.                         |
 | `timeout`           | duration | Optional  | Communication timeout. Default is system default.                                            |
@@ -51,6 +51,18 @@ The following attributes are available for the arm component:
 **If you're building and setting up an arm for the first time, please see the [calibration sensor component](#model-devrelso101calibration) for setup instructions.**
 
 This may also be necessary if you see inaccuracy issues while controlling the arm.
+
+### Calibration Priority
+
+The module uses this calibration priority:
+
+1. **File-based** - If `calibration_file` is configured and exists, load from file
+2. **Servo registers** - If no file configured/found, read homing offset and range limits from servo hardware
+3. **Hardcoded defaults** - If servo reads fail, use default values (offset=0, range=500-3500)
+
+The servo register fallback provides better out-of-box experience by using actual hardware settings instead of generic defaults. Each startup without a calibration file will re-read from servos to ensure fresh data.
+
+**Note:** Calibration read from servos is used in-memory only and not automatically saved. To persist servo-read calibration, use the calibration sensor component's workflow.
 
 ### Communication
 

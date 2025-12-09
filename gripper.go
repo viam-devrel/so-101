@@ -109,7 +109,7 @@ func newSO101Gripper(ctx context.Context, deps resource.Dependencies, conf resou
 
 	controllerConfig.Validate(cfg.CalibrationFile)
 
-	fullCalibration := controllerConfig.LoadCalibration(logger)
+	fullCalibration, fromFile := controllerConfig.LoadCalibration(logger)
 
 	if fullCalibration.Gripper.ID != cfg.ServoID {
 		logger.Infof("Updating gripper calibration servo ID from %d to %d (from config)",
@@ -117,7 +117,7 @@ func newSO101Gripper(ctx context.Context, deps resource.Dependencies, conf resou
 		fullCalibration.Gripper.ID = cfg.ServoID
 	}
 
-	controller, err := GetSharedControllerWithCalibration(controllerConfig, fullCalibration)
+	controller, err := GetSharedControllerWithCalibration(controllerConfig, fullCalibration, fromFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get shared controller for gripper: %w", err)
 	}

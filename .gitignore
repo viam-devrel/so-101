@@ -36,3 +36,4 @@ PRPs/
 .pnpm-store/
 .canon.yaml
 reload-dist/
+docs/plans/
