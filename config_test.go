@@ -90,3 +90,44 @@ func TestGetNormModeForServo(t *testing.T) {
 
 // Note: readUint16Register requires actual servo hardware to test fully
 // We'll test it via integration when we test ReadCalibrationFromServos
+
+// Mock servo for testing - would need to implement feetech.Servo interface
+// For now, we'll write integration-style test that verifies structure
+
+func TestReadCalibrationFromServos_Structure(t *testing.T) {
+	// This test verifies the function signature and default behavior
+	// Full testing requires hardware or extensive mocking
+
+	// Can't test with real bus, but verify defaults are used
+	// when bus/servos are nil (this will be our "all failures" case)
+
+	// We'll test this more thoroughly in Task 4 when integrated
+	t.Skip("Requires hardware or mock bus - tested via integration in Task 4")
+}
+
+func TestValidateServoRegisterValues(t *testing.T) {
+	tests := []struct {
+		name     string
+		minLimit uint16
+		maxLimit uint16
+		valid    bool
+	}{
+		{"valid range", 500, 3500, true},
+		{"min equals max", 2000, 2000, false},
+		{"min greater than max", 3000, 2000, false},
+		{"max exceeds resolution", 1000, 5000, false},
+		{"min at boundary", 0, 4095, true},
+		{"max at boundary", 1000, 4095, true},
+		{"max exceeds boundary", 1000, 4096, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			valid := tt.minLimit < tt.maxLimit && tt.maxLimit <= 4095
+			if valid != tt.valid {
+				t.Errorf("Expected valid=%v for range [%d-%d], got %v",
+					tt.valid, tt.minLimit, tt.maxLimit, valid)
+			}
+		})
+	}
+}

@@ -363,3 +363,75 @@ func readUint16Register(servo *feetech.Servo, registerName string) (uint16, erro
 	// Little-endian decode (LSB first)
 	return uint16(data[0]) | (uint16(data[1]) << 8), nil
 }
+
+// ReadCalibrationFromServos attempts to read calibration from servo registers
+// Returns a complete calibration with successfully-read values and defaults for failures
+// Never returns an error - worst case is all defaults
+func ReadCalibrationFromServos(
+	bus *feetech.Bus,
+	servoIDs []int,
+	logger logging.Logger,
+) SO101FullCalibration {
+	if bus == nil {
+		if logger != nil {
+			logger.Warn("Cannot read servo calibration: bus is nil")
+		}
+		return DefaultSO101FullCalibration
+	}
+
+	successCount := 0
+	calibrations := make(map[int]*feetech.MotorCalibration)
+
+	for _, servoID := range servoIDs {
+		servo := bus.Servo(servoID)
+		if servo == nil {
+			if logger != nil {
+				logger.Warnf("Servo %d: not available, using defaults", servoID)
+			}
+			continue
+		}
+
+		// Try reading registers
+		homingOffset, offsetErr := servo.ReadHomingOffset()
+		minLimit, minErr := readUint16Register(servo, "min_position_limit")
+		maxLimit, maxErr := readUint16Register(servo, "max_position_limit")
+
+		// Check if we got valid data
+		if offsetErr == nil && minErr == nil && maxErr == nil {
+			// Validate range limits are within servo resolution
+			if minLimit < maxLimit && maxLimit <= 4095 {
+				calibrations[servoID] = &feetech.MotorCalibration{
+					ID:           servoID,
+					DriveMode:    0, // Always 0 for SO-101
+					HomingOffset: homingOffset,
+					RangeMin:     int(minLimit),
+					RangeMax:     int(maxLimit),
+					NormMode:     getNormModeForServo(servoID),
+				}
+				successCount++
+				if logger != nil {
+					logger.Infof("Successfully read calibration from servo %d: offset=%d, range=%d-%d",
+						servoID, homingOffset, minLimit, maxLimit)
+				}
+				continue
+			} else {
+				if logger != nil {
+					logger.Warnf("Servo %d: invalid range values (min=%d, max=%d), using defaults",
+						servoID, minLimit, maxLimit)
+				}
+			}
+		} else {
+			if logger != nil {
+				logger.Warnf("Servo %d: failed to read registers, using defaults (offset_err=%v, min_err=%v, max_err=%v)",
+					servoID, offsetErr, minErr, maxErr)
+			}
+		}
+	}
+
+	if logger != nil {
+		logger.Infof("Calibration loaded from servos: %d/%d successful", successCount, len(servoIDs))
+	}
+
+	// Convert to full calibration, using defaults for missing servos
+	return FromFeetechCalibrationMap(calibrations)
+}
