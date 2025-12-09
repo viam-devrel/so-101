@@ -122,7 +122,7 @@ func newSO101Gripper(ctx context.Context, deps resource.Dependencies, conf resou
 		return nil, fmt.Errorf("failed to get shared controller for gripper: %w", err)
 	}
 
-	clawSize := r3.Vector{X: 52, Y: 65.2, Z: 105.43}
+	clawSize := r3.Vector{X: 67.0455, Y: 53.027, Z: 106.4}
 	claws, err := spatialmath.NewBox(spatialmath.NewPoseFromPoint(r3.Vector{X: 0, Y: 0, Z: clawSize.Z / 2}), clawSize, "claws")
 	geometries := []spatialmath.Geometry{claws}
 
