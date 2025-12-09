@@ -23,8 +23,8 @@ func TestFilterCandidatePorts(t *testing.T) {
 		},
 		{
 			name:     "macOS USB ports",
-			ports:    []string{"/dev/tty.usbmodem123", "/dev/tty.Bluetooth", "/dev/tty.usbserial-AB"},
-			expected: []string{"/dev/tty.usbmodem123", "/dev/tty.usbserial-AB"},
+			ports:    []string{"/dev/tty.usbmodem123", "/dev/tty.Bluetooth", "/dev/tty.usbserial-AB", "/dev/cu.usbmodem5A7A0594021", "/dev/cu.usbserial-123"},
+			expected: []string{"/dev/tty.usbmodem123", "/dev/tty.usbserial-AB", "/dev/cu.usbmodem5A7A0594021", "/dev/cu.usbserial-123"},
 		},
 		{
 			name:     "Windows COM ports",

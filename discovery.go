@@ -239,8 +239,8 @@ func isCandidatePort(port string) bool {
 	if strings.HasPrefix(port, "/dev/ttyUSB") || strings.HasPrefix(port, "/dev/ttyACM") {
 		return true
 	}
-	// macOS: /dev/tty.usbmodem*, /dev/tty.usbserial*
-	if strings.HasPrefix(port, "/dev/tty.usbmodem") || strings.HasPrefix(port, "/dev/tty.usbserial") {
+	// macOS: /dev/tty.usbmodem*, /dev/tty.usbserial*, /dev/cu.usbmodem*, /dev/cu.usbserial*
+	if strings.HasPrefix(port, "/dev/tty.usbmodem") || strings.HasPrefix(port, "/dev/tty.usbserial") || strings.HasPrefix(port, "/dev/cu.usbmodem") || strings.HasPrefix(port, "/dev/cu.usbserial") {
 		return true
 	}
 	// Windows: COM*
@@ -260,6 +260,9 @@ func extractPortSuffix(portPath string) string {
 	// For macOS /dev/tty.usb* ports, strip the "tty." prefix
 	if strings.HasPrefix(base, "tty.usb") {
 		return strings.TrimPrefix(base, "tty.")
+	}
+	if strings.HasPrefix(base, "cu.usb") {
+		return strings.TrimPrefix(base, "cu.")
 	}
 
 	return base

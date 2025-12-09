@@ -42,7 +42,7 @@ The following attributes are available for the arm component:
 
 | Name                | Type     | Inclusion | Description                                                                                    |
 |---------------------|----------|-----------|------------------------------------------------------------------------------------------------|
-| `port`              | string   | **Required**  | The serial port for communication with the SO-101 (e.g., `/dev/ttyUSB0` or`/dev/ttyACM0` on Linux, `/dev/tty.usbmodem*` on MacOS).   |
+| `port`              | string   | **Required**  | The serial port for communication with the SO-101 (see Communication section below).   |
 | `calibration_file`  | string   | Optional  | Path to the calibration file. If not provided, uses default calibration values.              |
 | `baudrate`          | int      | Optional  | The baud rate for serial communication. Default is `1000000`.                                |
 | `servo_ids`         | []int    | Optional  | List of servo IDs for the arm joints. Default is `[1, 2, 3, 4, 5]`.                         |
@@ -58,10 +58,17 @@ The SO-101 uses serial communication over USB with Feetech STS3215 servos. The m
 
 You can use the included [discovery service](#model-devrelso101discovery) or find the available serial port options from your machine's command line.
 
-On MacOS, look for `usbmodem` in the name:
+On MacOS, look for `usbmodem` or `usbserial` in the name:
 ```
 you@machine: ls /dev/tty.*
-/dev/tty.Bluetooth-Incoming-Port        /dev/tty.debug-console                  /dev/tty.usbmodem58CD1767051
+/dev/tty.Bluetooth-Incoming-Port
+/dev/tty.debug-console
+/dev/tty.usbmodem58CD1767051
+
+you@machine: ls /dev/cu.*
+/dev/cu.Bluetooth-Incoming-Port
+/dev/cu.debug-console
+/dev/cu.usbmodem58CD1767051
 ```
 
 On Linux, look for `ACM` or `USB` in the name:
@@ -195,10 +202,17 @@ Follow the [end-to-end tutorial](https://codelabs.viam.com/guide/so101/index.htm
 
 You can use the included [discovery service](#model-devrelso101discovery) or find the available serial port options from your machine's command line.
 
-On MacOS, look for `usbmodem` in the name:
+On MacOS, look for `usbmodem` or `usbserial` in the name:
 ```
 you@machine: ls /dev/tty.*
-/dev/tty.Bluetooth-Incoming-Port        /dev/tty.debug-console                  /dev/tty.usbmodem58CD1767051
+/dev/tty.Bluetooth-Incoming-Port
+/dev/tty.debug-console
+/dev/tty.usbmodem58CD1767051
+
+you@machine: ls /dev/cu.*
+/dev/cu.Bluetooth-Incoming-Port
+/dev/cu.debug-console
+/dev/cu.usbmodem58CD1767051
 ```
 
 On Linux, look for `ACM` or `USB` in the name:
@@ -270,7 +284,7 @@ Follow the [end-to-end tutorial](https://codelabs.viam.com/guide/so101/index.htm
 
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
-| `port` | string | **Required** | Serial port for servo communication (e.g., `/dev/ttyUSB0`) |
+| `port` | string | **Required** | Serial port for servo communication (see Communication section below) |
 | `calibration_file` | string | Optional | Path where calibration will be saved. If relative path, uses `$VIAM_MODULE_DATA` directory. Default: `"so101_calibration.json"` |
 | `baudrate` | int | Optional | Serial communication speed. Default: `1000000` |
 | `timeout` | duration | Optional | Communication timeout. Default: `"5s"` |
@@ -279,10 +293,17 @@ Follow the [end-to-end tutorial](https://codelabs.viam.com/guide/so101/index.htm
 
 You can use the included [discovery service](#model-devrelso101discovery) or find the available serial port options from your machine's command line.
 
-On MacOS, look for `usbmodem` in the name:
+On MacOS, look for `usbmodem` or `usbserial` in the name:
 ```
 you@machine: ls /dev/tty.*
-/dev/tty.Bluetooth-Incoming-Port        /dev/tty.debug-console                  /dev/tty.usbmodem58CD1767051
+/dev/tty.Bluetooth-Incoming-Port
+/dev/tty.debug-console
+/dev/tty.usbmodem58CD1767051
+
+you@machine: ls /dev/cu.*
+/dev/cu.Bluetooth-Incoming-Port
+/dev/cu.debug-console
+/dev/cu.usbmodem58CD1767051
 ```
 
 On Linux, look for `ACM` or `USB` in the name:

@@ -6,6 +6,7 @@ require (
 	github.com/golang/geo v0.0.0-20230421003525-6adc56603217
 	github.com/hipsterbrown/feetech-servo v0.3.0
 	github.com/pkg/errors v0.9.1
+	github.com/stretchr/testify v1.10.0
 	go.bug.st/serial v1.6.4
 	go.viam.com/api v0.1.485
 	go.viam.com/rdk v0.102.0
@@ -120,7 +121,6 @@ require (
 	github.com/sergi/go-diff v1.4.0 // indirect
 	github.com/spf13/cast v1.5.0 // indirect
 	github.com/srikrsna/protoc-gen-gotag v0.6.2 // indirect
-	github.com/stretchr/testify v1.10.0 // indirect
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
 	github.com/viamrobotics/ice/v2 v2.3.40 // indirect
 	github.com/viamrobotics/webrtc/v3 v3.99.16 // indirect

@@ -24,7 +24,7 @@
       "markdown_link": "README.md#model-devrelso101calibration"
     },
     {
-      "api": "rdk:services:discovery",
+      "api": "rdk:service:discovery",
       "model": "devrel:so101:discovery",
       "short_description": "Discover available arm, gripper, and calibration components related to SO101 ARM",
       "markdown_link": "README.md#model-devrelso101discovery"
