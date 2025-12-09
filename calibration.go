@@ -167,7 +167,7 @@ func NewSO101CalibrationSensor(
 	controllerConfig.Validate(conf.CalibrationFile)
 
 	// Load existing calibration for baseline
-	calibration := controllerConfig.LoadCalibration(logger)
+	calibration, _ := controllerConfig.LoadCalibration(logger)
 
 	controller, err := GetSharedControllerWithCalibration(controllerConfig, calibration)
 	if err != nil {

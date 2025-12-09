@@ -88,12 +88,13 @@ func (cfg *SoArm101Config) Validate(path string) ([]string, []string, error) {
 }
 
 // LoadCalibration loads calibration from file or returns default calibration
-func (cfg *SoArm101Config) LoadCalibration(logger logging.Logger) SO101FullCalibration {
+// Returns (calibration, fromFile) where fromFile indicates if loaded from file
+func (cfg *SoArm101Config) LoadCalibration(logger logging.Logger) (SO101FullCalibration, bool) {
 	if cfg.CalibrationFile == "" {
 		if logger != nil {
 			logger.Debug("No calibration file specified, using default calibration")
 		}
-		return DefaultSO101FullCalibration
+		return DefaultSO101FullCalibration, false
 	}
 
 	// Handle relative paths using VIAM_MODULE_DATA
@@ -110,13 +111,13 @@ func (cfg *SoArm101Config) LoadCalibration(logger logging.Logger) SO101FullCalib
 		if logger != nil {
 			logger.Warnf("Failed to load calibration from %s: %v, using default calibration", cfg.CalibrationFile, err)
 		}
-		return DefaultSO101FullCalibration
+		return DefaultSO101FullCalibration, false
 	}
 
 	if logger != nil {
 		logger.Infof("Successfully loaded calibration from %s", cfg.CalibrationFile)
 	}
-	return calibration
+	return calibration, true
 }
 
 // Maintains backward compatibility with existing calibration files

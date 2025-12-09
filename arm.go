@@ -213,7 +213,7 @@ func NewSO101(ctx context.Context, deps resource.Dependencies, name resource.Nam
 	controllerConfig.Validate(conf.CalibrationFile)
 
 	// Load full calibration (includes gripper for shared controller)
-	calibration := controllerConfig.LoadCalibration(logger)
+	calibration, _ := controllerConfig.LoadCalibration(logger)
 	if calibration.ShoulderPan != nil {
 		logger.Infof("Using calibration for SO-101 with shoulder_pan homing_offset: %d", calibration.ShoulderPan.HomingOffset)
 	} else {

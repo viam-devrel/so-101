@@ -109,7 +109,7 @@ func newSO101Gripper(ctx context.Context, deps resource.Dependencies, conf resou
 
 	controllerConfig.Validate(cfg.CalibrationFile)
 
-	fullCalibration := controllerConfig.LoadCalibration(logger)
+	fullCalibration, _ := controllerConfig.LoadCalibration(logger)
 
 	if fullCalibration.Gripper.ID != cfg.ServoID {
 		logger.Infof("Updating gripper calibration servo ID from %d to %d (from config)",
