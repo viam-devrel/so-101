@@ -35,7 +35,7 @@ func NewControllerRegistry() *ControllerRegistry {
 	}
 }
 
-func (r *ControllerRegistry) GetController(portPath string, config *SoArm101Config, calibration SO101FullCalibration) (*SafeSoArmController, error) {
+func (r *ControllerRegistry) GetController(portPath string, config *SoArm101Config, calibration SO101FullCalibration, fromFile bool) (*SafeSoArmController, error) {
 	r.mu.RLock()
 	entry, exists := r.entries[portPath]
 	r.mu.RUnlock()
@@ -44,7 +44,7 @@ func (r *ControllerRegistry) GetController(portPath string, config *SoArm101Conf
 		return r.getExistingController(entry, config, calibration)
 	}
 
-	return r.createNewController(portPath, config, calibration)
+	return r.createNewController(portPath, config, calibration, fromFile)
 }
 
 func (r *ControllerRegistry) getExistingController(entry *ControllerEntry, config *SoArm101Config, calibration SO101FullCalibration) (*SafeSoArmController, error) {
@@ -88,7 +88,7 @@ func (r *ControllerRegistry) getExistingController(entry *ControllerEntry, confi
 	}, nil
 }
 
-func (r *ControllerRegistry) createNewController(portPath string, config *SoArm101Config, calibration SO101FullCalibration) (*SafeSoArmController, error) {
+func (r *ControllerRegistry) createNewController(portPath string, config *SoArm101Config, calibration SO101FullCalibration, fromFile bool) (*SafeSoArmController, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -139,6 +139,25 @@ func (r *ControllerRegistry) createNewController(portPath string, config *SoArm1
 			return nil, fmt.Errorf("failed to create servo %d: %w", id, err)
 		}
 		servos[id] = servo
+	}
+
+	// If using default calibration (not from file), try reading from servos
+	if !fromFile {
+		if config.Logger != nil {
+			config.Logger.Info("No calibration file loaded, attempting to read from servo registers")
+		}
+		calibration = ReadCalibrationFromServos(bus, config.ServoIDs, config.Logger)
+
+		// Update entry with servo-read calibration
+		entry.calibration = calibration
+
+		// Set calibration on bus for normalization
+		feetechCals := calibration.ToFeetechCalibrationMap()
+		for id, motorCal := range feetechCals {
+			if motorCal != nil {
+				bus.SetCalibration(id, motorCal)
+			}
+		}
 	}
 
 	entry.controller = &SafeSoArmController{

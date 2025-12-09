@@ -57,7 +57,7 @@ func TestSingleControllerAccess(t *testing.T) {
 	// This is a unit test that should work without hardware
 	t.Skip("Skipping hardware-dependent test")
 
-	controller, err := registry.GetController(config.Port, config, calibration)
+	controller, err := registry.GetController(config.Port, config, calibration, false)
 	if err != nil {
 		t.Fatalf("Failed to get controller: %v", err)
 	}
@@ -112,7 +112,7 @@ func TestMultiplePortsAccess(t *testing.T) {
 			calibration := DefaultSO101FullCalibration
 
 			// This will likely fail due to hardware, but we're testing the registry logic
-			_, err := registry.GetController(p, config, calibration)
+			_, err := registry.GetController(p, config, calibration, false)
 			if err == nil {
 				atomic.AddInt64(&successCount, 1)
 			}
@@ -154,7 +154,7 @@ func TestSharedAccess(t *testing.T) {
 			defer wg.Done()
 
 			// This will fail due to hardware, but tests concurrent access
-			_, err := registry.GetController(port, config, DefaultSO101FullCalibration)
+			_, err := registry.GetController(port, config, DefaultSO101FullCalibration, false)
 			if err != nil {
 				atomic.AddInt64(&errorCount, 1)
 			}
@@ -393,7 +393,7 @@ func TestConcurrentRegistryAccess(t *testing.T) {
 
 			for j := 0; j < numOperations; j++ {
 				// Try various registry operations (they will fail due to hardware, but test thread safety)
-				registry.GetController(port, config, DefaultSO101FullCalibration)
+				registry.GetController(port, config, DefaultSO101FullCalibration, false)
 				registry.GetControllerStatus(port)
 				registry.GetCurrentCalibration(port)
 
@@ -407,4 +407,13 @@ func TestConcurrentRegistryAccess(t *testing.T) {
 
 	// Test should complete without race conditions or panics
 	t.Log("Concurrent access test completed successfully")
+}
+
+// TestControllerUsesServoCalibrationWhenNoFile tests servo calibration fallback integration
+func TestControllerUsesServoCalibrationWhenNoFile(t *testing.T) {
+	// This would require hardware or extensive mocking
+	// We'll verify the integration manually and via existing tests
+	// The key is ensuring the code path is correct
+
+	t.Skip("Integration test - requires hardware or mock bus setup")
 }

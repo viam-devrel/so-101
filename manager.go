@@ -233,11 +233,11 @@ func fullCalibrationsEqual(a, b SO101FullCalibration) bool {
 }
 
 func GetSharedController(config *SoArm101Config) (*SafeSoArmController, error) {
-	return GetSharedControllerWithCalibration(config, DefaultSO101FullCalibration)
+	return GetSharedControllerWithCalibration(config, DefaultSO101FullCalibration, false)
 }
 
-func GetSharedControllerWithCalibration(config *SoArm101Config, calibration SO101FullCalibration) (*SafeSoArmController, error) {
-	return globalRegistry.GetController(config.Port, config, calibration)
+func GetSharedControllerWithCalibration(config *SoArm101Config, calibration SO101FullCalibration, fromFile bool) (*SafeSoArmController, error) {
+	return globalRegistry.GetController(config.Port, config, calibration, fromFile)
 }
 
 func ReleaseSharedController() {

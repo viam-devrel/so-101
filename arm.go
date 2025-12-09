@@ -213,14 +213,14 @@ func NewSO101(ctx context.Context, deps resource.Dependencies, name resource.Nam
 	controllerConfig.Validate(conf.CalibrationFile)
 
 	// Load full calibration (includes gripper for shared controller)
-	calibration, _ := controllerConfig.LoadCalibration(logger)
+	calibration, fromFile := controllerConfig.LoadCalibration(logger)
 	if calibration.ShoulderPan != nil {
 		logger.Infof("Using calibration for SO-101 with shoulder_pan homing_offset: %d", calibration.ShoulderPan.HomingOffset)
 	} else {
 		logger.Info("Using default calibration for SO-101")
 	}
 
-	controller, err := GetSharedControllerWithCalibration(controllerConfig, calibration)
+	controller, err := GetSharedControllerWithCalibration(controllerConfig, calibration, fromFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get shared SO-ARM controller: %w", err)
 	}

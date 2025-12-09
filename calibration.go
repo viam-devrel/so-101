@@ -167,9 +167,9 @@ func NewSO101CalibrationSensor(
 	controllerConfig.Validate(conf.CalibrationFile)
 
 	// Load existing calibration for baseline
-	calibration, _ := controllerConfig.LoadCalibration(logger)
+	calibration, fromFile := controllerConfig.LoadCalibration(logger)
 
-	controller, err := GetSharedControllerWithCalibration(controllerConfig, calibration)
+	controller, err := GetSharedControllerWithCalibration(controllerConfig, calibration, fromFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get shared SO-ARM controller: %w", err)
 	}
