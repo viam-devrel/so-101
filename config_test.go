@@ -1,9 +1,11 @@
 package so_arm
 
 import (
+	"fmt"
 	"path/filepath"
 	"testing"
 
+	"github.com/hipsterbrown/feetech-servo"
 	"go.viam.com/rdk/logging"
 )
 
@@ -61,3 +63,30 @@ func TestLoadCalibrationFromFile(t *testing.T) {
 		}
 	})
 }
+
+func TestGetNormModeForServo(t *testing.T) {
+	tests := []struct {
+		servoID  int
+		expected int
+	}{
+		{1, feetech.NormModeDegrees},
+		{2, feetech.NormModeDegrees},
+		{3, feetech.NormModeDegrees},
+		{4, feetech.NormModeDegrees},
+		{5, feetech.NormModeDegrees},
+		{6, feetech.NormModeRange100},
+	}
+
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("servo_%d", tt.servoID), func(t *testing.T) {
+			result := getNormModeForServo(tt.servoID)
+			if result != tt.expected {
+				t.Errorf("Expected NormMode %d for servo %d, got %d",
+					tt.expected, tt.servoID, result)
+			}
+		})
+	}
+}
+
+// Note: readUint16Register requires actual servo hardware to test fully
+// We'll test it via integration when we test ReadCalibrationFromServos

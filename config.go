@@ -341,3 +341,25 @@ func calibrationsEqual(a, b *feetech.MotorCalibration) bool {
 		a.RangeMax == b.RangeMax &&
 		a.NormMode == b.NormMode
 }
+
+// getNormModeForServo returns the appropriate NormMode for a servo ID
+// Servo 6 (gripper) uses 0-100 range, servos 1-5 (arm) use degrees
+func getNormModeForServo(servoID int) int {
+	if servoID == 6 {
+		return feetech.NormModeRange100 // Gripper uses 0-100%
+	}
+	return feetech.NormModeDegrees // Arm servos use degrees
+}
+
+// readUint16Register reads a 2-byte register from servo and decodes as uint16
+func readUint16Register(servo *feetech.Servo, registerName string) (uint16, error) {
+	data, err := servo.ReadRegisterByName(registerName)
+	if err != nil {
+		return 0, err
+	}
+	if len(data) != 2 {
+		return 0, fmt.Errorf("expected 2 bytes for %s, got %d", registerName, len(data))
+	}
+	// Little-endian decode (LSB first)
+	return uint16(data[0]) | (uint16(data[1]) << 8), nil
+}
