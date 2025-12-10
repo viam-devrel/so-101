@@ -1,22 +1,25 @@
 package so_arm
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"sync/atomic"
 
-	"github.com/hipsterbrown/feetech-servo"
+	"github.com/hipsterbrown/feetech-servo/feetech"
 	"go.viam.com/rdk/logging"
 )
 
 var globalRegistry = NewControllerRegistry()
 
 type SafeSoArmController struct {
-	bus         *feetech.Bus
-	servos      map[int]*feetech.Servo
-	logger      logging.Logger
-	calibration SO101FullCalibration
-	mu          sync.RWMutex
+	bus          *feetech.Bus
+	armGroup     *feetech.ServoGroup
+	gripperGroup *feetech.ServoGroup
+	servos       map[int]*CalibratedServo
+	logger       logging.Logger
+	calibration  SO101FullCalibration
+	mu           sync.RWMutex
 }
 
 func (s *SafeSoArmController) MoveToJointPositions(jointAngles []float64, speed, acc int) error {
