@@ -273,3 +273,10 @@ func (cs *CalibratedServo) SetVelocity(ctx context.Context, vel int) error {
 func (cs *CalibratedServo) GetRawServo() *feetech.Servo {
 	return cs.servo
 }
+
+// UpdateCalibration safely updates the calibration data
+func (cs *CalibratedServo) UpdateCalibration(calibration *MotorCalibration) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	cs.calibration = calibration
+}
