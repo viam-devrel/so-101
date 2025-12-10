@@ -159,3 +159,117 @@ func (c *MotorCalibration) Validate() error {
 
 	return nil
 }
+
+// CalibratedServo wraps a feetech.Servo with calibration support
+type CalibratedServo struct {
+	servo       *feetech.Servo
+	calibration *MotorCalibration
+	mu          sync.RWMutex
+}
+
+// NewCalibratedServo creates a new calibrated servo wrapper
+func NewCalibratedServo(servo *feetech.Servo, calibration *MotorCalibration) *CalibratedServo {
+	return &CalibratedServo{
+		servo:       servo,
+		calibration: calibration,
+	}
+}
+
+// Position reads the current position and returns normalized value
+func (cs *CalibratedServo) Position(ctx context.Context) (float64, error) {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+
+	rawPos, err := cs.servo.Position(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("failed to read position: %w", err)
+	}
+
+	normalized, err := cs.calibration.Normalize(rawPos)
+	if err != nil {
+		return 0, fmt.Errorf("failed to normalize position: %w", err)
+	}
+
+	return normalized, nil
+}
+
+// SetPosition sets the servo position from normalized value
+func (cs *CalibratedServo) SetPosition(ctx context.Context, normalized float64) error {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+
+	raw, err := cs.calibration.Denormalize(normalized)
+	if err != nil {
+		return fmt.Errorf("failed to denormalize position: %w", err)
+	}
+
+	if err := cs.servo.SetPosition(ctx, raw); err != nil {
+		return fmt.Errorf("failed to set position: %w", err)
+	}
+
+	return nil
+}
+
+// SetPositionWithSpeed sets position with speed control
+func (cs *CalibratedServo) SetPositionWithSpeed(ctx context.Context, normalized float64, speed int) error {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+
+	raw, err := cs.calibration.Denormalize(normalized)
+	if err != nil {
+		return fmt.Errorf("failed to denormalize position: %w", err)
+	}
+
+	if err := cs.servo.SetPositionWithSpeed(ctx, raw, speed); err != nil {
+		return fmt.Errorf("failed to set position with speed: %w", err)
+	}
+
+	return nil
+}
+
+// Enable enables the servo torque
+func (cs *CalibratedServo) Enable(ctx context.Context) error {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	return cs.servo.Enable(ctx)
+}
+
+// Disable disables the servo torque
+func (cs *CalibratedServo) Disable(ctx context.Context) error {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	return cs.servo.Disable(ctx)
+}
+
+// SetTorqueEnabled sets the torque enable state
+func (cs *CalibratedServo) SetTorqueEnabled(ctx context.Context, enable bool) error {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	return cs.servo.SetTorqueEnabled(ctx, enable)
+}
+
+// Moving checks if servo is currently moving
+func (cs *CalibratedServo) Moving(ctx context.Context) (bool, error) {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return cs.servo.Moving(ctx)
+}
+
+// Ping pings the servo
+func (cs *CalibratedServo) Ping(ctx context.Context) (int, error) {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return cs.servo.Ping(ctx)
+}
+
+// SetVelocity sets the servo velocity
+func (cs *CalibratedServo) SetVelocity(ctx context.Context, vel int) error {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	return cs.servo.SetVelocity(ctx, vel)
+}
+
+// GetRawServo returns the underlying feetech.Servo (for ServoGroup creation)
+func (cs *CalibratedServo) GetRawServo() *feetech.Servo {
+	return cs.servo
+}
