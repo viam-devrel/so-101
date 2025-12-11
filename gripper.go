@@ -157,7 +157,7 @@ func (g *so101Gripper) Open(ctx context.Context, extra map[string]interface{}) e
 
 	g.logger.Debug("Opening gripper")
 
-	if err := g.controller.MoveServosToPositions([]int{g.servoID}, []float64{g.openPositionRadians()}, 0, 0); err != nil {
+	if err := g.controller.MoveServosToPositions(ctx, []int{g.servoID}, []float64{g.openPositionRadians()}, 0, 0); err != nil {
 		return fmt.Errorf("failed to open gripper: %w", err)
 	}
 
@@ -176,13 +176,13 @@ func (g *so101Gripper) Grab(ctx context.Context, extra map[string]interface{}) (
 
 	g.logger.Debug("Attempting to grab with gripper")
 
-	if err := g.controller.MoveServosToPositions([]int{g.servoID}, []float64{g.closedPositionRadians()}, 0, 0); err != nil {
+	if err := g.controller.MoveServosToPositions(ctx, []int{g.servoID}, []float64{g.closedPositionRadians()}, 0, 0); err != nil {
 		return false, fmt.Errorf("failed to close gripper: %w", err)
 	}
 
 	time.Sleep(500 * time.Millisecond)
 
-	currentPositions, err := g.controller.GetJointPositionsForServos([]int{g.servoID})
+	currentPositions, err := g.controller.GetJointPositionsForServos(ctx, []int{g.servoID})
 	if err != nil {
 		g.logger.Warnf("Failed to read gripper position after grab: %v", err)
 		return true, nil
@@ -211,7 +211,7 @@ func (g *so101Gripper) Grab(ctx context.Context, extra map[string]interface{}) (
 
 func (g *so101Gripper) Stop(ctx context.Context, extra map[string]interface{}) error {
 	g.isMoving.Store(false)
-	return g.controller.Stop()
+	return g.controller.Stop(ctx)
 }
 
 func (g *so101Gripper) IsMoving(ctx context.Context) (bool, error) {
@@ -228,7 +228,7 @@ func (g *so101Gripper) Geometries(ctx context.Context, extra map[string]interfac
 func (g *so101Gripper) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
 	switch cmd["command"] {
 	case "get_position":
-		positions, err := g.controller.GetJointPositionsForServos([]int{g.servoID})
+		positions, err := g.controller.GetJointPositionsForServos(ctx, []int{g.servoID})
 		if err != nil {
 			return nil, err
 		}
@@ -276,7 +276,7 @@ func (g *so101Gripper) DoCommand(ctx context.Context, cmd map[string]interface{}
 		defer g.isMoving.Store(false)
 
 		targetRadians := g.percentToRadians(targetPercent)
-		err := g.controller.MoveServosToPositions([]int{g.servoID}, []float64{targetRadians}, 0, 0)
+		err := g.controller.MoveServosToPositions(ctx, []int{g.servoID}, []float64{targetRadians}, 0, 0)
 		return map[string]interface{}{"success": err == nil}, err
 
 	case "controller_status":
