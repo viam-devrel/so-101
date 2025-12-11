@@ -22,7 +22,7 @@ type SafeSoArmController struct {
 	mu           sync.RWMutex
 }
 
-func (s *SafeSoArmController) MoveToJointPositions(jointAngles []float64, speed, acc int) error {
+func (s *SafeSoArmController) MoveToJointPositions(ctx context.Context, jointAngles []float64, speed, acc int) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -31,24 +31,28 @@ func (s *SafeSoArmController) MoveToJointPositions(jointAngles []float64, speed,
 		return fmt.Errorf("expected %d joint angles, got %d", len(armServoIDs), len(jointAngles))
 	}
 
-	var servos []*feetech.Servo
-	for _, id := range armServoIDs {
-		if servo, exists := s.servos[id]; exists {
-			servos = append(servos, servo)
-		} else {
-			return fmt.Errorf("servo %d not available", id)
-		}
-	}
-
-	positions := make([]float64, len(jointAngles))
+	// Convert radians to degrees
+	degrees := make([]float64, len(jointAngles))
 	for i, angle := range jointAngles {
-		positions[i] = angle * 180.0 / 3.14159265359
+		degrees[i] = angle * 180.0 / 3.14159265359
 	}
 
-	return s.bus.SyncWritePositions(servos, positions, true)
+	// Denormalize degrees to raw positions using calibration
+	rawPositions := make([]int, len(degrees))
+	for i, servoID := range armServoIDs {
+		cal := s.calibration.GetMotorCalibrationByID(servoID)
+		raw, err := cal.Denormalize(degrees[i])
+		if err != nil {
+			return fmt.Errorf("failed to denormalize position for servo %d: %w", servoID, err)
+		}
+		rawPositions[i] = raw
+	}
+
+	// Use ServoGroup to write positions
+	return s.armGroup.SetPositions(ctx, rawPositions)
 }
 
-func (s *SafeSoArmController) MoveServosToPositions(servoIDs []int, jointAngles []float64, speed, acc int) error {
+func (s *SafeSoArmController) MoveServosToPositions(ctx context.Context, servoIDs []int, jointAngles []float64, speed, acc int) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -56,103 +60,131 @@ func (s *SafeSoArmController) MoveServosToPositions(servoIDs []int, jointAngles 
 		return fmt.Errorf("servo IDs and joint angles length mismatch")
 	}
 
-	var servos []*feetech.Servo
+	// Determine which group to use
+	isArmOnly := true
+	isGripperOnly := len(servoIDs) == 1 && servoIDs[0] == 6
+
 	for _, id := range servoIDs {
-		if servo, exists := s.servos[id]; exists {
-			servos = append(servos, servo)
-		} else {
-			return fmt.Errorf("servo %d not available", id)
+		if id == 6 {
+			isArmOnly = false
+		} else if id < 1 || id > 5 {
+			return fmt.Errorf("invalid servo ID: %d", id)
 		}
 	}
 
-	positions := make([]float64, len(jointAngles))
+	// Convert radians to degrees
+	degrees := make([]float64, len(jointAngles))
 	for i, angle := range jointAngles {
-		positions[i] = angle * 180.0 / 3.14159265359
+		degrees[i] = angle * 180.0 / 3.14159265359
 	}
 
-	return s.bus.SyncWritePositions(servos, positions, true)
+	// Denormalize degrees to raw positions
+	rawPositions := make([]int, len(degrees))
+	for i, servoID := range servoIDs {
+		cal := s.calibration.GetMotorCalibrationByID(servoID)
+		raw, err := cal.Denormalize(degrees[i])
+		if err != nil {
+			return fmt.Errorf("failed to denormalize position for servo %d: %w", servoID, err)
+		}
+		rawPositions[i] = raw
+	}
+
+	// Use appropriate ServoGroup
+	if isGripperOnly {
+		return s.gripperGroup.SetPositions(ctx, rawPositions)
+	} else if isArmOnly && len(servoIDs) == 5 {
+		return s.armGroup.SetPositions(ctx, rawPositions)
+	} else {
+		// Mixed or partial - use individual servo writes
+		for i, servoID := range servoIDs {
+			if err := s.servos[servoID].SetPosition(ctx, degrees[i]); err != nil {
+				return fmt.Errorf("failed to set position for servo %d: %w", servoID, err)
+			}
+		}
+		return nil
+	}
 }
 
-func (s *SafeSoArmController) GetJointPositions() ([]float64, error) {
+func (s *SafeSoArmController) GetJointPositions(ctx context.Context) ([]float64, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	servoIDs := []int{1, 2, 3, 4, 5, 6}
-	var servos []*feetech.Servo
-	for _, id := range servoIDs {
-		if servo, exists := s.servos[id]; exists {
-			servos = append(servos, servo)
-		} else {
-			return nil, fmt.Errorf("servo %d not available", id)
-		}
-	}
-
-	positionMap, err := s.bus.SyncReadPositions(servos, true)
-	if err != nil {
-		return nil, err
-	}
-
 	positions := make([]float64, len(servoIDs))
-	for i, id := range servoIDs {
-		if pos, exists := positionMap[id]; exists {
-			positions[i] = pos * 3.14159265359 / 180.0
-		} else {
-			return nil, fmt.Errorf("no position data for servo %d", id)
-		}
+
+	// Read arm positions using ServoGroup
+	armPositions, err := s.armGroup.Positions(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read arm positions: %w", err)
 	}
+
+	// Normalize arm positions
+	for i := 0; i < 5; i++ {
+		cal := s.calibration.GetMotorCalibrationByID(servoIDs[i])
+		normalized, err := cal.Normalize(armPositions[i])
+		if err != nil {
+			return nil, fmt.Errorf("failed to normalize servo %d: %w", servoIDs[i], err)
+		}
+		// Convert degrees to radians
+		positions[i] = normalized * 3.14159265359 / 180.0
+	}
+
+	// Read gripper position using ServoGroup
+	gripperPositions, err := s.gripperGroup.Positions(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read gripper position: %w", err)
+	}
+
+	// Normalize gripper position
+	cal := s.calibration.GetMotorCalibrationByID(6)
+	normalized, err := cal.Normalize(gripperPositions[0])
+	if err != nil {
+		return nil, fmt.Errorf("failed to normalize gripper: %w", err)
+	}
+	// Gripper uses 0-100 range, convert to radians for consistency
+	positions[5] = normalized * 3.14159265359 / 180.0
 
 	return positions, nil
 }
 
-func (s *SafeSoArmController) GetJointPositionsForServos(servoIDs []int) ([]float64, error) {
+func (s *SafeSoArmController) GetJointPositionsForServos(ctx context.Context, servoIDs []int) ([]float64, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	var servos []*feetech.Servo
-	for _, id := range servoIDs {
-		if servo, exists := s.servos[id]; exists {
-			servos = append(servos, servo)
-		} else {
-			return nil, fmt.Errorf("servo %d not available", id)
-		}
-	}
-
-	positionMap, err := s.bus.SyncReadPositions(servos, true)
-	if err != nil {
-		return nil, err
-	}
-
 	positions := make([]float64, len(servoIDs))
-	for i, id := range servoIDs {
-		if pos, exists := positionMap[id]; exists {
-			positions[i] = pos * 3.14159265359 / 180.0
-		} else {
-			return nil, fmt.Errorf("no position data for servo %d", id)
+
+	// Use individual calibrated servo reads
+	for i, servoID := range servoIDs {
+		degrees, err := s.servos[servoID].Position(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read servo %d: %w", servoID, err)
 		}
+		// Convert degrees to radians
+		positions[i] = degrees * 3.14159265359 / 180.0
 	}
 
 	return positions, nil
 }
 
-func (s *SafeSoArmController) SetTorqueEnable(enable bool) error {
+func (s *SafeSoArmController) SetTorqueEnable(ctx context.Context, enable bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	for _, servo := range s.servos {
-		if err := servo.SetTorqueEnable(enable); err != nil {
-			return fmt.Errorf("failed to set torque enable for servo %d: %w", servo.ID, err)
+	for id, servo := range s.servos {
+		if err := servo.SetTorqueEnabled(ctx, enable); err != nil {
+			return fmt.Errorf("failed to set torque enable for servo %d: %w", id, err)
 		}
 	}
 	return nil
 }
 
-func (s *SafeSoArmController) Stop() error {
+func (s *SafeSoArmController) Stop(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	for _, servo := range s.servos {
-		if err := servo.WriteVelocity(0, false); err != nil {
-			s.logger.Warnf("Failed to stop servo %d: %v", servo.ID, err)
+	for id, servo := range s.servos {
+		if err := servo.SetVelocity(ctx, 0); err != nil {
+			s.logger.Warnf("Failed to stop servo %d: %v", id, err)
 		}
 	}
 	return nil
@@ -168,20 +200,20 @@ func (s *SafeSoArmController) Close() error {
 	return nil
 }
 
-func (s *SafeSoArmController) Ping() error {
+func (s *SafeSoArmController) Ping(ctx context.Context) error {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	for _, servo := range s.servos {
-		if _, err := servo.Ping(); err != nil {
-			return fmt.Errorf("ping failed for servo %d: %w", servo.ID, err)
+	for id, servo := range s.servos {
+		if _, err := servo.Ping(ctx); err != nil {
+			return fmt.Errorf("ping failed for servo %d: %w", id, err)
 		}
 	}
 	return nil
 }
 
 // WriteServoRegister writes to a specific servo register by name
-func (s *SafeSoArmController) WriteServoRegister(servoID int, registerName string, data []byte) error {
+func (s *SafeSoArmController) WriteServoRegister(ctx context.Context, servoID int, registerName string, data []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -190,21 +222,28 @@ func (s *SafeSoArmController) WriteServoRegister(servoID int, registerName strin
 		return fmt.Errorf("servo %d not available", servoID)
 	}
 
-	return servo.WriteRegisterByName(registerName, data)
+	return servo.GetRawServo().WriteRegister(ctx, registerName, data)
 }
 
 func (s *SafeSoArmController) SetCalibration(calibration SO101FullCalibration) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	feetechCals := calibration.ToFeetechCalibrationMap()
-
-	for id, cal := range feetechCals {
-		s.bus.SetCalibration(id, cal)
+	// Update calibration in each CalibratedServo
+	for id := 1; id <= 6; id++ {
+		motorCal := calibration.GetMotorCalibrationByID(id)
+		appCal := &MotorCalibration{
+			ID:           motorCal.ID,
+			DriveMode:    motorCal.DriveMode,
+			HomingOffset: motorCal.HomingOffset,
+			RangeMin:     motorCal.RangeMin,
+			RangeMax:     motorCal.RangeMax,
+			NormMode:     motorCal.NormMode,
+		}
+		s.servos[id].UpdateCalibration(appCal)
 	}
 
 	s.calibration = calibration
-
 	return nil
 }
 
@@ -212,11 +251,6 @@ func (s *SafeSoArmController) GetCalibration() SO101FullCalibration {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.calibration
-}
-
-func (s *SafeSoArmController) getCalibrationForServo(servoID int) *feetech.MotorCalibration {
-	cal := s.GetCalibration()
-	return cal.GetMotorCalibrationByID(servoID)
 }
 
 func configsEqual(a, b *SoArm101Config) bool {
