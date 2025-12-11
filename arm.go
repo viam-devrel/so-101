@@ -343,11 +343,11 @@ func (s *so101) MoveToJointPositions(ctx context.Context, positions []referencef
 		clampedPositions[i] = math.Max(min, math.Min(max, pos))
 	}
 
-	if err := s.controller.MoveServosToPositions(s.armServoIDs, clampedPositions, 0, 0); err != nil {
+	if err := s.controller.MoveServosToPositions(ctx, s.armServoIDs, clampedPositions, 0, 0); err != nil {
 		return fmt.Errorf("failed to move SO-101 arm: %w", err)
 	}
 
-	currentPositions, err := s.controller.GetJointPositionsForServos(s.armServoIDs)
+	currentPositions, err := s.controller.GetJointPositionsForServos(ctx, s.armServoIDs)
 	if err != nil {
 		s.logger.Warnf("Failed to get current positions for timing calculation: %v", err)
 		currentPositions = make([]float64, len(s.armServoIDs)) // Use zeros as fallback
@@ -394,7 +394,7 @@ func (s *so101) JointPositions(ctx context.Context, extra map[string]interface{}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	radians, err := s.controller.GetJointPositionsForServos(s.armServoIDs)
+	radians, err := s.controller.GetJointPositionsForServos(ctx, s.armServoIDs)
 	if err != nil {
 		s.logger.Warnf("Failed to read joint positions: %v", err)
 		return nil, fmt.Errorf("failed to read joint positions: %w. Try running 'diagnose' command for more details", err)
@@ -412,7 +412,7 @@ func (s *so101) JointPositions(ctx context.Context, extra map[string]interface{}
 
 func (s *so101) Stop(ctx context.Context, extra map[string]interface{}) error {
 	s.isMoving.Store(false)
-	return s.controller.Stop()
+	return s.controller.Stop(ctx)
 }
 
 func (s *so101) Kinematics(ctx context.Context) (referenceframe.Model, error) {
@@ -439,11 +439,11 @@ func (s *so101) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[
 		if !ok {
 			return nil, fmt.Errorf("set_torque command requires 'enable' boolean parameter")
 		}
-		err := s.controller.SetTorqueEnable(enable)
+		err := s.controller.SetTorqueEnable(ctx, enable)
 		return map[string]interface{}{"success": err == nil}, err
 
 	case "ping":
-		err := s.controller.Ping()
+		err := s.controller.Ping(ctx)
 		return map[string]interface{}{"success": err == nil}, err
 
 	case "controller_status":
@@ -482,7 +482,7 @@ func (s *so101) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[
 		}, nil
 
 	case "test_servo_communication":
-		positions, err := s.controller.GetJointPositionsForServos(s.armServoIDs)
+		positions, err := s.controller.GetJointPositionsForServos(ctx, s.armServoIDs)
 		result := map[string]interface{}{
 			"success":       err == nil,
 			"arm_servo_ids": s.armServoIDs,
@@ -643,23 +643,25 @@ func (s *so101) initializeServosWithRetry(maxRetries int) error {
 
 // doServoInitialization performs the actual initialization steps
 func (s *so101) doServoInitialization() error {
+	ctx := context.Background()
+
 	// Ping all servos to ensure they're responding
 	s.logger.Debug("Pinging all servos...")
-	if err := s.controller.Ping(); err != nil {
+	if err := s.controller.Ping(ctx); err != nil {
 		return fmt.Errorf("servo ping failed: %w", err)
 	}
 	s.logger.Debug("All servos ping successful")
 
 	// Enable torque for all servos (controller manages all 6)
 	s.logger.Debug("Enabling torque for all servos...")
-	if err := s.controller.SetTorqueEnable(true); err != nil {
+	if err := s.controller.SetTorqueEnable(ctx, true); err != nil {
 		return fmt.Errorf("failed to enable torque: %w", err)
 	}
 
 	time.Sleep(100 * time.Millisecond)
 
 	s.logger.Debug("Verifying position reading from arm servos...")
-	positions, err := s.controller.GetJointPositionsForServos(s.armServoIDs)
+	positions, err := s.controller.GetJointPositionsForServos(ctx, s.armServoIDs)
 	if err != nil {
 		return fmt.Errorf("failed to read initial joint positions: %w", err)
 	}
@@ -674,17 +676,19 @@ func (s *so101) doServoInitialization() error {
 
 // diagnoseConnection provides detailed diagnostics for troubleshooting
 func (s *so101) diagnoseConnection() error {
+	ctx := context.Background()
+
 	s.logger.Info("Starting SO-101 arm connection diagnosis...")
 
 	// Test overall ping
 	s.logger.Info("Testing overall servo communication...")
-	if err := s.controller.Ping(); err != nil {
+	if err := s.controller.Ping(ctx); err != nil {
 		s.logger.Errorf("Overall ping failed: %v", err)
 		return err
 	}
 	s.logger.Info("Overall ping successful")
 
-	positions, err := s.controller.GetJointPositionsForServos(s.armServoIDs)
+	positions, err := s.controller.GetJointPositionsForServos(ctx, s.armServoIDs)
 	if err != nil {
 		s.logger.Errorf("Failed to read arm positions: %v", err)
 		return err
@@ -699,9 +703,11 @@ func (s *so101) diagnoseConnection() error {
 
 // verifyServoConfig checks servo configuration
 func (s *so101) verifyServoConfig() error {
+	ctx := context.Background()
+
 	s.logger.Info("Verifying arm servo configuration...")
 
-	positions, err := s.controller.GetJointPositionsForServos(s.armServoIDs)
+	positions, err := s.controller.GetJointPositionsForServos(ctx, s.armServoIDs)
 	if err != nil {
 		return fmt.Errorf("failed to verify servo config: %w", err)
 	}
