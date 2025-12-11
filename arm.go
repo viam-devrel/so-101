@@ -10,7 +10,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/hipsterbrown/feetech-servo"
 	"github.com/pkg/errors"
 	commonpb "go.viam.com/api/common/v1"
 	"go.viam.com/rdk/components/arm"
@@ -133,7 +132,7 @@ func (s *so101) calculateJointLimits() [][2]float64 {
 	calibration := s.controller.GetCalibration()
 
 	// Map servo IDs to calibration data
-	jointCals := []*feetech.MotorCalibration{
+	jointCals := []*MotorCalibration{
 		calibration.ShoulderPan,
 		calibration.ShoulderLift,
 		calibration.ElbowFlex,

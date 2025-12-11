@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/hipsterbrown/feetech-servo"
+	feetech "github.com/hipsterbrown/feetech-servo/feetech"
 	"go.viam.com/rdk/components/sensor"
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/resource"
@@ -423,17 +423,8 @@ func (cs *so101CalibrationSensor) setHomingPosition(ctx context.Context) (map[st
 	// Brief delay to ensure register writes are complete before reading positions
 	time.Sleep(100 * time.Millisecond)
 
-	// Read current positions
-	var servos []*feetech.Servo
-	for _, id := range cs.cfg.ServoIDs {
-		if servo, exists := cs.controller.servos[id]; exists {
-			servos = append(servos, servo)
-		} else {
-			return nil, fmt.Errorf("servo %d not available", id)
-		}
-	}
-
-	positions, err := cs.controller.bus.SyncReadPositions(servos, false)
+	// Read current positions using the arm group
+	positions, err := cs.controller.armGroup.PositionsMap(ctx)
 	if err != nil {
 		cs.setState(StateError, fmt.Sprintf("Failed to read servo positions: %v", err))
 		return map[string]any{"success": false}, err
@@ -527,17 +518,8 @@ func (cs *so101CalibrationSensor) recordPositions(recordingCtx context.Context) 
 			}
 			cs.mu.RUnlock()
 
-			// Read current positions
-			var servos []*feetech.Servo
-			for _, id := range cs.cfg.ServoIDs {
-				if servo, exists := cs.controller.servos[id]; exists {
-					servos = append(servos, servo)
-				} else {
-					return
-				}
-			}
-
-			positions, err := cs.controller.bus.SyncReadPositions(servos, false)
+			// Read current positions using the arm group
+			positions, err := cs.controller.armGroup.PositionsMap(recordingCtx)
 			if err != nil {
 				cs.logger.Errorf("Failed to read positions during recording: %v", err)
 				continue
@@ -650,18 +632,18 @@ func (cs *so101CalibrationSensor) saveCalibration(ctx context.Context) (map[stri
 	fullCalibration := SO101FullCalibration{}
 
 	for servoID, joint := range cs.joints {
-		motorCal := &feetech.MotorCalibration{
+		motorCal := &MotorCalibration{
 			ID:           servoID,
 			DriveMode:    0, // Normal direction
 			HomingOffset: joint.HomingOffset,
 			RangeMin:     joint.RangeMin,
 			RangeMax:     joint.RangeMax,
-			NormMode:     feetech.NormModeDegrees, // Default to degrees
+			NormMode:     NormModeDegrees, // Default to degrees
 		}
 
 		// Special case for gripper - use percentage mode
 		if servoID == 6 {
-			motorCal.NormMode = feetech.NormModeRange100
+			motorCal.NormMode = NormModeRange100
 		}
 
 		// Assign to appropriate field in full calibration
@@ -888,22 +870,31 @@ func (cs *so101CalibrationSensor) motorSetupDiscover(ctx context.Context, cmd ma
 	cs.logger.Infof("Motor setup: %s", cs.setupStatus)
 
 	// Try to discover the servo using controller's bus
-	discoveredServo, foundBaudrate, err := cs.discoverOneMotor(motorConfig.Model)
+	discoveredServo, foundBaudrate, err := cs.discoverOneMotor(ctx, motorConfig.Model)
 	if err != nil {
 		cs.setupStatus = fmt.Sprintf("Failed to discover %s: %v", motorName, err)
 		return map[string]any{"success": false, "error": cs.setupStatus}, err
 	}
 
+	modelName := "unknown"
+	if discoveredServo.Model != nil {
+		modelName = discoveredServo.Model.Name
+	}
 	cs.setupStatus = fmt.Sprintf("Found %s: ID %d, Model %s, Baudrate %d",
-		motorName, discoveredServo.ID, discoveredServo.ModelName, foundBaudrate)
+		motorName, discoveredServo.ID, modelName, foundBaudrate)
 	cs.logger.Infof("Motor setup: %s", cs.setupStatus)
+
+	discModelName := "unknown"
+	if discoveredServo.Model != nil {
+		discModelName = discoveredServo.Model.Name
+	}
 
 	return map[string]any{
 		"success":        true,
 		"motor_name":     motorName,
 		"current_id":     discoveredServo.ID,
 		"target_id":      motorConfig.TargetID,
-		"model":          discoveredServo.ModelName,
+		"model":          discModelName,
 		"found_baudrate": foundBaudrate,
 		"status":         cs.setupStatus,
 	}, nil
@@ -990,7 +981,7 @@ func (cs *so101CalibrationSensor) motorSetupVerify(ctx context.Context) (map[str
 				allGood = false
 			} else {
 				// Auto-detect model
-				if err := servo.DetectModel(); err != nil {
+				if err := servo.DetectModel(ctx); err != nil {
 					results[name] = map[string]any{
 						"id":     id,
 						"status": "model_detection_failed",
@@ -1000,7 +991,7 @@ func (cs *so101CalibrationSensor) motorSetupVerify(ctx context.Context) (map[str
 					results[name] = map[string]any{
 						"id":     id,
 						"status": "ok",
-						"model":  servo.Model,
+						"model":  servo.Model().Name,
 					}
 				}
 			}
@@ -1034,8 +1025,8 @@ func (cs *so101CalibrationSensor) motorSetupScanBus(ctx context.Context) (map[st
 	cs.setupStatus = "Scanning servo bus for connected motors..."
 	cs.logger.Infof("Motor setup: %s", cs.setupStatus)
 
-	// Use the controller's bus DiscoverServos method for more efficient discovery
-	discovered, err := cs.controller.bus.DiscoverServos()
+	// Use the controller's bus Discover method for more efficient discovery
+	discovered, err := cs.controller.bus.Discover(ctx)
 	if err != nil {
 		cs.setupStatus = fmt.Sprintf("Bus scan failed: %v", err)
 		return map[string]any{"success": false, "error": cs.setupStatus}, err
@@ -1047,9 +1038,14 @@ func (cs *so101CalibrationSensor) motorSetupScanBus(ctx context.Context) (map[st
 	unexpectedCount := 0
 
 	for _, servo := range discovered {
+		modelName := "unknown"
+		if servo.Model != nil {
+			modelName = servo.Model.Name
+		}
+
 		servoInfo := map[string]any{
 			"id":    servo.ID,
-			"model": servo.ModelName,
+			"model": modelName,
 		}
 
 		if expectedName, isExpected := expectedMotors[servo.ID]; isExpected {
@@ -1087,12 +1083,12 @@ func (cs *so101CalibrationSensor) motorSetupResetStatus(ctx context.Context) (ma
 	}, nil
 }
 
-// Helper function to discover a single motor using the bus DiscoverServos method
-func (cs *so101CalibrationSensor) discoverOneMotor(expectedModel string) (*feetech.DiscoveredServo, int, error) {
+// Helper function to discover a single motor using the bus Discover method
+func (cs *so101CalibrationSensor) discoverOneMotor(ctx context.Context, expectedModel string) (*feetech.FoundServo, int, error) {
 	// Since we're using a shared controller, we need to work with the existing bus
-	// Use the more efficient DiscoverServos method instead of scanning all IDs
+	// Use the more efficient Discover method instead of scanning all IDs
 
-	discovered, err := cs.controller.bus.DiscoverServos()
+	discovered, err := cs.controller.bus.Discover(ctx)
 	if err != nil {
 		return nil, 0, fmt.Errorf("discovery failed: %w", err)
 	}
@@ -1106,8 +1102,12 @@ func (cs *so101CalibrationSensor) discoverOneMotor(expectedModel string) (*feete
 	}
 
 	servo := discovered[0]
-	if servo.ModelName != expectedModel {
-		return nil, 0, fmt.Errorf("model mismatch: expected %s, found %s", expectedModel, servo.ModelName)
+	if servo.Model == nil || servo.Model.Name != expectedModel {
+		actualModel := "unknown"
+		if servo.Model != nil {
+			actualModel = servo.Model.Name
+		}
+		return nil, 0, fmt.Errorf("model mismatch: expected %s, found %s", expectedModel, actualModel)
 	}
 
 	return &servo, cs.cfg.Baudrate, nil // Return current baudrate as "found" baudrate
@@ -1132,7 +1132,7 @@ func (cs *so101CalibrationSensor) assignMotorIDAndBaudrate(currentID, targetID, 
 
 	// Set target ID if different from current
 	if currentID != targetID {
-		if err := servo.SetServoID(targetID); err != nil {
+		if err := servo.SetID(ctx, targetID); err != nil {
 			return fmt.Errorf("failed to set servo ID: %w", err)
 		}
 		cs.logger.Infof("Updated servo ID from %d to %d", currentID, targetID)
@@ -1140,7 +1140,7 @@ func (cs *so101CalibrationSensor) assignMotorIDAndBaudrate(currentID, targetID, 
 
 	// Set target baudrate if different from current
 	if currentBaudrate != targetBaudrate {
-		if err := servo.SetBaudrate(targetBaudrate); err != nil {
+		if err := servo.SetBaudRate(ctx, targetBaudrate); err != nil {
 			return fmt.Errorf("failed to set baudrate: %w", err)
 		}
 		cs.logger.Infof("Updated servo baudrate to %d", targetBaudrate)

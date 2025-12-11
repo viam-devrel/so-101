@@ -262,6 +262,34 @@ func (cs *CalibratedServo) Ping(ctx context.Context) (int, error) {
 	return cs.servo.Ping(ctx)
 }
 
+// DetectModel detects the servo model
+func (cs *CalibratedServo) DetectModel(ctx context.Context) error {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	return cs.servo.DetectModel(ctx)
+}
+
+// Model returns the servo model
+func (cs *CalibratedServo) Model() *feetech.Model {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return cs.servo.Model()
+}
+
+// SetID sets the servo ID
+func (cs *CalibratedServo) SetID(ctx context.Context, newID int) error {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	return cs.servo.SetID(ctx, newID)
+}
+
+// SetBaudRate sets the servo baud rate
+func (cs *CalibratedServo) SetBaudRate(ctx context.Context, baudRate int) error {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	return cs.servo.SetBaudRate(ctx, baudRate)
+}
+
 // SetVelocity sets the servo velocity
 func (cs *CalibratedServo) SetVelocity(ctx context.Context, vel int) error {
 	cs.mu.Lock()

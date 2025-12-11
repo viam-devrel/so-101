@@ -147,14 +147,14 @@ func (dis *so101Discovery) pingServos(portPath string) (bool, bool) {
 	defer bus.Close()
 
 	// Ping servo 1 (arm)
-	servo1 := feetech.NewServo(bus, 1)
+	servo1 := feetech.NewServo(bus, 1, nil)
 	hasArm := false
 	if _, err := servo1.Ping(ctx); err == nil {
 		hasArm = true
 	}
 
 	// Ping servo 6 (gripper)
-	servo6 := feetech.NewServo(bus, 6)
+	servo6 := feetech.NewServo(bus, 6, nil)
 	hasGripper := false
 	if _, err := servo6.Ping(ctx); err == nil {
 		hasGripper = true

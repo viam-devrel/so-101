@@ -253,6 +253,29 @@ func (s *SafeSoArmController) GetCalibration() SO101FullCalibration {
 	return s.calibration
 }
 
+// getCalibrationForServo returns the calibration for a specific servo ID
+func (s *SafeSoArmController) getCalibrationForServo(servoID int) *MotorCalibration {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	switch servoID {
+	case 1:
+		return s.calibration.ShoulderPan
+	case 2:
+		return s.calibration.ShoulderLift
+	case 3:
+		return s.calibration.ElbowFlex
+	case 4:
+		return s.calibration.WristFlex
+	case 5:
+		return s.calibration.WristRoll
+	case 6:
+		return s.calibration.Gripper
+	default:
+		return nil
+	}
+}
+
 func configsEqual(a, b *SoArm101Config) bool {
 	if a == nil && b == nil {
 		return true

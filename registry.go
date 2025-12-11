@@ -1,7 +1,6 @@
 package so_arm
 
 import (
-	"context"
 	"fmt"
 	"runtime"
 	"sync"
