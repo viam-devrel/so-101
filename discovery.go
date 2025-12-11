@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hipsterbrown/feetech-servo"
+	"github.com/hipsterbrown/feetech-servo/feetech"
 	"go.bug.st/serial/enumerator"
 	"go.viam.com/rdk/components/arm"
 	"go.viam.com/rdk/components/gripper"
@@ -130,10 +130,12 @@ func (dis *so101Discovery) discoverPort(ctx context.Context, portPath string) []
 // pingServos attempts to ping servo 1 and servo 6 on the given port
 // Returns (hasArm, hasGripper)
 func (dis *so101Discovery) pingServos(portPath string) (bool, bool) {
+	ctx := context.Background()
+
 	busConfig := feetech.BusConfig{
 		Port:     portPath,
-		Baudrate: 1000000,
-		Protocol: feetech.ProtocolV0,
+		BaudRate: 1000000,
+		Protocol: feetech.ProtocolSTS,
 		Timeout:  500 * time.Millisecond,
 	}
 
@@ -145,21 +147,17 @@ func (dis *so101Discovery) pingServos(portPath string) (bool, bool) {
 	defer bus.Close()
 
 	// Ping servo 1 (arm)
-	servo1, err := bus.ServoWithModel(1, "sts3215")
+	servo1 := feetech.NewServo(bus, 1)
 	hasArm := false
-	if err == nil {
-		if _, err := servo1.Ping(); err == nil {
-			hasArm = true
-		}
+	if _, err := servo1.Ping(ctx); err == nil {
+		hasArm = true
 	}
 
 	// Ping servo 6 (gripper)
-	servo6, err := bus.ServoWithModel(6, "sts3215")
+	servo6 := feetech.NewServo(bus, 6)
 	hasGripper := false
-	if err == nil {
-		if _, err := servo6.Ping(); err == nil {
-			hasGripper = true
-		}
+	if _, err := servo6.Ping(ctx); err == nil {
+		hasGripper = true
 	}
 
 	return hasArm, hasGripper
