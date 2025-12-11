@@ -343,7 +343,7 @@ func (cs *so101CalibrationSensor) DoCommand(ctx context.Context, cmd map[string]
 }
 
 // startCalibration begins the calibration workflow
-func (cs *so101CalibrationSensor) startCalibration(_ context.Context) (map[string]any, error) {
+func (cs *so101CalibrationSensor) startCalibration(ctx context.Context) (map[string]any, error) {
 	if cs.state != StateIdle && cs.state != StateCompleted && cs.state != StateError {
 		return map[string]any{"success": false},
 			fmt.Errorf("calibration already in progress (state: %s)", cs.state.String())
@@ -352,7 +352,7 @@ func (cs *so101CalibrationSensor) startCalibration(_ context.Context) (map[strin
 	cs.logger.Info("Starting SO-101 calibration workflow")
 
 	// Disable torque to allow manual movement
-	if err := cs.controller.SetTorqueEnable(false); err != nil {
+	if err := cs.controller.SetTorqueEnable(ctx, false); err != nil {
 		cs.setState(StateError, fmt.Sprintf("Failed to disable torque: %v", err))
 		return map[string]any{"success": false}, err
 	}
@@ -379,22 +379,22 @@ func (cs *so101CalibrationSensor) startCalibration(_ context.Context) (map[strin
 
 // Add new method to reset calibration registers to factory defaults
 // resetCalibrationRegisters resets servo calibration registers to factory defaults
-func (cs *so101CalibrationSensor) resetCalibrationRegisters(servoID int) error {
+func (cs *so101CalibrationSensor) resetCalibrationRegisters(ctx context.Context, servoID int) error {
 	// Reset homing offset to 0
 	homingData := []byte{0x00, 0x00}
-	if err := cs.controller.WriteServoRegister(servoID, "homing_offset", homingData); err != nil {
+	if err := cs.controller.WriteServoRegister(ctx, servoID, "homing_offset", homingData); err != nil {
 		return fmt.Errorf("failed to reset homing offset: %w", err)
 	}
 
 	// Reset min position limit to 0
 	minData := []byte{0x00, 0x00}
-	if err := cs.controller.WriteServoRegister(servoID, "min_position_limit", minData); err != nil {
+	if err := cs.controller.WriteServoRegister(ctx, servoID, "min_position_limit", minData); err != nil {
 		return fmt.Errorf("failed to reset min position limit: %w", err)
 	}
 
 	// Reset max position limit to 4095 (0x0FFF)
 	maxData := []byte{0xFF, 0x0F}
-	if err := cs.controller.WriteServoRegister(servoID, "max_position_limit", maxData); err != nil {
+	if err := cs.controller.WriteServoRegister(ctx, servoID, "max_position_limit", maxData); err != nil {
 		return fmt.Errorf("failed to reset max position limit: %w", err)
 	}
 
@@ -402,7 +402,7 @@ func (cs *so101CalibrationSensor) resetCalibrationRegisters(servoID int) error {
 }
 
 // setHomingPosition sets the homing offsets based on current positions
-func (cs *so101CalibrationSensor) setHomingPosition(_ context.Context) (map[string]any, error) {
+func (cs *so101CalibrationSensor) setHomingPosition(ctx context.Context) (map[string]any, error) {
 	if cs.state != StateStarted {
 		return map[string]any{"success": false},
 			fmt.Errorf("must start calibration first (current state: %s)", cs.state.String())
@@ -413,7 +413,7 @@ func (cs *so101CalibrationSensor) setHomingPosition(_ context.Context) (map[stri
 	// First, reset all calibration registers to factory defaults
 	cs.logger.Info("Resetting calibration registers to factory defaults...")
 	for _, servoID := range cs.cfg.ServoIDs {
-		if err := cs.resetCalibrationRegisters(servoID); err != nil {
+		if err := cs.resetCalibrationRegisters(ctx, servoID); err != nil {
 			cs.setState(StateError, fmt.Sprintf("Failed to reset calibration registers for servo %d: %v", servoID, err))
 			return map[string]any{"success": false}, err
 		}
@@ -460,7 +460,7 @@ func (cs *so101CalibrationSensor) setHomingPosition(_ context.Context) (map[stri
 	cs.logger.Info("Writing homing offsets to servo registers...")
 	for _, servoID := range cs.cfg.ServoIDs {
 		homingOffset := homingOffsets[strconv.Itoa(servoID)]
-		if err := cs.writeHomingOffset(servoID, homingOffset.(int)); err != nil {
+		if err := cs.writeHomingOffset(ctx, servoID, homingOffset.(int)); err != nil {
 			cs.setState(StateError, fmt.Sprintf("Failed to write homing offset to servo %d: %v", servoID, err))
 			return map[string]any{"success": false}, err
 		}
@@ -638,7 +638,7 @@ func (cs *so101CalibrationSensor) stopRangeRecording(_ context.Context) (map[str
 }
 
 // saveCalibration writes calibration to servos and saves to file
-func (cs *so101CalibrationSensor) saveCalibration(_ context.Context) (map[string]any, error) {
+func (cs *so101CalibrationSensor) saveCalibration(ctx context.Context) (map[string]any, error) {
 	if cs.state != StateCompleted {
 		return map[string]any{"success": false},
 			fmt.Errorf("calibration not completed (current state: %s)", cs.state.String())
@@ -694,13 +694,13 @@ func (cs *so101CalibrationSensor) saveCalibration(_ context.Context) (map[string
 			servoID, joint.Name, joint.RangeMin, joint.RangeMax)
 
 		// Write min position limit
-		if err := cs.writeMinPositionLimit(servoID, joint.RangeMin); err != nil {
+		if err := cs.writeMinPositionLimit(ctx, servoID, joint.RangeMin); err != nil {
 			cs.setState(StateError, fmt.Sprintf("Failed to write min position limit to servo %d: %v", servoID, err))
 			return map[string]any{"success": false}, err
 		}
 
 		// Write max position limit
-		if err := cs.writeMaxPositionLimit(servoID, joint.RangeMax); err != nil {
+		if err := cs.writeMaxPositionLimit(ctx, servoID, joint.RangeMax); err != nil {
 			cs.setState(StateError, fmt.Sprintf("Failed to write max position limit to servo %d: %v", servoID, err))
 			return map[string]any{"success": false}, err
 		}
@@ -772,8 +772,8 @@ func (cs *so101CalibrationSensor) resetCalibration(_ context.Context) (map[strin
 }
 
 // getCurrentPositions returns current servo positions
-func (cs *so101CalibrationSensor) getCurrentPositions(_ context.Context) (map[string]any, error) {
-	positions, err := cs.controller.GetJointPositionsForServos(cs.cfg.ServoIDs)
+func (cs *so101CalibrationSensor) getCurrentPositions(ctx context.Context) (map[string]any, error) {
+	positions, err := cs.controller.GetJointPositionsForServos(ctx, cs.cfg.ServoIDs)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read positions: %w", err)
 	}
@@ -814,33 +814,33 @@ func (cs *so101CalibrationSensor) setState(state CalibrationState, instruction s
 }
 
 // writeHomingOffset writes the homing offset to a servo's register
-func (cs *so101CalibrationSensor) writeHomingOffset(servoID, homingOffset int) error {
+func (cs *so101CalibrationSensor) writeHomingOffset(ctx context.Context, servoID, homingOffset int) error {
 	data := []byte{
 		byte(homingOffset & 0xFF),
 		byte((homingOffset >> 8) & 0xFF),
 	}
 
-	return cs.controller.WriteServoRegister(servoID, "homing_offset", data)
+	return cs.controller.WriteServoRegister(ctx, servoID, "homing_offset", data)
 }
 
 // writeMinPositionLimit writes the minimum position limit to a servo's register
-func (cs *so101CalibrationSensor) writeMinPositionLimit(servoID, minLimit int) error {
+func (cs *so101CalibrationSensor) writeMinPositionLimit(ctx context.Context, servoID, minLimit int) error {
 	data := []byte{
 		byte(minLimit & 0xFF),
 		byte((minLimit >> 8) & 0xFF),
 	}
 
-	return cs.controller.WriteServoRegister(servoID, "min_position_limit", data)
+	return cs.controller.WriteServoRegister(ctx, servoID, "min_position_limit", data)
 }
 
 // writeMaxPositionLimit writes the maximum position limit to a servo's register
-func (cs *so101CalibrationSensor) writeMaxPositionLimit(servoID, maxLimit int) error {
+func (cs *so101CalibrationSensor) writeMaxPositionLimit(ctx context.Context, servoID, maxLimit int) error {
 	data := []byte{
 		byte(maxLimit & 0xFF),
 		byte((maxLimit >> 8) & 0xFF),
 	}
 
-	return cs.controller.WriteServoRegister(servoID, "max_position_limit", data)
+	return cs.controller.WriteServoRegister(ctx, servoID, "max_position_limit", data)
 }
 
 // Motor Setup Functions - separate from calibration workflow
@@ -980,7 +980,7 @@ func (cs *so101CalibrationSensor) motorSetupVerify(ctx context.Context) (map[str
 	for id, name := range expectedMotors {
 		if servo, exists := cs.controller.servos[id]; exists {
 			// Try to ping the servo
-			_, err := servo.Ping()
+			_, err := servo.Ping(ctx)
 			if err != nil {
 				results[name] = map[string]any{
 					"id":     id,
@@ -1121,8 +1121,11 @@ func (cs *so101CalibrationSensor) assignMotorIDAndBaudrate(currentID, targetID, 
 		return fmt.Errorf("servo with ID %d not found in controller", currentID)
 	}
 
+	// Create context for operations
+	ctx := context.Background()
+
 	// Ping to verify communication
-	_, err := servo.Ping()
+	_, err := servo.Ping(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to ping servo: %w", err)
 	}
