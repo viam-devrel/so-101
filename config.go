@@ -1,13 +1,14 @@
 package so_arm
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"time"
 
-	"github.com/hipsterbrown/feetech-servo"
+	"github.com/hipsterbrown/feetech-servo/feetech"
 	"go.viam.com/rdk/logging"
 )
 
@@ -352,16 +353,41 @@ func getNormModeForServo(servoID int) int {
 }
 
 // readUint16Register reads a 2-byte register from servo and decodes as uint16
-func readUint16Register(servo *feetech.Servo, registerName string) (uint16, error) {
-	data, err := servo.ReadRegisterByName(registerName)
+func readUint16Register(ctx context.Context, servo *feetech.Servo, registerName string) (uint16, error) {
+	data, err := servo.ReadRegister(ctx, registerName)
 	if err != nil {
 		return 0, err
 	}
 	if len(data) != 2 {
 		return 0, fmt.Errorf("expected 2 bytes for %s, got %d", registerName, len(data))
 	}
-	// Little-endian decode (LSB first)
 	return uint16(data[0]) | (uint16(data[1]) << 8), nil
+}
+
+// readInt16Register reads a 2-byte register and decodes as signed int16
+func readInt16Register(ctx context.Context, servo *feetech.Servo, registerName string) (int, error) {
+	data, err := servo.ReadRegister(ctx, registerName)
+	if err != nil {
+		return 0, err
+	}
+	if len(data) != 2 {
+		return 0, fmt.Errorf("expected 2 bytes for %s, got %d", registerName, len(data))
+	}
+
+	// Decode as uint16 first
+	raw := uint16(data[0]) | (uint16(data[1]) << 8)
+
+	// Check if this is a sign-magnitude encoded value (bit 15 is sign bit for STS3215)
+	// For homing_offset, sign bit is at position 11 (12-bit value)
+	signBit := 11
+	directionBit := (raw >> uint(signBit)) & 1
+	magnitudeMask := uint16((1 << uint(signBit)) - 1)
+	magnitude := int(raw & magnitudeMask)
+
+	if directionBit != 0 {
+		return -magnitude, nil
+	}
+	return magnitude, nil
 }
 
 // ReadCalibrationFromServos attempts to read calibration from servo registers
@@ -383,18 +409,16 @@ func ReadCalibrationFromServos(
 	calibrations := make(map[int]*MotorCalibration)
 
 	for _, servoID := range servoIDs {
-		servo := bus.Servo(servoID)
-		if servo == nil {
-			if logger != nil {
-				logger.Warnf("Servo %d: not available, using defaults", servoID)
-			}
-			continue
-		}
+		// Create servo instance for reading
+		servo := feetech.NewServo(bus, servoID, &feetech.ModelSTS3215)
 
-		// Try reading registers
-		homingOffset, offsetErr := servo.ReadHomingOffset()
-		minLimit, minErr := readUint16Register(servo, "min_position_limit")
-		maxLimit, maxErr := readUint16Register(servo, "max_position_limit")
+		// Create context for operations
+		ctx := context.Background()
+
+		// Try reading registers - updated method names
+		homingOffset, offsetErr := readInt16Register(ctx, servo, "homing_offset")
+		minLimit, minErr := readUint16Register(ctx, servo, "min_position_limit")
+		maxLimit, maxErr := readUint16Register(ctx, servo, "max_position_limit")
 
 		// Check if we got valid data
 		if offsetErr == nil && minErr == nil && maxErr == nil {
@@ -402,7 +426,7 @@ func ReadCalibrationFromServos(
 			if minLimit < maxLimit && maxLimit <= 4095 {
 				calibrations[servoID] = &MotorCalibration{
 					ID:           servoID,
-					DriveMode:    0, // Always 0 for SO-101
+					DriveMode:    0,
 					HomingOffset: homingOffset,
 					RangeMin:     int(minLimit),
 					RangeMax:     int(maxLimit),
@@ -432,6 +456,5 @@ func ReadCalibrationFromServos(
 		logger.Infof("Calibration loaded from servos: %d/%d successful", successCount, len(servoIDs))
 	}
 
-	// Convert to full calibration, using defaults for missing servos
 	return FromFeetechCalibrationMap(calibrations)
 }
