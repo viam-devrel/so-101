@@ -3,23 +3,29 @@ package so_arm
 import (
 	"context"
 	"fmt"
+	"math"
 	"sync"
 	"sync/atomic"
 
 	"github.com/hipsterbrown/feetech-servo/feetech"
 	"go.viam.com/rdk/logging"
+	"go.viam.com/rdk/utils"
 )
+
+// isGripperServo checks if a servo ID is the gripper (servo 6)
+func isGripperServo(servoID int) bool {
+	return servoID == 6
+}
 
 var globalRegistry = NewControllerRegistry()
 
 type SafeSoArmController struct {
-	bus          *feetech.Bus
-	armGroup     *feetech.ServoGroup
-	gripperGroup *feetech.ServoGroup
-	servos       map[int]*CalibratedServo
-	logger       logging.Logger
-	calibration  SO101FullCalibration
-	mu           sync.RWMutex
+	bus              *feetech.Bus
+	group            *feetech.ServoGroup
+	calibratedServos map[int]*CalibratedServo
+	logger           logging.Logger
+	calibration      SO101FullCalibration
+	mu               sync.RWMutex
 }
 
 func (s *SafeSoArmController) MoveToJointPositions(ctx context.Context, jointAngles []float64, speed, acc int) error {
@@ -31,25 +37,24 @@ func (s *SafeSoArmController) MoveToJointPositions(ctx context.Context, jointAng
 		return fmt.Errorf("expected %d joint angles, got %d", len(armServoIDs), len(jointAngles))
 	}
 
-	// Convert radians to degrees
-	degrees := make([]float64, len(jointAngles))
-	for i, angle := range jointAngles {
-		degrees[i] = angle * 180.0 / 3.14159265359
-	}
-
-	// Denormalize degrees to raw positions using calibration
-	rawPositions := make([]int, len(degrees))
+	// Convert radians to appropriate normalized values based on servo type
+	rawPositions := make(map[int]int, len(jointAngles))
 	for i, servoID := range armServoIDs {
+		var normalizedValue float64
+
+		// Arm servos: convert radians to degrees
+		normalizedValue = utils.RadToDeg(jointAngles[i])
+
 		cal := s.calibration.GetMotorCalibrationByID(servoID)
-		raw, err := cal.Denormalize(degrees[i])
+		raw, err := cal.Denormalize(normalizedValue)
 		if err != nil {
 			return fmt.Errorf("failed to denormalize position for servo %d: %w", servoID, err)
 		}
-		rawPositions[i] = raw
+		rawPositions[servoID] = raw
 	}
 
 	// Use ServoGroup to write positions
-	return s.armGroup.SetPositions(ctx, rawPositions)
+	return s.group.SetPositions(ctx, rawPositions)
 }
 
 func (s *SafeSoArmController) MoveServosToPositions(ctx context.Context, servoIDs []int, jointAngles []float64, speed, acc int) error {
@@ -60,49 +65,30 @@ func (s *SafeSoArmController) MoveServosToPositions(ctx context.Context, servoID
 		return fmt.Errorf("servo IDs and joint angles length mismatch")
 	}
 
-	// Determine which group to use
-	isArmOnly := true
-	isGripperOnly := len(servoIDs) == 1 && servoIDs[0] == 6
-
-	for _, id := range servoIDs {
-		if id == 6 {
-			isArmOnly = false
-		} else if id < 1 || id > 5 {
-			return fmt.Errorf("invalid servo ID: %d", id)
-		}
-	}
-
-	// Convert radians to degrees
-	degrees := make([]float64, len(jointAngles))
-	for i, angle := range jointAngles {
-		degrees[i] = angle * 180.0 / 3.14159265359
-	}
-
-	// Denormalize degrees to raw positions
-	rawPositions := make([]int, len(degrees))
+	// Convert radians to appropriate normalized values based on servo type
+	rawPositions := make(map[int]int, len(jointAngles))
 	for i, servoID := range servoIDs {
+		var normalizedValue float64
+
+		if isGripperServo(servoID) {
+			// Gripper: input is in radians representation but encodes percentage
+			// Convert from radians representation back to percentage (0-100)
+			normalizedValue = (jointAngles[i]/math.Pi + 1.0) / 2.0 * 100.0
+		} else {
+			// Arm servos: convert radians to degrees
+			normalizedValue = utils.RadToDeg(jointAngles[i])
+		}
+
 		cal := s.calibration.GetMotorCalibrationByID(servoID)
-		raw, err := cal.Denormalize(degrees[i])
+		raw, err := cal.Denormalize(normalizedValue)
 		if err != nil {
 			return fmt.Errorf("failed to denormalize position for servo %d: %w", servoID, err)
 		}
-		rawPositions[i] = raw
+		rawPositions[servoID] = raw
 	}
 
 	// Use appropriate ServoGroup
-	if isGripperOnly {
-		return s.gripperGroup.SetPositions(ctx, rawPositions)
-	} else if isArmOnly && len(servoIDs) == 5 {
-		return s.armGroup.SetPositions(ctx, rawPositions)
-	} else {
-		// Mixed or partial - use individual servo writes
-		for i, servoID := range servoIDs {
-			if err := s.servos[servoID].SetPosition(ctx, degrees[i]); err != nil {
-				return fmt.Errorf("failed to set position for servo %d: %w", servoID, err)
-			}
-		}
-		return nil
-	}
+	return s.group.SetPositions(ctx, rawPositions)
 }
 
 func (s *SafeSoArmController) GetJointPositions(ctx context.Context) ([]float64, error) {
@@ -113,36 +99,32 @@ func (s *SafeSoArmController) GetJointPositions(ctx context.Context) ([]float64,
 	positions := make([]float64, len(servoIDs))
 
 	// Read arm positions using ServoGroup
-	armPositions, err := s.armGroup.Positions(ctx)
+	servoPositions, err := s.group.Positions(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read arm positions: %w", err)
+		return nil, fmt.Errorf("failed to read servo positions: %w", err)
 	}
 
-	// Normalize arm positions
-	for i := 0; i < 5; i++ {
-		cal := s.calibration.GetMotorCalibrationByID(servoIDs[i])
-		normalized, err := cal.Normalize(armPositions[i])
+	// Normalize arm positions (servos 1-5)
+	for i := range 5 {
+		servoId := servoIDs[i]
+		cal := s.calibration.GetMotorCalibrationByID(servoId)
+		normalized, err := cal.Normalize(servoPositions[servoId])
 		if err != nil {
-			return nil, fmt.Errorf("failed to normalize servo %d: %w", servoIDs[i], err)
+			return nil, fmt.Errorf("failed to normalize servo %d: %w", servoId, err)
 		}
 		// Convert degrees to radians
-		positions[i] = normalized * 3.14159265359 / 180.0
+		positions[i] = utils.DegToRad(normalized)
 	}
 
-	// Read gripper position using ServoGroup
-	gripperPositions, err := s.gripperGroup.Positions(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read gripper position: %w", err)
-	}
-
-	// Normalize gripper position
+	// Normalize gripper position (servo 6)
 	cal := s.calibration.GetMotorCalibrationByID(6)
-	normalized, err := cal.Normalize(gripperPositions[0])
+	normalized, err := cal.Normalize(servoPositions[6])
 	if err != nil {
 		return nil, fmt.Errorf("failed to normalize gripper: %w", err)
 	}
-	// Gripper uses 0-100 range, convert to radians for consistency
-	positions[5] = normalized * 3.14159265359 / 180.0
+	// Gripper uses 0-100 range, convert to radians representation for API consistency
+	// normalized is already 0-100, convert to [-π, +π] range
+	positions[5] = (normalized/100.0*2.0 - 1.0) * math.Pi
 
 	return positions, nil
 }
@@ -153,14 +135,24 @@ func (s *SafeSoArmController) GetJointPositionsForServos(ctx context.Context, se
 
 	positions := make([]float64, len(servoIDs))
 
-	// Use individual calibrated servo reads
+	rawPositions, err := s.group.Positions(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get raw positions for servos: %w", err)
+	}
+
 	for i, servoID := range servoIDs {
-		degrees, err := s.servos[servoID].Position(ctx)
+		rawPos := rawPositions[servoID]
+		cal := s.calibratedServos[servoID].calibration
+		normalized, err := cal.Normalize(rawPos)
 		if err != nil {
-			return nil, fmt.Errorf("failed to read servo %d: %w", servoID, err)
+			return nil, fmt.Errorf("failed to normalize raw servo value for id %d: %w", servoID, err)
 		}
-		// Convert degrees to radians
-		positions[i] = degrees * 3.14159265359 / 180.0
+		if isGripperServo(servoID) {
+			positions[i] = (normalized/100.0*2.0 - 1.0) * math.Pi
+		} else {
+			positions[i] = utils.DegToRad(normalized)
+		}
+
 	}
 
 	return positions, nil
@@ -170,9 +162,13 @@ func (s *SafeSoArmController) SetTorqueEnable(ctx context.Context, enable bool) 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	for id, servo := range s.servos {
-		if err := servo.SetTorqueEnabled(ctx, enable); err != nil {
-			return fmt.Errorf("failed to set torque enable for servo %d: %w", id, err)
+	if enable {
+		if err := s.group.EnableAll(ctx); err != nil {
+			return fmt.Errorf("failed to set torque enable: %w", err)
+		}
+	} else {
+		if err := s.group.DisableAll(ctx); err != nil {
+			return fmt.Errorf("failed to set torque enable: %w", err)
 		}
 	}
 	return nil
@@ -182,7 +178,7 @@ func (s *SafeSoArmController) Stop(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	for id, servo := range s.servos {
+	for id, servo := range s.calibratedServos {
 		if err := servo.SetVelocity(ctx, 0); err != nil {
 			s.logger.Warnf("Failed to stop servo %d: %v", id, err)
 		}
@@ -204,7 +200,7 @@ func (s *SafeSoArmController) Ping(ctx context.Context) error {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	for id, servo := range s.servos {
+	for id, servo := range s.calibratedServos {
 		if _, err := servo.Ping(ctx); err != nil {
 			return fmt.Errorf("ping failed for servo %d: %w", id, err)
 		}
@@ -217,12 +213,12 @@ func (s *SafeSoArmController) WriteServoRegister(ctx context.Context, servoID in
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	servo, exists := s.servos[servoID]
-	if !exists {
+	servo := s.group.ServoByID(servoID)
+	if servo == nil {
 		return fmt.Errorf("servo %d not available", servoID)
 	}
 
-	return servo.GetRawServo().WriteRegister(ctx, registerName, data)
+	return servo.WriteRegister(ctx, registerName, data)
 }
 
 func (s *SafeSoArmController) SetCalibration(calibration SO101FullCalibration) error {
@@ -240,7 +236,7 @@ func (s *SafeSoArmController) SetCalibration(calibration SO101FullCalibration) e
 			RangeMax:     motorCal.RangeMax,
 			NormMode:     motorCal.NormMode,
 		}
-		s.servos[id].UpdateCalibration(appCal)
+		s.calibratedServos[id].UpdateCalibration(appCal)
 	}
 
 	s.calibration = calibration

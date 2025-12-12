@@ -108,6 +108,7 @@ type so101 struct {
 
 	cancelCtx  context.Context
 	cancelFunc func()
+	initCtx    context.Context // Context for initialization operations
 }
 
 func makeSO101ModelFrame() (referenceframe.Model, error) {
@@ -214,9 +215,9 @@ func NewSO101(ctx context.Context, deps resource.Dependencies, name resource.Nam
 	// Load full calibration (includes gripper for shared controller)
 	calibration, fromFile := controllerConfig.LoadCalibration(logger)
 	if calibration.ShoulderPan != nil {
-		logger.Infof("Using calibration for SO-101 with shoulder_pan homing_offset: %d", calibration.ShoulderPan.HomingOffset)
+		logger.Debugf("Using calibration for SO-101 with shoulder_pan homing_offset: %d", calibration.ShoulderPan.HomingOffset)
 	} else {
-		logger.Info("Using default calibration for SO-101")
+		logger.Debug("Using default calibration for SO-101")
 	}
 
 	controller, err := GetSharedControllerWithCalibration(controllerConfig, calibration, fromFile)
@@ -261,11 +262,12 @@ func NewSO101(ctx context.Context, deps resource.Dependencies, name resource.Nam
 		motion:       ms,
 		cancelCtx:    cancelCtx,
 		cancelFunc:   cancelFunc,
+		initCtx:      ctx, // Store initialization context
 	}
 
-	logger.Infof("SO-101 configured with speed: %.1f deg/s, acceleration: %.1f deg/s²",
+	logger.Debugf("SO-101 configured with speed: %.1f deg/s, acceleration: %.1f deg/s²",
 		speedDegsPerSec, accelerationDegsPerSec)
-	logger.Infof("Arm controlling servo IDs: %v", arm.armServoIDs)
+	logger.Debugf("Arm controlling servo IDs: %v", arm.armServoIDs)
 
 	// Initialize and verify servo connections
 	if err := arm.initializeServos(); err != nil {
@@ -518,7 +520,7 @@ func (s *so101) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[
 			}, nil
 		}
 
-		s.logger.Infof("Successfully reloaded calibration from %s", s.cfg.CalibrationFile)
+		s.logger.Debugf("Successfully reloaded calibration from %s", s.cfg.CalibrationFile)
 		return map[string]interface{}{
 			"success":          true,
 			"calibration_file": s.cfg.CalibrationFile,
@@ -615,11 +617,11 @@ func (s *so101) initializeServos() error {
 
 // initializeServosWithRetry attempts servo initialization with retries
 func (s *so101) initializeServosWithRetry(maxRetries int) error {
-	s.logger.Info("Initializing SO-101 arm servos...")
+	s.logger.Debug("Initializing SO-101 arm servos...")
 
 	var lastErr error
 	for attempt := 1; attempt <= maxRetries; attempt++ {
-		s.logger.Infof("Arm servo initialization attempt %d/%d", attempt, maxRetries)
+		s.logger.Debugf("Arm servo initialization attempt %d/%d", attempt, maxRetries)
 
 		if err := s.doServoInitialization(); err != nil {
 			lastErr = err
@@ -627,12 +629,12 @@ func (s *so101) initializeServosWithRetry(maxRetries int) error {
 
 			if attempt < maxRetries {
 				waitTime := time.Duration(attempt) * 500 * time.Millisecond
-				s.logger.Infof("Waiting %v before retry...", waitTime)
+				s.logger.Debugf("Waiting %v before retry...", waitTime)
 				time.Sleep(waitTime)
 				continue
 			}
 		} else {
-			s.logger.Infof("Arm servo initialization successful on attempt %d", attempt)
+			s.logger.Debugf("Arm servo initialization successful on attempt %d", attempt)
 			return nil
 		}
 	}
@@ -642,7 +644,8 @@ func (s *so101) initializeServosWithRetry(maxRetries int) error {
 
 // doServoInitialization performs the actual initialization steps
 func (s *so101) doServoInitialization() error {
-	ctx := context.Background()
+	// Use stored initialization context instead of creating new one
+	ctx := s.initCtx
 
 	// Ping all servos to ensure they're responding
 	s.logger.Debug("Pinging all servos...")
@@ -669,23 +672,24 @@ func (s *so101) doServoInitialization() error {
 		return fmt.Errorf("expected %d joint positions, got %d", len(s.armServoIDs), len(positions))
 	}
 
-	s.logger.Infof("SO-101 arm servo initialization successful. Initial positions: %v", positions)
+	s.logger.Debugf("SO-101 arm servo initialization successful. Initial positions: %v", positions)
 	return nil
 }
 
 // diagnoseConnection provides detailed diagnostics for troubleshooting
 func (s *so101) diagnoseConnection() error {
-	ctx := context.Background()
+	// Use stored initialization context instead of creating new one
+	ctx := s.initCtx
 
-	s.logger.Info("Starting SO-101 arm connection diagnosis...")
+	s.logger.Debug("Starting SO-101 arm connection diagnosis...")
 
 	// Test overall ping
-	s.logger.Info("Testing overall servo communication...")
+	s.logger.Debug("Testing overall servo communication...")
 	if err := s.controller.Ping(ctx); err != nil {
 		s.logger.Errorf("Overall ping failed: %v", err)
 		return err
 	}
-	s.logger.Info("Overall ping successful")
+	s.logger.Debug("Overall ping successful")
 
 	positions, err := s.controller.GetJointPositionsForServos(ctx, s.armServoIDs)
 	if err != nil {
@@ -694,7 +698,7 @@ func (s *so101) diagnoseConnection() error {
 	}
 
 	for i, pos := range positions {
-		s.logger.Infof("Arm servo %d position: %.3f rad", s.armServoIDs[i], pos)
+		s.logger.Debugf("Arm servo %d position: %.3f rad", s.armServoIDs[i], pos)
 	}
 
 	return nil
@@ -702,9 +706,10 @@ func (s *so101) diagnoseConnection() error {
 
 // verifyServoConfig checks servo configuration
 func (s *so101) verifyServoConfig() error {
-	ctx := context.Background()
+	// Use stored initialization context instead of creating new one
+	ctx := s.initCtx
 
-	s.logger.Info("Verifying arm servo configuration...")
+	s.logger.Debug("Verifying arm servo configuration...")
 
 	positions, err := s.controller.GetJointPositionsForServos(ctx, s.armServoIDs)
 	if err != nil {
@@ -715,6 +720,6 @@ func (s *so101) verifyServoConfig() error {
 		return fmt.Errorf("config verification failed: expected %d servos, got %d", len(s.armServoIDs), len(positions))
 	}
 
-	s.logger.Infof("Arm servo configuration verified. Current positions: %v", positions)
+	s.logger.Debugf("Arm servo configuration verified. Current positions: %v", positions)
 	return nil
 }

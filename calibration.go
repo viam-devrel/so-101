@@ -382,19 +382,19 @@ func (cs *so101CalibrationSensor) startCalibration(ctx context.Context) (map[str
 func (cs *so101CalibrationSensor) resetCalibrationRegisters(ctx context.Context, servoID int) error {
 	// Reset homing offset to 0
 	homingData := []byte{0x00, 0x00}
-	if err := cs.controller.WriteServoRegister(ctx, servoID, "homing_offset", homingData); err != nil {
+	if err := cs.controller.WriteServoRegister(ctx, servoID, "position_offset", homingData); err != nil {
 		return fmt.Errorf("failed to reset homing offset: %w", err)
 	}
 
 	// Reset min position limit to 0
 	minData := []byte{0x00, 0x00}
-	if err := cs.controller.WriteServoRegister(ctx, servoID, "min_position_limit", minData); err != nil {
+	if err := cs.controller.WriteServoRegister(ctx, servoID, "min_angle_limit", minData); err != nil {
 		return fmt.Errorf("failed to reset min position limit: %w", err)
 	}
 
 	// Reset max position limit to 4095 (0x0FFF)
 	maxData := []byte{0xFF, 0x0F}
-	if err := cs.controller.WriteServoRegister(ctx, servoID, "max_position_limit", maxData); err != nil {
+	if err := cs.controller.WriteServoRegister(ctx, servoID, "max_angle_limit", maxData); err != nil {
 		return fmt.Errorf("failed to reset max position limit: %w", err)
 	}
 
@@ -423,17 +423,55 @@ func (cs *so101CalibrationSensor) setHomingPosition(ctx context.Context) (map[st
 	// Brief delay to ensure register writes are complete before reading positions
 	time.Sleep(100 * time.Millisecond)
 
-	// Read current positions using the arm group
-	positions, err := cs.controller.armGroup.PositionsMap(ctx)
+	// Read current positions for all configured servos
+	// radianPositions, err := cs.controller.GetJointPositionsForServos(ctx, cs.cfg.ServoIDs)
+	// if err != nil {
+	// 	cs.setState(StateError, fmt.Sprintf("Failed to read servo positions: %v", err))
+	// 	return map[string]any{"success": false}, err
+	// }
+
+	// // Convert from radians back to raw positions for calibration
+	// positions := make(map[int]int)
+	// for i, servoID := range cs.cfg.ServoIDs {
+	// 	cal := cs.controller.getCalibrationForServo(servoID)
+	// 	if cal == nil {
+	// 		cs.setState(StateError, fmt.Sprintf("No calibration found for servo %d", servoID))
+	// 		return map[string]any{"success": false}, fmt.Errorf("no calibration for servo %d", servoID)
+	// 	}
+
+	// 	var normalized float64
+	// 	if servoID == 6 {
+	// 		// Gripper: convert from radians representation to percentage
+	// 		normalized = (radianPositions[i]/math.Pi + 1.0) / 2.0 * 100.0
+	// 	} else {
+	// 		// Arm: convert from radians to degrees
+	// 		normalized = radianPositions[i] * 180.0 / math.Pi
+	// 	}
+
+	// 	raw, err := cal.Denormalize(normalized)
+	// 	if err != nil {
+	// 		cs.setState(StateError, fmt.Sprintf("Failed to denormalize position for servo %d: %v", servoID, err))
+	// 		return map[string]any{"success": false}, err
+	// 	}
+	// 	positions[servoID] = raw
+	// }
+	positionsData, err := cs.controller.bus.SyncRead(ctx, feetech.RegPresentPosition.Address, len(cs.cfg.ServoIDs), cs.cfg.ServoIDs)
 	if err != nil {
 		cs.setState(StateError, fmt.Sprintf("Failed to read servo positions: %v", err))
 		return map[string]any{"success": false}, err
+	}
+	proto := cs.controller.bus.Protocol()
+	rawPositions := make(map[int]int, len(cs.cfg.ServoIDs))
+	for _, id := range cs.cfg.ServoIDs {
+		if d, ok := positionsData[id]; ok {
+			rawPositions[id] = int(proto.DecodeWord(d))
+		}
 	}
 
 	// Calculate homing offsets to center the range
 	homingOffsets := make(map[string]any)
 	for _, servoID := range cs.cfg.ServoIDs {
-		currentRawPos := int(positions[servoID])
+		currentRawPos := int(rawPositions[servoID])
 
 		// Calculate offset to make current position the center (2047.5 for 12-bit encoder)
 		targetCenter := 2047
@@ -518,21 +556,56 @@ func (cs *so101CalibrationSensor) recordPositions(recordingCtx context.Context) 
 			}
 			cs.mu.RUnlock()
 
-			// Read current positions using the arm group
-			positions, err := cs.controller.armGroup.PositionsMap(recordingCtx)
+			// Read current positions for all configured servos
+			positionsData, err := cs.controller.bus.SyncRead(recordingCtx, feetech.RegPresentPosition.Address, len(cs.cfg.ServoIDs), cs.cfg.ServoIDs)
 			if err != nil {
 				cs.logger.Errorf("Failed to read positions during recording: %v", err)
 				continue
 			}
+			proto := cs.controller.bus.Protocol()
+			rawPositions := make(map[int]int, len(cs.cfg.ServoIDs))
+			for _, id := range cs.cfg.ServoIDs {
+				if d, ok := positionsData[id]; ok {
+					rawPositions[id] = int(proto.DecodeWord(d))
+				}
+			}
+
+			// radianPositions, err := cs.controller.GetJointPositionsForServos(recordingCtx, cs.cfg.ServoIDs)
+			// if err != nil {
+			// 	cs.logger.Errorf("Failed to read positions during recording: %v", err)
+			// 	continue
+			// }
+
+			// // Convert from radians to raw positions
+			// rawPositions := make(map[int]int)
+			// for i, servoID := range cs.cfg.ServoIDs {
+			// 	cal := cs.controller.getCalibrationForServo(servoID)
+			// 	if cal == nil {
+			// 		cs.logger.Errorf("No calibration for servo %d during recording", servoID)
+			// 		continue
+			// 	}
+
+			// 	var normalized float64
+			// 	if servoID == 6 {
+			// 		// Gripper: convert from radians representation to percentage
+			// 		normalized = (radianPositions[i]/math.Pi + 1.0) / 2.0 * 100.0
+			// 	} else {
+			// 		// Arm: convert from radians to degrees
+			// 		normalized = radianPositions[i] * 180.0 / math.Pi
+			// 	}
+
+			// 	raw, err := cal.Denormalize(normalized)
+			// 	if err != nil {
+			// 		cs.logger.Errorf("Failed to denormalize servo %d: %v", servoID, err)
+			// 		continue
+			// 	}
+			// 	rawPositions[servoID] = raw
+			// }
 
 			cs.mu.Lock()
 			if cs.recordingActive {
-				// Convert to raw positions and update min/max
-				rawPositions := make(map[int]int)
-				for _, servoID := range cs.cfg.ServoIDs {
-					rawPos := int(positions[servoID])
-					rawPositions[servoID] = rawPos
-
+				// Update min/max from raw positions
+				for servoID, rawPos := range rawPositions {
 					joint := cs.joints[servoID]
 					joint.CurrentPos = rawPos
 
@@ -797,12 +870,7 @@ func (cs *so101CalibrationSensor) setState(state CalibrationState, instruction s
 
 // writeHomingOffset writes the homing offset to a servo's register
 func (cs *so101CalibrationSensor) writeHomingOffset(ctx context.Context, servoID, homingOffset int) error {
-	data := []byte{
-		byte(homingOffset & 0xFF),
-		byte((homingOffset >> 8) & 0xFF),
-	}
-
-	return cs.controller.WriteServoRegister(ctx, servoID, "homing_offset", data)
+	return cs.controller.WriteServoRegister(ctx, servoID, "torque_enable", []byte{(byte(128))})
 }
 
 // writeMinPositionLimit writes the minimum position limit to a servo's register
@@ -812,7 +880,7 @@ func (cs *so101CalibrationSensor) writeMinPositionLimit(ctx context.Context, ser
 		byte((minLimit >> 8) & 0xFF),
 	}
 
-	return cs.controller.WriteServoRegister(ctx, servoID, "min_position_limit", data)
+	return cs.controller.WriteServoRegister(ctx, servoID, "min_angle_limit", data)
 }
 
 // writeMaxPositionLimit writes the maximum position limit to a servo's register
@@ -822,7 +890,7 @@ func (cs *so101CalibrationSensor) writeMaxPositionLimit(ctx context.Context, ser
 		byte((maxLimit >> 8) & 0xFF),
 	}
 
-	return cs.controller.WriteServoRegister(ctx, servoID, "max_position_limit", data)
+	return cs.controller.WriteServoRegister(ctx, servoID, "max_angle_limit", data)
 }
 
 // Motor Setup Functions - separate from calibration workflow
@@ -969,7 +1037,7 @@ func (cs *so101CalibrationSensor) motorSetupVerify(ctx context.Context) (map[str
 
 	// Check each expected motor
 	for id, name := range expectedMotors {
-		if servo, exists := cs.controller.servos[id]; exists {
+		if servo, exists := cs.controller.calibratedServos[id]; exists {
 			// Try to ping the servo
 			_, err := servo.Ping(ctx)
 			if err != nil {
@@ -1116,7 +1184,7 @@ func (cs *so101CalibrationSensor) discoverOneMotor(ctx context.Context, expected
 // Helper function to assign motor ID and baudrate
 func (cs *so101CalibrationSensor) assignMotorIDAndBaudrate(currentID, targetID, currentBaudrate, targetBaudrate int) error {
 	// Get the servo instance
-	servo, exists := cs.controller.servos[currentID]
+	servo, exists := cs.controller.calibratedServos[currentID]
 	if !exists {
 		return fmt.Errorf("servo with ID %d not found in controller", currentID)
 	}

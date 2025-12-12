@@ -116,7 +116,7 @@ func (cfg *SoArm101Config) LoadCalibration(logger logging.Logger) (SO101FullCali
 	}
 
 	if logger != nil {
-		logger.Infof("Successfully loaded calibration from %s", cfg.CalibrationFile)
+		logger.Debugf("Successfully loaded calibration from %s", cfg.CalibrationFile)
 	}
 	return calibration, true
 }
@@ -394,6 +394,7 @@ func readInt16Register(ctx context.Context, servo *feetech.Servo, registerName s
 // Returns a complete calibration with successfully-read values and defaults for failures
 // Never returns an error - worst case is all defaults
 func ReadCalibrationFromServos(
+	ctx context.Context,
 	bus *feetech.Bus,
 	servoIDs []int,
 	logger logging.Logger,
@@ -412,13 +413,10 @@ func ReadCalibrationFromServos(
 		// Create servo instance for reading
 		servo := feetech.NewServo(bus, servoID, &feetech.ModelSTS3215)
 
-		// Create context for operations
-		ctx := context.Background()
-
 		// Try reading registers - updated method names
-		homingOffset, offsetErr := readInt16Register(ctx, servo, "homing_offset")
-		minLimit, minErr := readUint16Register(ctx, servo, "min_position_limit")
-		maxLimit, maxErr := readUint16Register(ctx, servo, "max_position_limit")
+		homingOffset, offsetErr := readInt16Register(ctx, servo, "position_offset")
+		minLimit, minErr := readUint16Register(ctx, servo, "min_angle_limit")
+		maxLimit, maxErr := readUint16Register(ctx, servo, "max_angle_limit")
 
 		// Check if we got valid data
 		if offsetErr == nil && minErr == nil && maxErr == nil {
@@ -434,7 +432,7 @@ func ReadCalibrationFromServos(
 				}
 				successCount++
 				if logger != nil {
-					logger.Infof("Successfully read calibration from servo %d: offset=%d, range=%d-%d",
+					logger.Debugf("Successfully read calibration from servo %d: offset=%d, range=%d-%d",
 						servoID, homingOffset, minLimit, maxLimit)
 				}
 				continue
@@ -453,7 +451,7 @@ func ReadCalibrationFromServos(
 	}
 
 	if logger != nil {
-		logger.Infof("Calibration loaded from servos: %d/%d successful", successCount, len(servoIDs))
+		logger.Debugf("Calibration loaded from servos: %d/%d successful", successCount, len(servoIDs))
 	}
 
 	return FromFeetechCalibrationMap(calibrations)

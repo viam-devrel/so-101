@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -112,7 +113,7 @@ func newSO101Gripper(ctx context.Context, deps resource.Dependencies, conf resou
 	fullCalibration, fromFile := controllerConfig.LoadCalibration(logger)
 
 	if fullCalibration.Gripper.ID != cfg.ServoID {
-		logger.Infof("Updating gripper calibration servo ID from %d to %d (from config)",
+		logger.Debugf("Updating gripper calibration servo ID from %d to %d (from config)",
 			fullCalibration.Gripper.ID, cfg.ServoID)
 		fullCalibration.Gripper.ID = cfg.ServoID
 	}
@@ -134,11 +135,11 @@ func newSO101Gripper(ctx context.Context, deps resource.Dependencies, conf resou
 		servoID:        cfg.ServoID,
 		speed:          30,
 		acceleration:   50,
-		openPosition:   85.0,
-		closedPosition: 10.0,
+		openPosition:   95.0,
+		closedPosition: 0.0,
 	}
 
-	logger.Infof("SO-101 gripper initialized with servo ID %d, open=%.1f%%, closed=%.1f%%",
+	logger.Debugf("SO-101 gripper initialized with servo ID %d, open=%.1f%%, closed=%.1f%%",
 		cfg.ServoID, g.openPosition, g.closedPosition)
 
 	return g, nil
@@ -300,7 +301,7 @@ func (g *so101Gripper) DoCommand(ctx context.Context, cmd map[string]interface{}
 			}
 		}
 
-		g.logger.Infof("Gripper positions calibrated: open=%.1f%%, closed=%.1f%%", g.openPosition, g.closedPosition)
+		g.logger.Debugf("Gripper positions calibrated: open=%.1f%%, closed=%.1f%%", g.openPosition, g.closedPosition)
 
 		return map[string]interface{}{
 			"success":         true,
@@ -375,14 +376,14 @@ func (g *so101Gripper) percentToRadians(percent float64) float64 {
 	cal := g.controller.getCalibrationForServo(g.servoID)
 	if cal == nil {
 		// Fallback to default behavior
-		return (percent - 50.0) / 50.0 * 3.14159265359
+		return (percent - 50.0) / 50.0 * math.Pi
 	}
 
 	// Convert percentage to normalized position within the calibrated range
 	normalizedPos := percent / 100.0
 
 	// Convert to radians (assuming ±π range)
-	radians := (normalizedPos*2.0 - 1.0) * 3.14159265359 // Convert 0-1 to -π to +π
+	radians := (normalizedPos*2.0 - 1.0) * math.Pi // Convert 0-1 to -π to +π
 
 	// Apply drive mode if needed
 	if cal.DriveMode != 0 {
@@ -396,7 +397,7 @@ func (g *so101Gripper) radiansToPercent(radians float64) float64 {
 	cal := g.controller.getCalibrationForServo(g.servoID)
 	if cal == nil {
 		// Fallback to default behavior
-		return (radians/3.14159265359)*50.0 + 50.0
+		return (radians/math.Pi)*50.0 + 50.0
 	}
 
 	// Apply drive mode if needed
@@ -406,7 +407,7 @@ func (g *so101Gripper) radiansToPercent(radians float64) float64 {
 	}
 
 	// Convert radians to normalized position (-1 to 1)
-	normalizedPos := adjustedRadians / 3.14159265359
+	normalizedPos := adjustedRadians / math.Pi
 
 	// Convert to percentage (0-100)
 	percent := (normalizedPos + 1.0) / 2.0 * 100.0
