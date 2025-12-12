@@ -1,13 +1,15 @@
 package so_arm
 
 import (
+	"context"
 	"fmt"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/hipsterbrown/feetech-servo"
+	"github.com/hipsterbrown/feetech-servo/feetech"
 )
 
 type ControllerEntry struct {
@@ -60,7 +62,9 @@ func (r *ControllerRegistry) getExistingController(entry *ControllerEntry, confi
 
 	if !configsEqual(entry.config, config) {
 		currentRefCount := atomic.LoadInt64(&entry.refCount)
-		return nil, fmt.Errorf("conflict: existing controller uses different config (refCount: %d)", currentRefCount)
+		configDiff := compareConfigs(entry.config, config)
+		return nil, fmt.Errorf("conflict: existing controller uses different config (refCount: %d): %s",
+			currentRefCount, configDiff)
 	}
 
 	// Only update calibration if it's explicitly provided from a file
@@ -70,10 +74,19 @@ func (r *ControllerRegistry) getExistingController(entry *ControllerEntry, confi
 			config.Logger.Info("Updating controller calibration")
 		}
 
-		if entry.controller != nil && entry.controller.bus != nil {
-			feetechCals := calibration.ToFeetechCalibrationMap()
-			for id, cal := range feetechCals {
-				entry.controller.bus.SetCalibration(id, cal)
+		if entry.controller != nil {
+			// Update calibration in each CalibratedServo using thread-safe method
+			for id := 1; id <= 6; id++ {
+				motorCal := calibration.GetMotorCalibrationByID(id)
+				appCal := &MotorCalibration{
+					ID:           motorCal.ID,
+					DriveMode:    motorCal.DriveMode,
+					HomingOffset: motorCal.HomingOffset,
+					RangeMin:     motorCal.RangeMin,
+					RangeMax:     motorCal.RangeMax,
+					NormMode:     motorCal.NormMode,
+				}
+				entry.controller.calibratedServos[id].UpdateCalibration(appCal)
 			}
 		}
 		entry.calibration = calibration
@@ -83,10 +96,11 @@ func (r *ControllerRegistry) getExistingController(entry *ControllerEntry, confi
 	r.trackCaller(entry.config.Port)
 
 	return &SafeSoArmController{
-		bus:         entry.controller.bus,
-		servos:      entry.controller.servos,
-		logger:      config.Logger,
-		calibration: entry.calibration,
+		bus:              entry.controller.bus,
+		group:            entry.controller.group,
+		calibratedServos: entry.controller.calibratedServos,
+		logger:           config.Logger,
+		calibration:      entry.calibration,
 	}, nil
 }
 
@@ -110,18 +124,17 @@ func (r *ControllerRegistry) createNewController(portPath string, config *SoArm1
 	}
 
 	busConfig := feetech.BusConfig{
-		Port:         config.Port,
-		Baudrate:     config.Baudrate,
-		Protocol:     feetech.ProtocolV0,
-		Timeout:      config.Timeout,
-		Calibrations: feetechCalibrations,
+		Port:     config.Port,
+		BaudRate: config.Baudrate,
+		Protocol: feetech.ProtocolSTS,
+		Timeout:  config.Timeout,
 	}
 
 	if busConfig.Timeout == 0 {
 		busConfig.Timeout = time.Second
 	}
-	if busConfig.Baudrate == 0 {
-		busConfig.Baudrate = 1000000
+	if busConfig.BaudRate == 0 {
+		busConfig.BaudRate = 1000000
 	}
 
 	bus, err := feetech.NewBus(busConfig)
@@ -131,16 +144,32 @@ func (r *ControllerRegistry) createNewController(portPath string, config *SoArm1
 		return nil, fmt.Errorf("failed to create feetech servo bus: %w", err)
 	}
 
-	servos := make(map[int]*feetech.Servo)
+	// Create raw servo instances
+	rawServos := make(map[int]*feetech.Servo)
 	for id := 1; id <= 6; id++ {
-		servo, err := bus.ServoWithModel(id, "sts3215")
-		if err != nil {
-			bus.Close()
-			entry.lastError = err
-			r.entries[portPath] = entry
-			return nil, fmt.Errorf("failed to create servo %d: %w", id, err)
+		rawServos[id] = feetech.NewServo(bus, id, &feetech.ModelSTS3215)
+	}
+
+	// Create ServoGroups
+	group := feetech.NewServoGroup(bus,
+		rawServos[1], rawServos[2], rawServos[3], rawServos[4], rawServos[5], rawServos[6])
+
+	// Wrap servos with calibration
+	calibratedServos := make(map[int]*CalibratedServo)
+	for id := 1; id <= 6; id++ {
+		motorCal := calibration.GetMotorCalibrationByID(id)
+
+		// Convert SO101 MotorCalibration to our MotorCalibration type
+		appCal := &MotorCalibration{
+			ID:           motorCal.ID,
+			DriveMode:    motorCal.DriveMode,
+			HomingOffset: motorCal.HomingOffset,
+			RangeMin:     motorCal.RangeMin,
+			RangeMax:     motorCal.RangeMax,
+			NormMode:     motorCal.NormMode,
 		}
-		servos[id] = servo
+
+		calibratedServos[id] = NewCalibratedServo(rawServos[id], appCal)
 	}
 
 	// If using default calibration (not from file), try reading from servos
@@ -149,22 +178,31 @@ func (r *ControllerRegistry) createNewController(portPath string, config *SoArm1
 		if config.Logger != nil {
 			config.Logger.Info("No calibration file loaded, attempting to read from servo registers")
 		}
-		finalCalibration = ReadCalibrationFromServos(bus, config.ServoIDs, config.Logger)
+		// Use background context for servo reading during controller creation
+		ctx := context.Background()
+		finalCalibration = ReadCalibrationFromServos(ctx, bus, config.ServoIDs, config.Logger)
 
-		// Set calibration on bus for normalization
-		feetechCals := finalCalibration.ToFeetechCalibrationMap()
-		for id, motorCal := range feetechCals {
-			if motorCal != nil {
-				bus.SetCalibration(id, motorCal)
+		// Update calibrated servos with new calibration
+		for id := 1; id <= 6; id++ {
+			motorCal := finalCalibration.GetMotorCalibrationByID(id)
+			appCal := &MotorCalibration{
+				ID:           motorCal.ID,
+				DriveMode:    motorCal.DriveMode,
+				HomingOffset: motorCal.HomingOffset,
+				RangeMin:     motorCal.RangeMin,
+				RangeMax:     motorCal.RangeMax,
+				NormMode:     motorCal.NormMode,
 			}
+			calibratedServos[id] = NewCalibratedServo(rawServos[id], appCal)
 		}
 	}
 
 	entry.controller = &SafeSoArmController{
-		bus:         bus,
-		servos:      servos,
-		logger:      config.Logger,
-		calibration: finalCalibration,
+		bus:              bus,
+		group:            group,
+		calibratedServos: calibratedServos,
+		logger:           config.Logger,
+		calibration:      finalCalibration,
 	}
 	// Update entry calibration after controller creation for consistency
 	entry.calibration = finalCalibration
@@ -176,14 +214,15 @@ func (r *ControllerRegistry) createNewController(portPath string, config *SoArm1
 	r.trackCaller(portPath)
 
 	if config.Logger != nil {
-		config.Logger.Infof("Created new feetech servo bus with %d servos for port %s", len(servos), portPath)
+		config.Logger.Debugf("Created new feetech servo bus with %d servos for port %s", len(calibratedServos), portPath)
 	}
 
 	return &SafeSoArmController{
-		bus:         bus,
-		servos:      servos,
-		logger:      config.Logger,
-		calibration: finalCalibration,
+		bus:              bus,
+		group:            group,
+		calibratedServos: calibratedServos,
+		logger:           config.Logger,
+		calibration:      finalCalibration,
 	}, nil
 }
 
@@ -318,4 +357,22 @@ func (r *ControllerRegistry) releaseFromCaller() {
 		delete(r.callerPorts, pc)
 		r.callerMu.Unlock()
 	}
+}
+
+// compareConfigs returns a string describing the differences between two configs
+func compareConfigs(a, b *SoArm101Config) string {
+	diffs := []string{}
+	if a.Port != b.Port {
+		diffs = append(diffs, fmt.Sprintf("port: %s vs %s", a.Port, b.Port))
+	}
+	if a.Baudrate != b.Baudrate {
+		diffs = append(diffs, fmt.Sprintf("baudrate: %d vs %d", a.Baudrate, b.Baudrate))
+	}
+	if a.Timeout != b.Timeout {
+		diffs = append(diffs, fmt.Sprintf("timeout: %v vs %v", a.Timeout, b.Timeout))
+	}
+	if len(diffs) == 0 {
+		return "unknown differences"
+	}
+	return strings.Join(diffs, ", ")
 }

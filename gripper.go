@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -112,7 +113,7 @@ func newSO101Gripper(ctx context.Context, deps resource.Dependencies, conf resou
 	fullCalibration, fromFile := controllerConfig.LoadCalibration(logger)
 
 	if fullCalibration.Gripper.ID != cfg.ServoID {
-		logger.Infof("Updating gripper calibration servo ID from %d to %d (from config)",
+		logger.Debugf("Updating gripper calibration servo ID from %d to %d (from config)",
 			fullCalibration.Gripper.ID, cfg.ServoID)
 		fullCalibration.Gripper.ID = cfg.ServoID
 	}
@@ -134,11 +135,11 @@ func newSO101Gripper(ctx context.Context, deps resource.Dependencies, conf resou
 		servoID:        cfg.ServoID,
 		speed:          30,
 		acceleration:   50,
-		openPosition:   85.0,
-		closedPosition: 10.0,
+		openPosition:   95.0,
+		closedPosition: 0.0,
 	}
 
-	logger.Infof("SO-101 gripper initialized with servo ID %d, open=%.1f%%, closed=%.1f%%",
+	logger.Debugf("SO-101 gripper initialized with servo ID %d, open=%.1f%%, closed=%.1f%%",
 		cfg.ServoID, g.openPosition, g.closedPosition)
 
 	return g, nil
@@ -157,7 +158,7 @@ func (g *so101Gripper) Open(ctx context.Context, extra map[string]interface{}) e
 
 	g.logger.Debug("Opening gripper")
 
-	if err := g.controller.MoveServosToPositions([]int{g.servoID}, []float64{g.openPositionRadians()}, 0, 0); err != nil {
+	if err := g.controller.MoveServosToPositions(ctx, []int{g.servoID}, []float64{g.openPositionRadians()}, 0, 0); err != nil {
 		return fmt.Errorf("failed to open gripper: %w", err)
 	}
 
@@ -176,13 +177,13 @@ func (g *so101Gripper) Grab(ctx context.Context, extra map[string]interface{}) (
 
 	g.logger.Debug("Attempting to grab with gripper")
 
-	if err := g.controller.MoveServosToPositions([]int{g.servoID}, []float64{g.closedPositionRadians()}, 0, 0); err != nil {
+	if err := g.controller.MoveServosToPositions(ctx, []int{g.servoID}, []float64{g.closedPositionRadians()}, 0, 0); err != nil {
 		return false, fmt.Errorf("failed to close gripper: %w", err)
 	}
 
 	time.Sleep(500 * time.Millisecond)
 
-	currentPositions, err := g.controller.GetJointPositionsForServos([]int{g.servoID})
+	currentPositions, err := g.controller.GetJointPositionsForServos(ctx, []int{g.servoID})
 	if err != nil {
 		g.logger.Warnf("Failed to read gripper position after grab: %v", err)
 		return true, nil
@@ -211,7 +212,7 @@ func (g *so101Gripper) Grab(ctx context.Context, extra map[string]interface{}) (
 
 func (g *so101Gripper) Stop(ctx context.Context, extra map[string]interface{}) error {
 	g.isMoving.Store(false)
-	return g.controller.Stop()
+	return g.controller.Stop(ctx)
 }
 
 func (g *so101Gripper) IsMoving(ctx context.Context) (bool, error) {
@@ -228,7 +229,7 @@ func (g *so101Gripper) Geometries(ctx context.Context, extra map[string]interfac
 func (g *so101Gripper) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
 	switch cmd["command"] {
 	case "get_position":
-		positions, err := g.controller.GetJointPositionsForServos([]int{g.servoID})
+		positions, err := g.controller.GetJointPositionsForServos(ctx, []int{g.servoID})
 		if err != nil {
 			return nil, err
 		}
@@ -276,7 +277,7 @@ func (g *so101Gripper) DoCommand(ctx context.Context, cmd map[string]interface{}
 		defer g.isMoving.Store(false)
 
 		targetRadians := g.percentToRadians(targetPercent)
-		err := g.controller.MoveServosToPositions([]int{g.servoID}, []float64{targetRadians}, 0, 0)
+		err := g.controller.MoveServosToPositions(ctx, []int{g.servoID}, []float64{targetRadians}, 0, 0)
 		return map[string]interface{}{"success": err == nil}, err
 
 	case "controller_status":
@@ -300,7 +301,7 @@ func (g *so101Gripper) DoCommand(ctx context.Context, cmd map[string]interface{}
 			}
 		}
 
-		g.logger.Infof("Gripper positions calibrated: open=%.1f%%, closed=%.1f%%", g.openPosition, g.closedPosition)
+		g.logger.Debugf("Gripper positions calibrated: open=%.1f%%, closed=%.1f%%", g.openPosition, g.closedPosition)
 
 		return map[string]interface{}{
 			"success":         true,
@@ -375,14 +376,14 @@ func (g *so101Gripper) percentToRadians(percent float64) float64 {
 	cal := g.controller.getCalibrationForServo(g.servoID)
 	if cal == nil {
 		// Fallback to default behavior
-		return (percent - 50.0) / 50.0 * 3.14159265359
+		return (percent - 50.0) / 50.0 * math.Pi
 	}
 
 	// Convert percentage to normalized position within the calibrated range
 	normalizedPos := percent / 100.0
 
 	// Convert to radians (assuming ±π range)
-	radians := (normalizedPos*2.0 - 1.0) * 3.14159265359 // Convert 0-1 to -π to +π
+	radians := (normalizedPos*2.0 - 1.0) * math.Pi // Convert 0-1 to -π to +π
 
 	// Apply drive mode if needed
 	if cal.DriveMode != 0 {
@@ -396,7 +397,7 @@ func (g *so101Gripper) radiansToPercent(radians float64) float64 {
 	cal := g.controller.getCalibrationForServo(g.servoID)
 	if cal == nil {
 		// Fallback to default behavior
-		return (radians/3.14159265359)*50.0 + 50.0
+		return (radians/math.Pi)*50.0 + 50.0
 	}
 
 	// Apply drive mode if needed
@@ -406,7 +407,7 @@ func (g *so101Gripper) radiansToPercent(radians float64) float64 {
 	}
 
 	// Convert radians to normalized position (-1 to 1)
-	normalizedPos := adjustedRadians / 3.14159265359
+	normalizedPos := adjustedRadians / math.Pi
 
 	// Convert to percentage (0-100)
 	percent := (normalizedPos + 1.0) / 2.0 * 100.0

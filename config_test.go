@@ -5,7 +5,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/hipsterbrown/feetech-servo"
 	"go.viam.com/rdk/logging"
 )
 
@@ -69,12 +68,12 @@ func TestGetNormModeForServo(t *testing.T) {
 		servoID  int
 		expected int
 	}{
-		{1, feetech.NormModeDegrees},
-		{2, feetech.NormModeDegrees},
-		{3, feetech.NormModeDegrees},
-		{4, feetech.NormModeDegrees},
-		{5, feetech.NormModeDegrees},
-		{6, feetech.NormModeRange100},
+		{1, NormModeDegrees},
+		{2, NormModeDegrees},
+		{3, NormModeDegrees},
+		{4, NormModeDegrees},
+		{5, NormModeDegrees},
+		{6, NormModeRange100},
 	}
 
 	for _, tt := range tests {
