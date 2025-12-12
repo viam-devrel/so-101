@@ -14,6 +14,14 @@ Follow the [end-to-end tutorial](https://codelabs.viam.com/guide/so101/index.htm
 
 Automatic discovery service that detects connected arms and suggests component configurations for the calibration sensor, arm and gripper. It will also look for existing calibration files. 
 
+**Usage:**
+
+- save your robot configuration with this service
+- open the Test panel on service configuration card or view the Control tab
+- click "+ add component" for the relevant component you'd like to set up: arm, gripper, or calibration sensor
+
+_Add the calibration sensor if you're building the arm from a kit._
+
 ### Troubleshooting
 
 1. **Serial Connection Failed**:
@@ -25,6 +33,8 @@ Automatic discovery service that detects connected arms and suggests component c
 ## Model devrel:so101:arm
 
 The arm component controls the first 5 joints of the SO-101: shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, and wrist_roll.
+
+**Use the `devrel:so101:discovery` service to help with configuring this component automatically.**
 
 Follow the [end-to-end tutorial](https://codelabs.viam.com/guide/so101/index.html?index=..%2F..index#0) to learn how to set up the arm for the first time.
 
@@ -188,6 +198,8 @@ Retrieve current calibration data:
 
 The gripper component controls the 6th servo of the SO-101, which functions as a parallel gripper.
 
+**Use the `devrel:so101:discovery` service to help with configuring this component automatically.**
+
 Follow the [end-to-end tutorial](https://codelabs.viam.com/guide/so101/index.html?index=..%2F..index#0) to learn how to set up the arm for the first time.
 
 ### Configuration
@@ -275,11 +287,13 @@ Check the shared controller status:
 
 ## Model devrel:so101:calibration
 
-The SO-101 requires calibration to map servo positions to joint angles based on how the arm was assembled.
+When assembling the SO-101 arm from a kit, it requires calibration to map servo positions to joint angles based on how the arm was assembled.
 
 The SO-101 Calibration Sensor provides a calibration workflow integrated into Viam's component system. It guides you through the calibration process using DoCommand calls and provides status updates through sensor readings.
 
-**See the [Setup Application](#setup-application) for a visual walkthrough experience that uses this component.**
+**Use the `devrel:so101:discovery` service to help with configuring this component automatically.**
+
+**See the [Setup Application](https://so101-setup_devrel.viamapplications.com) for a visual walkthrough experience that uses this component.**
 
 Follow the [end-to-end tutorial](https://codelabs.viam.com/guide/so101/index.html?index=..%2F..index#0) to learn how to set up the arm for the first time.
 
