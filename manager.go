@@ -65,6 +65,10 @@ func (s *SafeSoArmController) MoveServosToPositions(ctx context.Context, servoID
 		return fmt.Errorf("servo IDs and joint angles length mismatch")
 	}
 
+	// TODO: Apply speed and acc parameters when feetech-servo library supports per-move speed/acceleration
+	// Currently, these parameters are accepted but not used in the actual servo control
+	// The infrastructure is in place for future enhancement
+
 	// Convert radians to appropriate normalized values based on servo type
 	rawPositions := make(map[int]int, len(jointAngles))
 	for i, servoID := range servoIDs {
