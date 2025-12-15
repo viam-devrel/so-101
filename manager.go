@@ -53,7 +53,16 @@ func (s *SafeSoArmController) MoveToJointPositions(ctx context.Context, jointAng
 		rawPositions[servoID] = raw
 	}
 
-	// Use ServoGroup to write positions
+	// Use SetPositionsWithSpeed when speed is specified, otherwise use default SetPositions
+	// Note: acceleration parameter not yet supported by feetech-servo library
+	if speed > 0 {
+		// Create speed map with the same speed for all servos
+		speeds := make(map[int]int, len(rawPositions))
+		for servoID := range rawPositions {
+			speeds[servoID] = speed
+		}
+		return s.group.SetPositionsWithSpeed(ctx, rawPositions, speeds)
+	}
 	return s.group.SetPositions(ctx, rawPositions)
 }
 
@@ -64,10 +73,6 @@ func (s *SafeSoArmController) MoveServosToPositions(ctx context.Context, servoID
 	if len(servoIDs) != len(jointAngles) {
 		return fmt.Errorf("servo IDs and joint angles length mismatch")
 	}
-
-	// TODO: Apply speed and acc parameters when feetech-servo library supports per-move speed/acceleration
-	// Currently, these parameters are accepted but not used in the actual servo control
-	// The infrastructure is in place for future enhancement
 
 	// Convert radians to appropriate normalized values based on servo type
 	rawPositions := make(map[int]int, len(jointAngles))
@@ -91,7 +96,16 @@ func (s *SafeSoArmController) MoveServosToPositions(ctx context.Context, servoID
 		rawPositions[servoID] = raw
 	}
 
-	// Use appropriate ServoGroup
+	// Use SetPositionsWithSpeed when speed is specified, otherwise use default SetPositions
+	// Note: acceleration parameter not yet supported by feetech-servo library
+	if speed > 0 {
+		// Create speed map with the same speed for all servos
+		speeds := make(map[int]int, len(rawPositions))
+		for servoID := range rawPositions {
+			speeds[servoID] = speed
+		}
+		return s.group.SetPositionsWithSpeed(ctx, rawPositions, speeds)
+	}
 	return s.group.SetPositions(ctx, rawPositions)
 }
 

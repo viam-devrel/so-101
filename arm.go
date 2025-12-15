@@ -118,7 +118,6 @@ type moveOptions struct {
 }
 
 // buildMoveOptions constructs moveOptions from defaults, MoveOptions, and extra params
-// Following the xarm module pattern for parameter precedence:
 // 1. Start with configured defaults
 // 2. Override with arm.MoveOptions if provided
 // 3. Override with extra map parameters if provided
@@ -141,23 +140,21 @@ func (s *so101) buildMoveOptions(options *arm.MoveOptions, extra map[string]inte
 	}
 
 	// Apply extra map parameters (highest priority)
-	if extra != nil {
-		// Speed in radians/sec
-		if speedR, ok := extra["speed_r"].(float64); ok && speedR > 0 {
-			speed = speedR * 180.0 / math.Pi
-		}
-		// Speed in degrees/sec
-		if speedD, ok := extra["speed_d"].(float64); ok && speedD > 0 {
-			speed = speedD
-		}
-		// Acceleration in radians/sec²
-		if accR, ok := extra["acceleration_r"].(float64); ok && accR > 0 {
-			acc = accR * 180.0 / math.Pi
-		}
-		// Acceleration in degrees/sec²
-		if accD, ok := extra["acceleration_d"].(float64); ok && accD > 0 {
-			acc = accD
-		}
+	// Speed in radians/sec
+	if speedR, ok := extra["speed_r"].(float64); ok && speedR > 0 {
+		speed = speedR * 180.0 / math.Pi
+	}
+	// Speed in degrees/sec
+	if speedD, ok := extra["speed_d"].(float64); ok && speedD > 0 {
+		speed = speedD
+	}
+	// Acceleration in radians/sec²
+	if accR, ok := extra["acceleration_r"].(float64); ok && accR > 0 {
+		acc = accR * 180.0 / math.Pi
+	}
+	// Acceleration in degrees/sec²
+	if accD, ok := extra["acceleration_d"].(float64); ok && accD > 0 {
+		acc = accD
 	}
 
 	// Clamp to valid ranges
@@ -462,10 +459,8 @@ func (s *so101) MoveThroughJointPositions(ctx context.Context, positions [][]ref
 	// Create a new extra map that includes the speed/acc from moveOptions
 	// This ensures MoveToJointPositions uses the same options
 	mergedExtra := make(map[string]interface{})
-	if extra != nil {
-		for k, v := range extra {
-			mergedExtra[k] = v
-		}
+	for k, v := range extra {
+		mergedExtra[k] = v
 	}
 	mergedExtra["speed_d"] = opts.speedDegsPerSec
 	mergedExtra["acceleration_d"] = opts.accelerationDegsPerSec
