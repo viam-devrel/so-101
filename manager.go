@@ -56,10 +56,15 @@ func (s *SafeSoArmController) MoveToJointPositions(ctx context.Context, jointAng
 	// Use SetPositionsWithSpeed when speed is specified, otherwise use default SetPositions
 	// Note: acceleration parameter not yet supported by feetech-servo library
 	if speed > 0 {
-		// Create speed map with the same speed for all servos
+		// Convert speed from degrees/sec to steps/sec for each servo
+		// Speed must be in steps per second as per feetech-servo documentation
 		speeds := make(map[int]int, len(rawPositions))
 		for servoID := range rawPositions {
-			speeds[servoID] = speed
+			cal := s.calibration.GetMotorCalibrationByID(servoID)
+			// Calculate steps per degree based on servo's calibrated range
+			// Arm servos: steps for 360 degree range
+			stepsPerDegree := float64(cal.RangeMax-cal.RangeMin) / 360.0
+			speeds[servoID] = int(float64(speed) * stepsPerDegree)
 		}
 		return s.group.SetPositionsWithSpeed(ctx, rawPositions, speeds)
 	}
@@ -99,10 +104,22 @@ func (s *SafeSoArmController) MoveServosToPositions(ctx context.Context, servoID
 	// Use SetPositionsWithSpeed when speed is specified, otherwise use default SetPositions
 	// Note: acceleration parameter not yet supported by feetech-servo library
 	if speed > 0 {
-		// Create speed map with the same speed for all servos
+		// Convert speed from degrees/sec to steps/sec for each servo
+		// Speed must be in steps per second as per feetech-servo documentation
 		speeds := make(map[int]int, len(rawPositions))
 		for servoID := range rawPositions {
-			speeds[servoID] = speed
+			cal := s.calibration.GetMotorCalibrationByID(servoID)
+			// Calculate steps per degree based on servo's calibrated range
+			// For gripper (percentage-based), use direct conversion
+			var stepsPerDegree float64
+			if isGripperServo(servoID) {
+				// Gripper: ~4095 steps for 100% range
+				stepsPerDegree = float64(cal.RangeMax-cal.RangeMin) / 100.0
+			} else {
+				// Arm servos: steps for 360 degree range
+				stepsPerDegree = float64(cal.RangeMax-cal.RangeMin) / 360.0
+			}
+			speeds[servoID] = int(float64(speed) * stepsPerDegree)
 		}
 		return s.group.SetPositionsWithSpeed(ctx, rawPositions, speeds)
 	}

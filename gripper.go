@@ -30,8 +30,8 @@ type SO101GripperConfig struct {
 
 	Timeout time.Duration `json:"timeout,omitempty"`
 
-	SpeedDegsPerSec        float32 `json:"speed_degs_per_sec,omitempty"`
-	AccelerationDegsPerSec float32 `json:"acceleration_degs_per_sec_per_sec,omitempty"`
+	SpeedPercentPerSec        float32 `json:"speed_percent_per_sec,omitempty"`
+	AccelerationPercentPerSec float32 `json:"acceleration_percent_per_sec_per_sec,omitempty"`
 
 	// Shared with arm
 	CalibrationFile string `json:"calibration_file,omitempty"`
@@ -80,8 +80,8 @@ type so101Gripper struct {
 
 // gripperMoveOptions holds movement parameters for gripper operations
 type gripperMoveOptions struct {
-	speedDegsPerSec        float64
-	accelerationDegsPerSec float64
+	speedPercentPerSec        float32
+	accelerationPercentPerSec float32
 }
 
 // buildMoveOptions constructs gripperMoveOptions from defaults and extra params
@@ -89,48 +89,46 @@ type gripperMoveOptions struct {
 // 1. Start with configured defaults
 // 2. Override with extra map parameters if provided
 func (g *so101Gripper) buildMoveOptions(extra map[string]interface{}) gripperMoveOptions {
-	g.mu.Lock()
-	speed := float64(g.speed)
-	acc := float64(g.acceleration)
-	g.mu.Unlock()
+	speed := float32(g.speed)
+	acc := float32(g.acceleration)
 
 	// Apply extra map parameters
 	if extra != nil {
-		// Speed in radians/sec
-		if speedR, ok := extra["speed_r"].(float64); ok && speedR > 0 {
-			speed = speedR * 180.0 / math.Pi
+		// Speed in percent/sec (preferred for gripper)
+		if speedP, ok := extra["speed_percent"].(float32); ok && speedP > 0 {
+			speed = speedP
 		}
-		// Speed in degrees/sec
-		if speedD, ok := extra["speed_d"].(float64); ok && speedD > 0 {
+		// Backwards compatibility: Speed in degrees/sec (treat as percent)
+		if speedD, ok := extra["speed_d"].(float32); ok && speedD > 0 {
 			speed = speedD
 		}
-		// Acceleration in radians/sec²
-		if accR, ok := extra["acceleration_r"].(float64); ok && accR > 0 {
-			acc = accR * 180.0 / math.Pi
+		// Acceleration in percent/sec² (preferred for gripper)
+		if accP, ok := extra["acceleration_percent"].(float32); ok && accP > 0 {
+			acc = accP
 		}
-		// Acceleration in degrees/sec²
-		if accD, ok := extra["acceleration_d"].(float64); ok && accD > 0 {
+		// Backwards compatibility: Acceleration in degrees/sec² (treat as percent)
+		if accD, ok := extra["acceleration_d"].(float32); ok && accD > 0 {
 			acc = accD
 		}
 	}
 
-	// Clamp to valid ranges
+	// Clamp to valid ranges for gripper (percentage-based)
 	if speed < 3 {
 		speed = 3
 	}
-	if speed > 180 {
-		speed = 180
+	if speed > 100 {
+		speed = 100
 	}
 	if acc < 10 {
 		acc = 10
 	}
-	if acc > 500 {
-		acc = 500
+	if acc > 200 {
+		acc = 200
 	}
 
 	return gripperMoveOptions{
-		speedDegsPerSec:        speed,
-		accelerationDegsPerSec: acc,
+		speedPercentPerSec:        speed,
+		accelerationPercentPerSec: acc,
 	}
 }
 
@@ -159,20 +157,20 @@ func newSO101Gripper(ctx context.Context, deps resource.Dependencies, conf resou
 	}
 
 	// Validate and set default motion parameters
-	speedDegsPerSec := cfg.SpeedDegsPerSec
-	if speedDegsPerSec == 0 {
-		speedDegsPerSec = 30 // Default speed for gripper
+	speedPercentPerSec := cfg.SpeedPercentPerSec
+	if speedPercentPerSec == 0 {
+		speedPercentPerSec = 30 // Default speed for gripper (30% per second)
 	}
-	if speedDegsPerSec < 3 || speedDegsPerSec > 180 {
-		return nil, fmt.Errorf("speed_degs_per_sec must be between 3 and 180 degrees/second, got %.1f", speedDegsPerSec)
+	if speedPercentPerSec < 0 || speedPercentPerSec > 100 {
+		return nil, fmt.Errorf("speed_percent_per_sec must be between 0 and 100 percent/second, got %.1f", speedPercentPerSec)
 	}
 
-	accelerationDegsPerSec := cfg.AccelerationDegsPerSec
-	if accelerationDegsPerSec == 0 {
-		accelerationDegsPerSec = 50 // Default acceleration for gripper
+	accelerationPercentPerSec := cfg.AccelerationPercentPerSec
+	if accelerationPercentPerSec == 0 {
+		accelerationPercentPerSec = 50 // Default acceleration for gripper (50% per second²)
 	}
-	if accelerationDegsPerSec < 10 || accelerationDegsPerSec > 500 {
-		return nil, fmt.Errorf("acceleration_degs_per_sec_per_sec must be between 10 and 500 degrees/second^2, got %.1f", accelerationDegsPerSec)
+	if accelerationPercentPerSec < 10 || accelerationPercentPerSec > 200 {
+		return nil, fmt.Errorf("acceleration_percent_per_sec_per_sec must be between 10 and 200 percent/second^2, got %.1f", accelerationPercentPerSec)
 	}
 
 	controllerConfig := &SoArm101Config{
@@ -209,14 +207,14 @@ func newSO101Gripper(ctx context.Context, deps resource.Dependencies, conf resou
 		controller:     controller,
 		geometries:     geometries,
 		servoID:        cfg.ServoID,
-		speed:          speedDegsPerSec,
-		acceleration:   accelerationDegsPerSec,
+		speed:          speedPercentPerSec,
+		acceleration:   accelerationPercentPerSec,
 		openPosition:   95.0,
 		closedPosition: 0.0,
 	}
 
-	logger.Debugf("SO-101 gripper initialized with servo ID %d, speed: %.1f deg/s, acceleration: %.1f deg/s², open=%.1f%%, closed=%.1f%%",
-		cfg.ServoID, speedDegsPerSec, accelerationDegsPerSec, g.openPosition, g.closedPosition)
+	logger.Debugf("SO-101 gripper initialized with servo ID %d, speed: %.1f %%/s, acceleration: %.1f %%/s², open=%.1f%%, closed=%.1f%%",
+		cfg.ServoID, speedPercentPerSec, accelerationPercentPerSec, g.openPosition, g.closedPosition)
 
 	return g, nil
 }
@@ -236,10 +234,10 @@ func (g *so101Gripper) Open(ctx context.Context, extra map[string]interface{}) e
 
 	// Build move options from defaults and extra parameters
 	opts := g.buildMoveOptions(extra)
-
-	// Pass speed and acceleration to controller
-	speed := int(opts.speedDegsPerSec)
-	acc := int(opts.accelerationDegsPerSec)
+	g.logger.Debugf("Gripper opts: %+v", opts)
+	// Pass speed and acceleration to controller (in percent/sec for gripper)
+	speed := int(opts.speedPercentPerSec)
+	acc := int(opts.accelerationPercentPerSec)
 	if err := g.controller.MoveServosToPositions(ctx, []int{g.servoID}, []float64{g.openPositionRadians()}, speed, acc); err != nil {
 		return fmt.Errorf("failed to open gripper: %w", err)
 	}
@@ -262,9 +260,9 @@ func (g *so101Gripper) Grab(ctx context.Context, extra map[string]interface{}) (
 	// Build move options from defaults and extra parameters
 	opts := g.buildMoveOptions(extra)
 
-	// Pass speed and acceleration to controller
-	speed := int(opts.speedDegsPerSec)
-	acc := int(opts.accelerationDegsPerSec)
+	// Pass speed and acceleration to controller (in percent/sec for gripper)
+	speed := int(opts.speedPercentPerSec)
+	acc := int(opts.accelerationPercentPerSec)
 	if err := g.controller.MoveServosToPositions(ctx, []int{g.servoID}, []float64{g.closedPositionRadians()}, speed, acc); err != nil {
 		return false, fmt.Errorf("failed to close gripper: %w", err)
 	}
@@ -287,7 +285,7 @@ func (g *so101Gripper) Grab(ctx context.Context, extra map[string]interface{}) (
 	positionDifference := currentPercent - g.closedPosition
 	threshold := 15.0
 
-	grabbed := positionDifference > threshold
+	grabbed := positionDifference < threshold
 
 	if grabbed {
 		g.logger.Debugf("Gripper successfully grabbed an object (position difference: %.1f%%)", positionDifference)
@@ -366,8 +364,8 @@ func (g *so101Gripper) DoCommand(ctx context.Context, cmd map[string]interface{}
 
 		// Build move options from cmd map
 		opts := g.buildMoveOptions(cmd)
-		speed := int(opts.speedDegsPerSec)
-		acc := int(opts.accelerationDegsPerSec)
+		speed := int(opts.speedPercentPerSec)
+		acc := int(opts.accelerationPercentPerSec)
 
 		targetRadians := g.percentToRadians(targetPercent)
 		err := g.controller.MoveServosToPositions(ctx, []int{g.servoID}, []float64{targetRadians}, speed, acc)
@@ -404,12 +402,12 @@ func (g *so101Gripper) DoCommand(ctx context.Context, cmd map[string]interface{}
 
 	case "set_motion_params":
 		if speed, ok := cmd["speed"].(float64); ok {
-			if speed > 0 && speed <= 180 {
+			if speed > 0 && speed <= 100 {
 				g.speed = float32(speed)
 			}
 		}
 		if acc, ok := cmd["acceleration"].(float64); ok {
-			if acc > 0 && acc <= 500 {
+			if acc > 0 && acc <= 200 {
 				g.acceleration = float32(acc)
 			}
 		}
@@ -433,8 +431,8 @@ func (g *so101Gripper) DoCommand(ctx context.Context, cmd map[string]interface{}
 
 		if speedVal, ok := cmd["set_speed"]; ok {
 			if speed, ok := speedVal.(float64); ok {
-				if speed < 3 || speed > 180 {
-					return nil, fmt.Errorf("speed must be between 3 and 180 degrees/second, got %.1f", speed)
+				if speed < 3 || speed > 100 {
+					return nil, fmt.Errorf("speed must be between 3 and 100 percent/second, got %.1f", speed)
 				}
 				g.mu.Lock()
 				g.speed = float32(speed)
@@ -448,8 +446,8 @@ func (g *so101Gripper) DoCommand(ctx context.Context, cmd map[string]interface{}
 
 		if accVal, ok := cmd["set_acceleration"]; ok {
 			if acc, ok := accVal.(float64); ok {
-				if acc < 10 || acc > 500 {
-					return nil, fmt.Errorf("acceleration must be between 10 and 500 degrees/second^2, got %.1f", acc)
+				if acc < 10 || acc > 200 {
+					return nil, fmt.Errorf("acceleration must be between 10 and 200 percent/second^2, got %.1f", acc)
 				}
 				g.mu.Lock()
 				g.acceleration = float32(acc)
@@ -463,12 +461,12 @@ func (g *so101Gripper) DoCommand(ctx context.Context, cmd map[string]interface{}
 
 		if getParams, ok := cmd["get_motion_params"]; ok && getParams.(bool) {
 			g.mu.Lock()
-			speedDegsPerSec := float64(g.speed)
-			accDegsPerSec := float64(g.acceleration)
+			speedPercentPerSec := float32(g.speed)
+			accPercentPerSec := float32(g.acceleration)
 			g.mu.Unlock()
 
-			result["current_speed_degs_per_sec"] = speedDegsPerSec
-			result["current_acceleration_degs_per_sec_per_sec"] = accDegsPerSec
+			result["current_speed_percent_per_sec"] = speedPercentPerSec
+			result["current_acceleration_percent_per_sec_per_sec"] = accPercentPerSec
 			changed = true
 		}
 
