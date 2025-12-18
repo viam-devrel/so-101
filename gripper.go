@@ -214,7 +214,7 @@ func newSO101Gripper(ctx context.Context, deps resource.Dependencies, conf resou
 		acceleration:      accelerationPercentPerSec,
 		openPosition:      95.0,
 		closedPosition:    0.0,
-		gripLoadThreshold: 250,
+		gripLoadThreshold: 1200,
 	}
 
 	logger.Debugf("SO-101 gripper initialized with servo ID %d, speed: %.1f %%/s, acceleration: %.1f %%/s², open=%.1f%%, closed=%.1f%%",
@@ -263,7 +263,7 @@ func (g *so101Gripper) Grab(ctx context.Context, extra map[string]interface{}) (
 
 	// Build move options from defaults and extra parameters
 	opts := g.buildMoveOptions(extra)
-
+	g.logger.Debugf("Gripper opts: %+v", opts)
 	// Start closing the gripper (non-blocking)
 	speed := int(opts.speedPercentPerSec)
 	acc := int(opts.accelerationPercentPerSec)
@@ -273,8 +273,24 @@ func (g *so101Gripper) Grab(ctx context.Context, extra map[string]interface{}) (
 
 	// Poll load and position to detect when gripper grabs object or reaches full close
 	pollInterval := 10 * time.Millisecond
-	timeout := 2 * time.Second
+
+	// Calculate timeout based on speed: distance / speed * safety_factor
+	// Distance to travel in percentage
+	distance := g.openPosition - g.closedPosition
+	// Time = distance / speed (in seconds), with 2x safety margin
+	timeoutSeconds := (distance / float64(opts.speedPercentPerSec)) * 2.0
+	// Clamp to reasonable bounds: minimum 1 second, maximum 10 seconds
+	if timeoutSeconds < 1.0 {
+		timeoutSeconds = 1.0
+	}
+	if timeoutSeconds > 10.0 {
+		timeoutSeconds = 10.0
+	}
+	timeout := time.Duration(timeoutSeconds * float64(time.Second))
 	start := time.Now()
+
+	g.logger.Debugf("Grip timeout calculated: %.2f seconds (distance: %.1f%%, speed: %.1f%%/s)",
+		timeoutSeconds, distance, opts.speedPercentPerSec)
 
 	// Calculate position tolerance (2% of range)
 	positionTolerance := (g.openPosition - g.closedPosition) * 0.02
@@ -282,8 +298,8 @@ func (g *so101Gripper) Grab(ctx context.Context, extra map[string]interface{}) (
 	for {
 		// Check timeout
 		if time.Since(start) > timeout {
-			g.logger.Warn("Grip operation timed out after 2 seconds")
-			return false, fmt.Errorf("grip operation timed out")
+			g.logger.Warnf("Grip operation timed out after %.2f seconds", timeoutSeconds)
+			return false, fmt.Errorf("grip operation timed out after %.2f seconds", timeoutSeconds)
 		}
 
 		// Read current load
