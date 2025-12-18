@@ -255,6 +255,14 @@ func (cs *CalibratedServo) Moving(ctx context.Context) (bool, error) {
 	return cs.servo.Moving(ctx)
 }
 
+// Load reads the current load on the servo
+// Returns signed value: positive = clockwise load, negative = counter-clockwise
+func (cs *CalibratedServo) Load(ctx context.Context) (int, error) {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return cs.servo.Load(ctx)
+}
+
 // Ping pings the servo
 func (cs *CalibratedServo) Ping(ctx context.Context) (int, error) {
 	cs.mu.RLock()

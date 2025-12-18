@@ -284,6 +284,19 @@ func (s *SafeSoArmController) GetCalibration() SO101FullCalibration {
 	return s.calibration
 }
 
+// GetServoLoad reads the current load from a specific servo
+func (s *SafeSoArmController) GetServoLoad(ctx context.Context, servoID int) (int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	servo, exists := s.calibratedServos[servoID]
+	if !exists {
+		return 0, fmt.Errorf("servo %d not found", servoID)
+	}
+
+	return servo.Load(ctx)
+}
+
 // getCalibrationForServo returns the calibration for a specific servo ID
 func (s *SafeSoArmController) getCalibrationForServo(servoID int) *MotorCalibration {
 	s.mu.RLock()
