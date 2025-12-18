@@ -414,7 +414,6 @@ func (s *so101) MoveToJointPositions(ctx context.Context, positions []referencef
 	}
 
 	// Pass speed and acceleration to controller (currently 0, 0 means use servo defaults)
-	// TODO: Update controller to actually use these parameters when feetech-servo supports it
 	speed := int(opts.speedDegsPerSec)
 	acc := int(opts.accelerationDegsPerSec)
 	if err := s.controller.MoveServosToPositions(ctx, s.armServoIDs, clampedPositions, speed, acc); err != nil {
