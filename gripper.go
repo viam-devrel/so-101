@@ -76,9 +76,6 @@ type so101Gripper struct {
 
 	speed        float32
 	acceleration float32
-
-	// Load monitoring threshold for grip detection
-	gripLoadThreshold int
 }
 
 // gripperMoveOptions holds movement parameters for gripper operations
@@ -205,16 +202,15 @@ func newSO101Gripper(ctx context.Context, deps resource.Dependencies, conf resou
 	geometries := []spatialmath.Geometry{claws}
 
 	g := &so101Gripper{
-		name:              conf.ResourceName(),
-		logger:            logger,
-		controller:        controller,
-		geometries:        geometries,
-		servoID:           cfg.ServoID,
-		speed:             speedPercentPerSec,
-		acceleration:      accelerationPercentPerSec,
-		openPosition:      95.0,
-		closedPosition:    0.0,
-		gripLoadThreshold: 1200,
+		name:           conf.ResourceName(),
+		logger:         logger,
+		controller:     controller,
+		geometries:     geometries,
+		servoID:        cfg.ServoID,
+		speed:          speedPercentPerSec,
+		acceleration:   accelerationPercentPerSec,
+		openPosition:   95.0,
+		closedPosition: 0.0,
 	}
 
 	logger.Debugf("SO-101 gripper initialized with servo ID %d, speed: %.1f %%/s, acceleration: %.1f %%/s², open=%.1f%%, closed=%.1f%%",
@@ -259,120 +255,58 @@ func (g *so101Gripper) Grab(ctx context.Context, extra map[string]interface{}) (
 	g.isMoving.Store(true)
 	defer g.isMoving.Store(false)
 
-	g.logger.Debug("Attempting to grab with gripper using load monitoring")
+	g.logger.Debug("Attempting to grab with gripper")
 
 	// Build move options from defaults and extra parameters
 	opts := g.buildMoveOptions(extra)
-	g.logger.Debugf("Gripper opts: %+v", opts)
-	// Start closing the gripper (non-blocking)
+
+	// Close the gripper - torque limits configured in servo will prevent burnout
 	speed := int(opts.speedPercentPerSec)
 	acc := int(opts.accelerationPercentPerSec)
 	if err := g.controller.MoveServosToPositions(ctx, []int{g.servoID}, []float64{g.closedPositionRadians()}, speed, acc); err != nil {
 		return false, fmt.Errorf("failed to start gripper close: %w", err)
 	}
 
-	// Poll load and position to detect when gripper grabs object or reaches full close
-	pollInterval := 10 * time.Millisecond
-
-	// Calculate timeout based on speed: distance / speed * safety_factor
-	// Distance to travel in percentage
+	// Wait for movement to complete
+	// Calculate expected time based on speed
 	distance := g.openPosition - g.closedPosition
-	// Time = distance / speed (in seconds), with 2x safety margin
-	timeoutSeconds := (distance / float64(opts.speedPercentPerSec)) * 2.0
-	// Clamp to reasonable bounds: minimum 1 second, maximum 10 seconds
-	if timeoutSeconds < 1.0 {
-		timeoutSeconds = 1.0
+	expectedTime := (distance / float64(opts.speedPercentPerSec)) * 1.5 // 1.5x for safety margin
+	if expectedTime < 0.5 {
+		expectedTime = 0.5
 	}
-	if timeoutSeconds > 10.0 {
-		timeoutSeconds = 10.0
+	if expectedTime > 5.0 {
+		expectedTime = 5.0
 	}
-	timeout := time.Duration(timeoutSeconds * float64(time.Second))
-	start := time.Now()
+	time.Sleep(time.Duration(expectedTime * float64(time.Second)))
 
-	g.logger.Debugf("Grip timeout calculated: %.2f seconds (distance: %.1f%%, speed: %.1f%%/s)",
-		timeoutSeconds, distance, opts.speedPercentPerSec)
-
-	// Calculate position tolerance (2% of range)
-	positionTolerance := (g.openPosition - g.closedPosition) * 0.02
-
-	for {
-		// Check timeout
-		if time.Since(start) > timeout {
-			g.logger.Warnf("Grip operation timed out after %.2f seconds", timeoutSeconds)
-			return false, fmt.Errorf("grip operation timed out after %.2f seconds", timeoutSeconds)
-		}
-
-		// Read current load
-		load, err := g.controller.GetServoLoad(ctx, g.servoID)
-		if err != nil {
-			g.logger.Warnf("Failed to read servo load: %v", err)
-			time.Sleep(pollInterval)
-			continue
-		}
-
-		// Check if load exceeds threshold (use absolute value)
-		absLoad := load
-		if absLoad < 0 {
-			absLoad = -absLoad
-		}
-
-		if absLoad > g.gripLoadThreshold {
-			g.logger.Debugf("Load threshold exceeded (load: %d, threshold: %d) - stopping gripper", absLoad, g.gripLoadThreshold)
-
-			// Stop the gripper
-			if err := g.controller.Stop(ctx); err != nil {
-				g.logger.Warnf("Failed to stop gripper: %v", err)
-			}
-
-			// Read final position to determine if we grabbed something
-			currentPositions, err := g.controller.GetJointPositionsForServos(ctx, []int{g.servoID})
-			if err != nil {
-				g.logger.Warnf("Failed to read final gripper position: %v", err)
-				return true, nil // Assume grabbed since load was high
-			}
-
-			if len(currentPositions) == 0 {
-				g.logger.Warn("No position data received from gripper")
-				return true, nil // Assume grabbed since load was high
-			}
-
-			currentPercent := g.radiansToPercent(currentPositions[0])
-			positionDiff := currentPercent - g.closedPosition
-
-			// If stopped more than 5% before fully closed, assume we grabbed something
-			grabbed := positionDiff > 5.0
-
-			if grabbed {
-				g.logger.Debugf("Gripper grabbed object at %.1f%% (%.1f%% from fully closed)", currentPercent, positionDiff)
-			} else {
-				g.logger.Debugf("Gripper closed to %.1f%% but may not have grabbed anything", currentPercent)
-			}
-
-			return grabbed, nil
-		}
-
-		// Read current position to check if we've reached the target
-		currentPositions, err := g.controller.GetJointPositionsForServos(ctx, []int{g.servoID})
-		if err != nil {
-			g.logger.Warnf("Failed to read gripper position: %v", err)
-			time.Sleep(pollInterval)
-			continue
-		}
-
-		if len(currentPositions) > 0 {
-			currentPercent := g.radiansToPercent(currentPositions[0])
-			positionDiff := currentPercent - g.closedPosition
-
-			// Check if we've reached the closed position (within tolerance)
-			if positionDiff <= positionTolerance {
-				g.logger.Debugf("Gripper reached fully closed position (%.1f%%) without high load - nothing grabbed", currentPercent)
-				return false, nil
-			}
-		}
-
-		// Wait before next poll
-		time.Sleep(pollInterval)
+	// Read final position to check if we grabbed something
+	currentPositions, err := g.controller.GetJointPositionsForServos(ctx, []int{g.servoID})
+	if err != nil {
+		g.logger.Warnf("Failed to read final gripper position: %v", err)
+		return true, nil // Assume grabbed if we can't read position
 	}
+
+	if len(currentPositions) == 0 {
+		g.logger.Warn("No position data received from gripper")
+		return true, nil
+	}
+
+	currentPercent := g.radiansToPercent(currentPositions[0])
+	positionDiff := currentPercent - g.closedPosition
+
+	// If stopped more than 10% before fully closed, assume we grabbed something
+	grabbed := positionDiff > 10.0
+
+	// move gripper to current position to avoid overload
+	g.controller.MoveServosToPositions(ctx, []int{g.servoID}, []float64{currentPositions[0]}, speed, acc)
+
+	if grabbed {
+		g.logger.Debugf("Gripper grabbed object at %.1f%% (%.1f%% from fully closed)", currentPercent, positionDiff)
+	} else {
+		g.logger.Debugf("Gripper closed to %.1f%%, may not have grabbed anything", currentPercent)
+	}
+
+	return grabbed, nil
 }
 
 func (g *so101Gripper) Stop(ctx context.Context, extra map[string]interface{}) error {
@@ -509,8 +443,7 @@ func (g *so101Gripper) DoCommand(ctx context.Context, cmd map[string]interface{}
 			return nil, fmt.Errorf("failed to read servo load: %w", err)
 		}
 		return map[string]interface{}{
-			"load":      load,
-			"threshold": g.gripLoadThreshold,
+			"load": load,
 		}, nil
 
 	default:

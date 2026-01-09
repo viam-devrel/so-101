@@ -204,6 +204,13 @@ func (r *ControllerRegistry) createNewController(portPath string, config *SoArm1
 		logger:           config.Logger,
 		calibration:      finalCalibration,
 	}
+
+	// Configure servos with optimal settings
+	configCtx := context.Background()
+	if err := configureServosOptimal(configCtx, entry.controller, config.Logger); err != nil {
+		config.Logger.Warnf("Failed to configure servos optimally: %v (continuing with defaults)", err)
+	}
+
 	// Update entry calibration after controller creation for consistency
 	entry.calibration = finalCalibration
 	entry.lastError = nil
