@@ -159,7 +159,7 @@ func newSO101Gripper(ctx context.Context, deps resource.Dependencies, conf resou
 	// Validate and set default motion parameters
 	speedPercentPerSec := cfg.SpeedPercentPerSec
 	if speedPercentPerSec == 0 {
-		speedPercentPerSec = 30 // Default speed for gripper (30% per second)
+		speedPercentPerSec = 100 // Default speed for gripper (30% per second)
 	}
 	if speedPercentPerSec < 0 || speedPercentPerSec > 100 {
 		return nil, fmt.Errorf("speed_percent_per_sec must be between 0 and 100 percent/second, got %.1f", speedPercentPerSec)
