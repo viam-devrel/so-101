@@ -111,6 +111,72 @@ type so101 struct {
 	initCtx    context.Context // Context for initialization operations
 }
 
+// moveOptions holds movement parameters for arm operations
+type moveOptions struct {
+	speedDegsPerSec        float64
+	accelerationDegsPerSec float64
+}
+
+// buildMoveOptions constructs moveOptions from defaults, MoveOptions, and extra params
+// 1. Start with configured defaults
+// 2. Override with arm.MoveOptions if provided
+// 3. Override with extra map parameters if provided
+func (s *so101) buildMoveOptions(options *arm.MoveOptions, extra map[string]interface{}) moveOptions {
+	s.mu.RLock()
+	speed := float64(s.defaultSpeed)
+	acc := float64(s.defaultAcc)
+	s.mu.RUnlock()
+
+	// Apply arm.MoveOptions if provided
+	if options != nil {
+		if options.MaxVelRads != 0 {
+			// Convert radians/sec to degrees/sec
+			speed = options.MaxVelRads * 180.0 / math.Pi
+		}
+		if options.MaxAccRads != 0 {
+			// Convert radians/sec² to degrees/sec²
+			acc = options.MaxAccRads * 180.0 / math.Pi
+		}
+	}
+
+	// Apply extra map parameters (highest priority)
+	// Speed in radians/sec
+	if speedR, ok := extra["speed_r"].(float64); ok && speedR > 0 {
+		speed = speedR * 180.0 / math.Pi
+	}
+	// Speed in degrees/sec
+	if speedD, ok := extra["speed_d"].(float64); ok && speedD > 0 {
+		speed = speedD
+	}
+	// Acceleration in radians/sec²
+	if accR, ok := extra["acceleration_r"].(float64); ok && accR > 0 {
+		acc = accR * 180.0 / math.Pi
+	}
+	// Acceleration in degrees/sec²
+	if accD, ok := extra["acceleration_d"].(float64); ok && accD > 0 {
+		acc = accD
+	}
+
+	// Clamp to valid ranges
+	if speed < 3 {
+		speed = 3
+	}
+	if speed > 180 {
+		speed = 180
+	}
+	if acc < 10 {
+		acc = 10
+	}
+	if acc > 500 {
+		acc = 500
+	}
+
+	return moveOptions{
+		speedDegsPerSec:        speed,
+		accelerationDegsPerSec: acc,
+	}
+}
+
 func makeSO101ModelFrame() (referenceframe.Model, error) {
 	m := &referenceframe.ModelConfigJSON{
 		OriginalFile: &referenceframe.ModelFile{
@@ -325,6 +391,9 @@ func (s *so101) MoveToJointPositions(ctx context.Context, positions []referencef
 		return fmt.Errorf("expected %d joint positions for SO-101 arm, got %d", len(s.armServoIDs), len(positions))
 	}
 
+	// Build move options from defaults and extra parameters
+	opts := s.buildMoveOptions(nil, extra)
+
 	values := make([]float64, len(positions))
 	copy(values, positions)
 
@@ -344,7 +413,10 @@ func (s *so101) MoveToJointPositions(ctx context.Context, positions []referencef
 		clampedPositions[i] = math.Max(min, math.Min(max, pos))
 	}
 
-	if err := s.controller.MoveServosToPositions(ctx, s.armServoIDs, clampedPositions, 0, 0); err != nil {
+	// Pass speed and acceleration to controller (currently 0, 0 means use servo defaults)
+	speed := int(opts.speedDegsPerSec)
+	acc := int(opts.accelerationDegsPerSec)
+	if err := s.controller.MoveServosToPositions(ctx, s.armServoIDs, clampedPositions, speed, acc); err != nil {
 		return fmt.Errorf("failed to move SO-101 arm: %w", err)
 	}
 
@@ -364,7 +436,8 @@ func (s *so101) MoveToJointPositions(ctx context.Context, positions []referencef
 		}
 	}
 
-	speedRadPerSec := float64(s.defaultSpeed) * math.Pi / 180.0
+	// Use the configured speed from moveOptions
+	speedRadPerSec := opts.speedDegsPerSec * math.Pi / 180.0
 	moveTimeSeconds := maxMovement / speedRadPerSec
 	if moveTimeSeconds < 0.1 {
 		moveTimeSeconds = 0.1 // Minimum move time
@@ -379,8 +452,20 @@ func (s *so101) MoveToJointPositions(ctx context.Context, positions []referencef
 }
 
 func (s *so101) MoveThroughJointPositions(ctx context.Context, positions [][]referenceframe.Input, options *arm.MoveOptions, extra map[string]interface{}) error {
+	// Build move options once for all positions
+	opts := s.buildMoveOptions(options, extra)
+
+	// Create a new extra map that includes the speed/acc from moveOptions
+	// This ensures MoveToJointPositions uses the same options
+	mergedExtra := make(map[string]interface{})
+	for k, v := range extra {
+		mergedExtra[k] = v
+	}
+	mergedExtra["speed_d"] = opts.speedDegsPerSec
+	mergedExtra["acceleration_d"] = opts.accelerationDegsPerSec
+
 	for _, jointPositions := range positions {
-		if err := s.MoveToJointPositions(ctx, jointPositions, extra); err != nil {
+		if err := s.MoveToJointPositions(ctx, jointPositions, mergedExtra); err != nil {
 			return err
 		}
 

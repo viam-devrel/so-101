@@ -57,6 +57,44 @@ The following attributes are available for the arm component:
 | `baudrate`          | int      | Optional  | The baud rate for serial communication. Default is `1000000`.                                |
 | `servo_ids`         | []int    | Optional  | List of servo IDs for the arm joints. Default is `[1, 2, 3, 4, 5]`.                         |
 | `timeout`           | duration | Optional  | Communication timeout. Default is system default.                                            |
+| `speed_degs_per_sec` | float   | Optional  | Default movement speed in degrees per second. Range: 3-180. Default is `50`.                 |
+| `acceleration_degs_per_sec_per_sec` | float | Optional | Default acceleration in degrees per second². Range: 10-500. Default is `100`. |
+
+### Speed and Acceleration
+
+Movement speed and acceleration can be configured at three levels (in order of precedence):
+
+1. **Per-call parameters** via `extra` map in `MoveToJointPositions` or `MoveThroughJointPositions`:
+   - `speed_d`: Speed in degrees/second
+   - `speed_r`: Speed in radians/second
+   - `acceleration_d`: Acceleration in degrees/second²
+   - `acceleration_r`: Acceleration in radians/second²
+
+2. **MoveOptions** (for `MoveThroughJointPositions`):
+   - `MaxVelRads`: Maximum velocity in radians/second
+   - `MaxAccRads`: Maximum acceleration in radians/second²
+
+3. **Component configuration** via attributes above
+
+Example using extra parameters:
+```python
+arm.move_to_joint_positions(positions, extra={"speed_d": 30, "acceleration_d": 50})
+```
+
+You can also dynamically adjust defaults using DoCommand:
+```json
+{
+    "set_speed": 60,
+    "set_acceleration": 120
+}
+```
+
+To query current motion parameters:
+```json
+{
+    "get_motion_params": true
+}
+```
 
 **If you're building and setting up an arm for the first time, please see the [calibration sensor component](#model-devrelso101calibration) for setup instructions.**
 
@@ -221,6 +259,38 @@ Follow the [end-to-end tutorial](https://codelabs.viam.com/guide/so101/index.htm
 | `baudrate`         | int      | Optional  | The baud rate for serial communication. Default is `1000000`.                                |
 | `servo_id`         | int      | Optional  | The servo ID for the gripper. Default is `6`.                                                |
 | `timeout`          | duration | Optional  | Communication timeout. Default is system default.                                            |
+| `speed_percent_per_sec` | float | Optional | Default gripper speed in percent per second. Range: 0-100. Default is `100`.               |
+| `acceleration_percent_per_sec_per_sec` | float | Optional | Default acceleration in percent per second². Range: 10-200. Default is `50`. |
+
+### Speed and Acceleration
+
+The gripper uses percentage-based speed and acceleration (0-100% of full travel). Parameters can be set via:
+
+1. **Per-call parameters** via `extra` map in `Open` or `Grab`:
+   - `speed_percent`: Speed in percent/second
+   - `acceleration_percent`: Acceleration in percent/second²
+
+2. **Component configuration** via attributes above
+
+Example using extra parameters:
+```python
+gripper.open(extra={"speed_percent": 50, "acceleration_percent": 30})
+```
+
+Use DoCommand to dynamically adjust or query motion parameters:
+```json
+{
+    "command": "set_motion_params",
+    "speed": 50,
+    "acceleration": 30
+}
+```
+
+```json
+{
+    "command": "get_motion_params"
+}
+```
 
 ### Communication
 

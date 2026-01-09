@@ -53,7 +53,21 @@ func (s *SafeSoArmController) MoveToJointPositions(ctx context.Context, jointAng
 		rawPositions[servoID] = raw
 	}
 
-	// Use ServoGroup to write positions
+	// Use SetPositionsWithSpeed when speed is specified, otherwise use default SetPositions
+	// Note: acceleration parameter not yet supported by feetech-servo library
+	if speed > 0 {
+		// Convert speed from degrees/sec to steps/sec for each servo
+		// Speed must be in steps per second as per feetech-servo documentation
+		speeds := make(map[int]int, len(rawPositions))
+		for servoID := range rawPositions {
+			cal := s.calibration.GetMotorCalibrationByID(servoID)
+			// Calculate steps per degree based on servo's calibrated range
+			// Arm servos: steps for 360 degree range
+			stepsPerDegree := float64(cal.RangeMax-cal.RangeMin) / 360.0
+			speeds[servoID] = int(float64(speed) * stepsPerDegree)
+		}
+		return s.group.SetPositionsWithSpeed(ctx, rawPositions, speeds)
+	}
 	return s.group.SetPositions(ctx, rawPositions)
 }
 
@@ -87,7 +101,28 @@ func (s *SafeSoArmController) MoveServosToPositions(ctx context.Context, servoID
 		rawPositions[servoID] = raw
 	}
 
-	// Use appropriate ServoGroup
+	// Use SetPositionsWithSpeed when speed is specified, otherwise use default SetPositions
+	// Note: acceleration parameter not yet supported by feetech-servo library
+	if speed > 0 {
+		// Convert speed from degrees/sec to steps/sec for each servo
+		// Speed must be in steps per second as per feetech-servo documentation
+		speeds := make(map[int]int, len(rawPositions))
+		for servoID := range rawPositions {
+			cal := s.calibration.GetMotorCalibrationByID(servoID)
+			// Calculate steps per degree based on servo's calibrated range
+			// For gripper (percentage-based), use direct conversion
+			var stepsPerDegree float64
+			if isGripperServo(servoID) {
+				// Gripper: ~4095 steps for 100% range
+				stepsPerDegree = float64(cal.RangeMax-cal.RangeMin) / 100.0
+			} else {
+				// Arm servos: steps for 360 degree range
+				stepsPerDegree = float64(cal.RangeMax-cal.RangeMin) / 360.0
+			}
+			speeds[servoID] = int(float64(speed) * stepsPerDegree)
+		}
+		return s.group.SetPositionsWithSpeed(ctx, rawPositions, speeds)
+	}
 	return s.group.SetPositions(ctx, rawPositions)
 }
 
@@ -247,6 +282,19 @@ func (s *SafeSoArmController) GetCalibration() SO101FullCalibration {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.calibration
+}
+
+// GetServoLoad reads the current load from a specific servo
+func (s *SafeSoArmController) GetServoLoad(ctx context.Context, servoID int) (int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	servo, exists := s.calibratedServos[servoID]
+	if !exists {
+		return 0, fmt.Errorf("servo %d not found", servoID)
+	}
+
+	return servo.Load(ctx)
 }
 
 // getCalibrationForServo returns the calibration for a specific servo ID
