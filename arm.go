@@ -589,7 +589,16 @@ func (s *so101) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[
 }
 
 func (s *so101) IsMoving(ctx context.Context) (bool, error) {
-	return s.isMoving.Load(), nil
+	for _, servoID := range s.armServoIDs {
+		moving, err := s.controller.IsServoMoving(ctx, servoID)
+		if err != nil {
+			return false, err
+		}
+		if moving {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (s *so101) Geometries(ctx context.Context, extra map[string]interface{}) ([]spatialmath.Geometry, error) {
@@ -653,6 +662,18 @@ func (s *so101) doServoInitialization() error {
 		return fmt.Errorf("servo ping failed: %w", err)
 	}
 	s.logger.Debug("All servos ping successful")
+
+	// Disable torque before configuring motors (required for EEPROM writes)
+	s.logger.Debug("Disabling torque for motor configuration...")
+	if err := s.controller.SetTorqueEnable(ctx, false); err != nil {
+		return fmt.Errorf("failed to disable torque for configuration: %w", err)
+	}
+
+	// Configure motor registers (PID gains, operating mode, gripper protection)
+	s.logger.Debug("Configuring motor registers...")
+	if err := s.controller.ConfigureMotors(ctx); err != nil {
+		s.logger.Warnf("Motor configuration had errors: %v", err)
+	}
 
 	// Enable torque for all servos (controller manages all 6)
 	s.logger.Debug("Enabling torque for all servos...")
