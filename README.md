@@ -12,15 +12,15 @@ Follow the [end-to-end tutorial](https://codelabs.viam.com/guide/so101/index.htm
 
 ## Model devrel:so101:discovery
 
-Automatic discovery service that detects connected arms and suggests component configurations for the calibration sensor, arm and gripper. It will also look for existing calibration files. 
+Automatic discovery service that detects connected arms and suggests component configurations for the calibration sensor, arm and gripper. It will also look for existing calibration files.
+
+**IF YOU ARE BUILDING THIS ARM FOR THE FIRST TIME: add the calibration sensor and follow the setup instructions**
 
 **Usage:**
 
 - save your robot configuration with this service
 - open the Test panel on service configuration card or view the Control tab
 - click "+ add component" for the relevant component you'd like to set up: arm, gripper, or calibration sensor
-
-_Add the calibration sensor if you're building the arm from a kit._
 
 ### Troubleshooting
 
@@ -50,13 +50,13 @@ Follow the [end-to-end tutorial](https://codelabs.viam.com/guide/so101/index.htm
 
 The following attributes are available for the arm component:
 
-| Name                | Type     | Inclusion | Description                                                                                    |
-|---------------------|----------|-----------|------------------------------------------------------------------------------------------------|
-| `port`              | string   | **Required**  | The serial port for communication with the SO-101 (see Communication section below).   |
-| `calibration_file`  | string   | Optional  | Path to the calibration file. If not provided, the module will attempt to read calibration from servo registers. If servo reads fail, uses default calibration values. |
-| `baudrate`          | int      | Optional  | The baud rate for serial communication. Default is `1000000`.                                |
-| `servo_ids`         | []int    | Optional  | List of servo IDs for the arm joints. Default is `[1, 2, 3, 4, 5]`.                         |
-| `timeout`           | duration | Optional  | Communication timeout. Default is system default.                                            |
+| Name               | Type     | Inclusion    | Description                                                                                                                                                            |
+| ------------------ | -------- | ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `port`             | string   | **Required** | The serial port for communication with the SO-101 (see Communication section below).                                                                                   |
+| `calibration_file` | string   | Optional     | Path to the calibration file. If not provided, the module will attempt to read calibration from servo registers. If servo reads fail, uses default calibration values. |
+| `baudrate`         | int      | Optional     | The baud rate for serial communication. Default is `1000000`.                                                                                                          |
+| `servo_ids`        | []int    | Optional     | List of servo IDs for the arm joints. Default is `[1, 2, 3, 4, 5]`.                                                                                                    |
+| `timeout`          | duration | Optional     | Communication timeout. Default is system default.                                                                                                                      |
 
 **If you're building and setting up an arm for the first time, please see the [calibration sensor component](#model-devrelso101calibration) for setup instructions.**
 
@@ -81,6 +81,7 @@ The SO-101 uses serial communication over USB with Feetech STS3215 servos. The m
 You can use the included [discovery service](#model-devrelso101discovery) or find the available serial port options from your machine's command line.
 
 On MacOS, look for `usbmodem` or `usbserial` in the name:
+
 ```
 you@machine: ls /dev/tty.*
 /dev/tty.Bluetooth-Incoming-Port
@@ -94,6 +95,7 @@ you@machine: ls /dev/cu.*
 ```
 
 On Linux, look for `ACM` or `USB` in the name:
+
 ```
 you@machine: ls /dev/tty*
 /dev/ttyACM0
@@ -101,6 +103,7 @@ you@machine: ls /dev/tty*
 ```
 
 On Windows, look for `COM` in the name:
+
 ```
 you@machine: mode
 COM0
@@ -112,85 +115,94 @@ COM1
 The module provides several custom commands accessible through the `DoCommand` interface:
 
 #### Set Torque Control
+
 Enable or disable joint torque:
 
 ```json
 {
-    "command": "set_torque",
-    "enable": true
+  "command": "set_torque",
+  "enable": true
 }
 ```
 
 #### Ping Servos
+
 Test communication with all servos:
 
 ```json
 {
-    "command": "ping"
+  "command": "ping"
 }
 ```
 
 #### Controller Status
+
 Check the shared controller status for debugging:
 
 ```json
 {
-    "command": "controller_status"
+  "command": "controller_status"
 }
 ```
 
 #### Connection Diagnostics
+
 Run comprehensive connection diagnostics:
 
 ```json
 {
-    "command": "diagnose"
+  "command": "diagnose"
 }
 ```
 
 #### Verify Configuration
+
 Verify servo configuration and communication:
 
 ```json
 {
-    "command": "verify_config"
+  "command": "verify_config"
 }
 ```
 
 #### Reinitialize Servos
+
 Reinitialize servo communication with retry attempts:
 
 ```json
 {
-    "command": "reinitialize",
-    "retries": 3
+  "command": "reinitialize",
+  "retries": 3
 }
 ```
 
 #### Test Servo Communication
+
 Test communication and read positions from arm servos:
 
 ```json
 {
-    "command": "test_servo_communication"
+  "command": "test_servo_communication"
 }
 ```
 
 #### Reload Calibration
+
 Reload calibration from file:
 
 ```json
 {
-    "command": "reload_calibration"
+  "command": "reload_calibration"
 }
 ```
 
 #### Get Calibration
+
 Retrieve current calibration data:
 
 ```json
 {
-    "command": "get_calibration"
+  "command": "get_calibration"
 }
 ```
 
@@ -214,19 +226,20 @@ Follow the [end-to-end tutorial](https://codelabs.viam.com/guide/so101/index.htm
 
 ### Attributes
 
-| Name               | Type     | Inclusion | Description                                                                                    |
-|--------------------|----------|-----------|------------------------------------------------------------------------------------------------|
-| `port`             | string   | Required  | The serial port for communication with the SO-101.                                           |
-| `calibration_file` | string   | Optional  | Path to the calibration file (shared with arm component).                                    |
-| `baudrate`         | int      | Optional  | The baud rate for serial communication. Default is `1000000`.                                |
-| `servo_id`         | int      | Optional  | The servo ID for the gripper. Default is `6`.                                                |
-| `timeout`          | duration | Optional  | Communication timeout. Default is system default.                                            |
+| Name               | Type     | Inclusion | Description                                                   |
+| ------------------ | -------- | --------- | ------------------------------------------------------------- |
+| `port`             | string   | Required  | The serial port for communication with the SO-101.            |
+| `calibration_file` | string   | Optional  | Path to the calibration file (shared with arm component).     |
+| `baudrate`         | int      | Optional  | The baud rate for serial communication. Default is `1000000`. |
+| `servo_id`         | int      | Optional  | The servo ID for the gripper. Default is `6`.                 |
+| `timeout`          | duration | Optional  | Communication timeout. Default is system default.             |
 
 ### Communication
 
 You can use the included [discovery service](#model-devrelso101discovery) or find the available serial port options from your machine's command line.
 
 On MacOS, look for `usbmodem` or `usbserial` in the name:
+
 ```
 you@machine: ls /dev/tty.*
 /dev/tty.Bluetooth-Incoming-Port
@@ -240,6 +253,7 @@ you@machine: ls /dev/cu.*
 ```
 
 On Linux, look for `ACM` or `USB` in the name:
+
 ```
 you@machine: ls /dev/tty*
 /dev/ttyACM0
@@ -247,6 +261,7 @@ you@machine: ls /dev/tty*
 ```
 
 On Windows, look for `COM` in the name:
+
 ```
 you@machine: mode
 COM0
@@ -258,30 +273,33 @@ COM1
 The gripper component provides several custom commands:
 
 #### Get Gripper Position
+
 Get the current gripper position:
 
 ```json
 {
-    "command": "get_position"
+  "command": "get_position"
 }
 ```
 
 #### Set Gripper Position
+
 Set the gripper to a specific servo position:
 
 ```json
 {
-    "command": "set_position",
-    "servo_position": 2000
+  "command": "set_position",
+  "servo_position": 2000
 }
 ```
 
 #### Controller Status
+
 Check the shared controller status:
 
 ```json
 {
-    "command": "controller_status"
+  "command": "controller_status"
 }
 ```
 
@@ -291,35 +309,36 @@ When assembling the SO-101 arm from a kit, it requires calibration to map servo 
 
 The SO-101 Calibration Sensor provides a calibration workflow integrated into Viam's component system. It guides you through the calibration process using DoCommand calls and provides status updates through sensor readings.
 
-**Use the `devrel:so101:discovery` service to help with configuring this component automatically.**
+**IF YOU ARE SETTING UP THIS ARM FOR THE FIRST TIME: Follow the [end-to-end tutorial](https://codelabs.viam.com/guide/so101/index.html?index=..%2F..index#0) to learn how to set up the arm for the first time.**
 
 **See the [Setup Application](https://so101-setup_devrel.viamapplications.com) for a visual walkthrough experience that uses this component.**
 
-Follow the [end-to-end tutorial](https://codelabs.viam.com/guide/so101/index.html?index=..%2F..index#0) to learn how to set up the arm for the first time.
+_If you have already calibrated the servos on this arm, use the `devrel:so101:discovery` service to help with configuring this component automatically._
 
 ### Configuration
 
 ```json
 {
-    "port": "/dev/ttyUSB0",
-    "calibration_file": "my_awesome_arm.json",
+  "port": "/dev/ttyUSB0",
+  "calibration_file": "my_awesome_arm.json"
 }
 ```
 
 #### Attributes
 
-| Name | Type | Required | Description |
-|------|------|----------|-------------|
-| `port` | string | **Required** | Serial port for servo communication (see Communication section below) |
-| `calibration_file` | string | Optional | Path where calibration will be saved. If relative path, uses `$VIAM_MODULE_DATA` directory. Default: `"so101_calibration.json"` |
-| `baudrate` | int | Optional | Serial communication speed. Default: `1000000` |
-| `timeout` | duration | Optional | Communication timeout. Default: `"5s"` |
+| Name               | Type     | Required     | Description                                                                                                                     |
+| ------------------ | -------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------- |
+| `port`             | string   | **Required** | Serial port for servo communication (see Communication section below)                                                           |
+| `calibration_file` | string   | Optional     | Path where calibration will be saved. If relative path, uses `$VIAM_MODULE_DATA` directory. Default: `"so101_calibration.json"` |
+| `baudrate`         | int      | Optional     | Serial communication speed. Default: `1000000`                                                                                  |
+| `timeout`          | duration | Optional     | Communication timeout. Default: `"5s"`                                                                                          |
 
 ### Communication
 
 You can use the included [discovery service](#model-devrelso101discovery) or find the available serial port options from your machine's command line.
 
 On MacOS, look for `usbmodem` or `usbserial` in the name:
+
 ```
 you@machine: ls /dev/tty.*
 /dev/tty.Bluetooth-Incoming-Port
@@ -333,6 +352,7 @@ you@machine: ls /dev/cu.*
 ```
 
 On Linux, look for `ACM` or `USB` in the name:
+
 ```
 you@machine: ls /dev/tty*
 /dev/ttyACM0
@@ -340,6 +360,7 @@ you@machine: ls /dev/tty*
 ```
 
 On Windows, look for `COM` in the name:
+
 ```
 you@machine: mode
 COM0
@@ -377,39 +398,39 @@ Example output:
 
 ```json
 {
-    "command": "command_name"
+  "command": "command_name"
 }
 ```
 
 #### Workflow Commands
 
-| Command | Description | Required State |
-|---------|-------------|----------------|
-| `start` | Begin calibration workflow | `idle`, `completed`, `error` |
-| `set_homing` | Set homing offsets and write to servo registers | `started` |
-| `start_range_recording` | Begin recording servo ranges | `homing_position` |
-| `stop_range_recording` | Complete range recording | `range_recording` |
-| `save_calibration` | Write limits to servos and save file | `completed` |
-| `abort` | Cancel calibration | Any |
-| `reset` | Reset to initial state | `error` |
+| Command                 | Description                                     | Required State               |
+| ----------------------- | ----------------------------------------------- | ---------------------------- |
+| `start`                 | Begin calibration workflow                      | `idle`, `completed`, `error` |
+| `set_homing`            | Set homing offsets and write to servo registers | `started`                    |
+| `start_range_recording` | Begin recording servo ranges                    | `homing_position`            |
+| `stop_range_recording`  | Complete range recording                        | `range_recording`            |
+| `save_calibration`      | Write limits to servos and save file            | `completed`                  |
+| `abort`                 | Cancel calibration                              | Any                          |
+| `reset`                 | Reset to initial state                          | `error`                      |
 
 #### Utility Commands
 
-| Command | Description |
-|---------|-------------|
+| Command                 | Description                  |
+| ----------------------- | ---------------------------- |
 | `get_current_positions` | Read current servo positions |
 
 #### Motor Setup Commands
 
 The calibration sensor also provides motor setup commands for initial SO-101 servo configuration. These commands implement the systematic motor setup process described in `MOTOR_SETUP.md` and are separate from the calibration workflow.
 
-| Command | Description | Parameters |
-|---------|-------------|------------|
-| `motor_setup_discover` | Discover a single motor connected to the bus | `motor_name` (string): Motor name (e.g., "gripper", "wrist_roll") |
-| `motor_setup_assign_id` | Assign target ID and baudrate to discovered motor | `motor_name` (string), `current_id` (int), `target_id` (int), `current_baudrate` (int) |
-| `motor_setup_verify` | Verify all SO-101 motors are properly configured | None |
-| `motor_setup_scan_bus` | Scan the entire bus for connected servos | None |
-| `motor_setup_reset_status` | Reset motor setup status | None |
+| Command                    | Description                                       | Parameters                                                                             |
+| -------------------------- | ------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| `motor_setup_discover`     | Discover a single motor connected to the bus      | `motor_name` (string): Motor name (e.g., "gripper", "wrist_roll")                      |
+| `motor_setup_assign_id`    | Assign target ID and baudrate to discovered motor | `motor_name` (string), `current_id` (int), `target_id` (int), `current_baudrate` (int) |
+| `motor_setup_verify`       | Verify all SO-101 motors are properly configured  | None                                                                                   |
+| `motor_setup_scan_bus`     | Scan the entire bus for connected servos          | None                                                                                   |
+| `motor_setup_reset_status` | Reset motor setup status                          | None                                                                                   |
 
 #### Motor Setup Workflow
 
@@ -441,7 +462,7 @@ The calibration sensor operates as a state machine:
 
 - **`idle`**: Ready to start calibration
 - **`started`**: Torque disabled, ready for homing position
-- **`homing_position`**: Homing set, ready for range recording  
+- **`homing_position`**: Homing set, ready for range recording
 - **`range_recording`**: Recording min/max positions
 - **`completed`**: Calibration data ready to save
 - **`error`**: Error occurred, use reset command
@@ -462,7 +483,7 @@ The sensor saves calibration in the standard format:
   },
   "shoulder_lift": {
     "id": 2,
-    "drive_mode": 0, 
+    "drive_mode": 0,
     "homing_offset": 157,
     "range_min": 612,
     "range_max": 3401,
@@ -484,7 +505,7 @@ The sensor saves calibration in the standard format:
 #### Common Issues
 
 - **Range recording not working**: Ensure you call `start_range_recording` and manually move joints
-- **Invalid ranges**: Move joints through their complete range of motion  
+- **Invalid ranges**: Move joints through their complete range of motion
 - **Servo communication errors**: Check port, baudrate, and servo connections
 - **Permission denied**: Ensure proper access to serial port (`sudo chmod 666 /dev/ttyUSB0`)
 
@@ -520,6 +541,7 @@ The sensor saves calibration in the standard format:
 ## Safety Notes
 
 > [!WARNING]
+>
 > - Always ensure the arm's workspace is clear before operation
 > - The arm can move quickly - maintain safe distances during operation
 > - Use the torque control features to enable safe manual positioning when needed
@@ -538,21 +560,27 @@ _Add an extra `/` to the end of the URL if you see a "404 Not Found" after authe
 The setup application provides three main workflows to guide you through different aspects of SO-101 configuration:
 
 #### Full Setup (Recommended)
+
 Complete setup workflow from unboxed hardware to fully configured and calibrated SO-101 arm. This comprehensive process includes:
+
 - Hardware connection verification
 - Motor ID configuration for all servos (1-6)
 - Joint calibration with homing positions and range limits
 - Final system testing and validation
 
 #### Motor Setup Only
+
 Configure servo IDs and communication parameters for SO-101 motors. Use this workflow when you need to:
+
 - Set up servos with proper IDs (1-6) from factory defaults
 - Configure communication baudrate (1,000,000 bps)
 - Verify motor connectivity and response
 - Resolve servo ID conflicts
 
 #### Calibration Only
+
 Calibrate joint ranges and homing positions for arms with already configured motors. This workflow covers:
+
 - Setting homing positions for all joints
 - Recording joint range limits through guided manual movement
 - Saving calibration data in the proper format
