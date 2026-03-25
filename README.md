@@ -8,7 +8,14 @@ It can be used to control either the leader or follower arm, as well as configur
 
 This SO-101 module is particularly useful in applications that require the SO-101 arm to be operated in conjunction with other resources (such as cameras, sensors, actuators, CV) offered by the [Viam Platform](https://www.viam.com/) and/or separately through your own code.
 
-Follow the [end-to-end tutorial](https://codelabs.viam.com/guide/so101/index.html?index=..%2F..index#0) to learn how to set up the arm for the first time.
+## First Time Arm Setup
+
+**If you are setting up the arm for the first time:**
+You'll need to follow some prerequisite steps before using this module.
+1. [Install LeRobot software](https://huggingface.co/docs/lerobot/installation)
+2. [Configure the motors](https://huggingface.co/docs/lerobot/so101#configure-the-motors)
+3. [Build the arm](https://huggingface.co/docs/lerobot/so101#clean-parts)
+4. [Calibrate the arm](https://huggingface.co/docs/lerobot/so101#calibrate)
 
 ## Model devrel:so101:discovery
 
@@ -36,7 +43,7 @@ The arm component controls the first 5 joints of the SO-101: shoulder_pan, shoul
 
 **Use the `devrel:so101:discovery` service to help with configuring this component automatically.**
 
-Follow the [end-to-end tutorial](https://codelabs.viam.com/guide/so101/index.html?index=..%2F..index#0) to learn how to set up the arm for the first time.
+Follow the [arm setup steps](#first-time-arm-setup) to learn how to set up the arm for the first time.
 
 ### Configuration
 
@@ -212,7 +219,7 @@ The gripper component controls the 6th servo of the SO-101, which functions as a
 
 **Use the `devrel:so101:discovery` service to help with configuring this component automatically.**
 
-Follow the [end-to-end tutorial](https://codelabs.viam.com/guide/so101/index.html?index=..%2F..index#0) to learn how to set up the arm for the first time.
+Follow the [arm setup steps](#first-time-arm-setup) to learn how to set up the arm for the first time.
 
 ### Configuration
 
@@ -309,7 +316,7 @@ When assembling the SO-101 arm from a kit, it requires calibration to map servo 
 
 The SO-101 Calibration Sensor provides a calibration workflow integrated into Viam's component system. It guides you through the calibration process using DoCommand calls and provides status updates through sensor readings.
 
-**IF YOU ARE SETTING UP THIS ARM FOR THE FIRST TIME: Follow the [end-to-end tutorial](https://codelabs.viam.com/guide/so101/index.html?index=..%2F..index#0) to learn how to set up the arm for the first time.**
+**IF YOU ARE SETTING UP THIS ARM FOR THE FIRST TIME: Follow the [arm setup steps](#first-time-arm-setup) to learn how to set up the arm for the first time.**
 
 **See the [Setup Application](https://so101-setup_devrel.viamapplications.com) for a visual walkthrough experience that uses this component.**
 
