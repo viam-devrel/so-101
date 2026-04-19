@@ -303,12 +303,25 @@ func (s *so101) EndPosition(ctx context.Context, extra map[string]interface{}) (
 	return pose, nil
 }
 
+// MoveToPosition moves the arm's end-effector to the target pose.
+//
+// The SO-101 is a 5-DOF arm. Six-DOF pose targets (position + orientation) are only reachable
+// on a 5-dimensional submanifold of SE(3); most combinations of target position and target
+// orientation are unreachable, producing "zero IK solutions produced" errors. We therefore
+// default the planner's goal metric to "position_only" so the solver matches the target point
+// and accepts whatever orientation falls out. Callers who want different planner behavior may
+// override any key by passing their own value via extra.
 func (s *so101) MoveToPosition(ctx context.Context, pose spatialmath.Pose, extra map[string]interface{}) error {
+	planExtra := map[string]interface{}{"goal_metric_type": "position_only"}
+	for k, v := range extra {
+		planExtra[k] = v
+	}
 	_, err := s.motion.Move(
 		ctx,
 		motion.MoveReq{
 			ComponentName: s.Name().Name,
 			Destination:   referenceframe.NewPoseInFrame(fmt.Sprintf("%v_origin", s.Name().Name), pose),
+			Extra:         planExtra,
 		},
 	)
 	return err
