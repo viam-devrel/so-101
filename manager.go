@@ -249,6 +249,71 @@ func (s *SafeSoArmController) GetCalibration() SO101FullCalibration {
 	return s.calibration
 }
 
+// IsServoMoving checks if a specific servo is currently moving by querying the hardware
+func (s *SafeSoArmController) IsServoMoving(ctx context.Context, servoID int) (bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	cs, ok := s.calibratedServos[servoID]
+	if !ok {
+		return false, fmt.Errorf("servo %d not found", servoID)
+	}
+	return cs.servo.Moving(ctx)
+}
+
+// ConfigureMotors configures servo registers for optimal arm operation.
+// This mirrors the lerobot Python implementation's bus configuration.
+// Must be called with torque disabled.
+func (s *SafeSoArmController) ConfigureMotors(ctx context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	proto := s.bus.Protocol()
+
+	for servoID, cs := range s.calibratedServos {
+		// Set Operating_Mode to POSITION (0)
+		if err := cs.servo.WriteRegister(ctx, "operating_mode", []byte{0}); err != nil {
+			s.logger.Warnf("Failed to set operating_mode for servo %d: %v", servoID, err)
+		}
+
+		// Set P_Coefficient to 16 (lower value to avoid shakiness, default is 32)
+		if err := cs.servo.WriteRegister(ctx, "p_gain", []byte{16}); err != nil {
+			s.logger.Warnf("Failed to set p_gain for servo %d: %v", servoID, err)
+		}
+
+		// Set I_Coefficient to 0 (default)
+		if err := cs.servo.WriteRegister(ctx, "i_gain", []byte{0}); err != nil {
+			s.logger.Warnf("Failed to set i_gain for servo %d: %v", servoID, err)
+		}
+
+		// Set D_Coefficient to 32 (default)
+		if err := cs.servo.WriteRegister(ctx, "d_gain", []byte{32}); err != nil {
+			s.logger.Warnf("Failed to set d_gain for servo %d: %v", servoID, err)
+		}
+
+		// Gripper-specific settings (servo 6)
+		if isGripperServo(servoID) {
+			// Set Max_Torque_Limit to 500 (50% of max torque to avoid burnout)
+			if err := cs.servo.WriteRegister(ctx, "max_torque", proto.EncodeWord(500)); err != nil {
+				s.logger.Warnf("Failed to set max_torque for gripper: %v", err)
+			}
+
+			// Set Protection_Current to 250 (50% of max current to avoid burnout)
+			if err := cs.servo.WriteRegister(ctx, "protection_current", proto.EncodeWord(250)); err != nil {
+				s.logger.Warnf("Failed to set protection_current for gripper: %v", err)
+			}
+
+			// Set Overload_Torque to 25 (25% torque when overloaded)
+			if err := cs.servo.WriteRegister(ctx, "overload_torque", []byte{25}); err != nil {
+				s.logger.Warnf("Failed to set overload_torque for gripper: %v", err)
+			}
+		}
+	}
+
+	s.logger.Debug("Motor configuration complete")
+	return nil
+}
+
 // getCalibrationForServo returns the calibration for a specific servo ID
 func (s *SafeSoArmController) getCalibrationForServo(servoID int) *MotorCalibration {
 	s.mu.RLock()
