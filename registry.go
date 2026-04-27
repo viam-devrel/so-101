@@ -93,15 +93,10 @@ func (r *ControllerRegistry) getExistingController(entry *ControllerEntry, confi
 	}
 
 	atomic.AddInt64(&entry.refCount, 1)
-	r.trackCaller(entry.config.Port)
 
-	return &SafeSoArmController{
-		bus:              entry.controller.bus,
-		group:            entry.controller.group,
-		calibratedServos: entry.controller.calibratedServos,
-		logger:           config.Logger,
-		calibration:      entry.calibration,
-	}, nil
+	// Return the cached pointer so that all consumers observe close-state
+	// (and any future calibration updates) atomically.
+	return entry.controller, nil
 }
 
 func (r *ControllerRegistry) createNewController(portPath string, config *SoArm101Config, calibration SO101FullCalibration, fromFile bool) (*SafeSoArmController, error) {
@@ -211,19 +206,11 @@ func (r *ControllerRegistry) createNewController(portPath string, config *SoArm1
 
 	r.entries[portPath] = entry
 
-	r.trackCaller(portPath)
-
 	if config.Logger != nil {
 		config.Logger.Debugf("Created new feetech servo bus with %d servos for port %s", len(calibratedServos), portPath)
 	}
 
-	return &SafeSoArmController{
-		bus:              bus,
-		group:            group,
-		calibratedServos: calibratedServos,
-		logger:           config.Logger,
-		calibration:      finalCalibration,
-	}, nil
+	return entry.controller, nil
 }
 
 func (r *ControllerRegistry) ReleaseController(portPath string) {
@@ -240,9 +227,12 @@ func (r *ControllerRegistry) ReleaseController(portPath string) {
 
 	currentRefCount := atomic.AddInt64(&entry.refCount, -1)
 	if currentRefCount <= 0 {
-		if entry.controller != nil && entry.controller.bus != nil {
-			if err := entry.controller.bus.Close(); err != nil && entry.config != nil && entry.config.Logger != nil {
-				entry.config.Logger.Warnf("error closing shared controller for port %s: %v", portPath, err)
+		if entry.controller != nil {
+			entry.controller.closed.Store(true)
+			if entry.controller.bus != nil {
+				if err := entry.controller.bus.Close(); err != nil && entry.config != nil && entry.config.Logger != nil {
+					entry.config.Logger.Warnf("error closing shared controller for port %s: %v", portPath, err)
+				}
 			}
 		}
 
@@ -275,6 +265,7 @@ func (r *ControllerRegistry) ForceCloseController(portPath string) error {
 
 	var err error
 	if entry.controller != nil {
+		entry.controller.closed.Store(true)
 		err = entry.controller.bus.Close()
 		entry.controller = nil
 		entry.config = nil

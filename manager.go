@@ -36,6 +36,7 @@ type SafeSoArmController struct {
 }
 
 // checkClosed returns ErrControllerClosed if the controller has been released.
+// checkClosed is best-effort: callers must hold a registry refcount for the duration of any controller call. A concurrent ReleaseController can race the unlocked Load() with an in-flight method.
 func (s *SafeSoArmController) checkClosed() error {
 	if s.closed.Load() {
 		return ErrControllerClosed
@@ -223,6 +224,7 @@ func (s *SafeSoArmController) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	s.closed.Store(true)
 	if s.bus != nil {
 		return s.bus.Close()
 	}

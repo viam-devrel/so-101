@@ -56,3 +56,77 @@ func TestController_PostCloseReturnsSentinel(t *testing.T) {
 		})
 	}
 }
+
+// TestRegistry_SamePointerForSamePort verifies that two callers acquiring a
+// controller for the same port receive the *same* *SafeSoArmController, so
+// that close-state propagates correctly across all consumers.
+func TestRegistry_SamePointerForSamePort(t *testing.T) {
+	registry := NewControllerRegistry()
+	port := "/dev/test-port"
+	cfg := testConfig(port)
+
+	// Inject a pre-built entry so we don't need a real bus.
+	bus, _ := newMockBus(t)
+	ctrl := &SafeSoArmController{
+		bus:    bus,
+		logger: cfg.Logger,
+	}
+	registry.entries[port] = &ControllerEntry{
+		controller:  ctrl,
+		config:      cfg,
+		calibration: DefaultSO101FullCalibration,
+		refCount:    0,
+	}
+
+	first, err := registry.GetController(port, cfg, DefaultSO101FullCalibration, false)
+	if err != nil {
+		t.Fatalf("first GetController: %v", err)
+	}
+	second, err := registry.GetController(port, cfg, DefaultSO101FullCalibration, false)
+	if err != nil {
+		t.Fatalf("second GetController: %v", err)
+	}
+
+	if first != second {
+		t.Errorf("expected same pointer for same port; got %p and %p", first, second)
+	}
+	if first != ctrl {
+		t.Errorf("expected cached controller pointer to be returned")
+	}
+}
+
+// TestRegistry_ReleaseClosesAllConsumers verifies that ReleaseController
+// at refcount zero closes the bus and sets the closed flag on the shared
+// controller, so other holders observe ErrControllerClosed on next call.
+func TestRegistry_ReleaseClosesAllConsumers(t *testing.T) {
+	registry := NewControllerRegistry()
+	port := "/dev/test-port"
+	cfg := testConfig(port)
+
+	bus, _ := newMockBus(t)
+	ctrl := &SafeSoArmController{
+		bus:    bus,
+		logger: cfg.Logger,
+	}
+	registry.entries[port] = &ControllerEntry{
+		controller:  ctrl,
+		config:      cfg,
+		calibration: DefaultSO101FullCalibration,
+		refCount:    2, // simulate arm + gripper both holding
+	}
+
+	// First release: refcount drops to 1, controller stays alive.
+	registry.ReleaseController(port)
+	if ctrl.closed.Load() {
+		t.Fatalf("controller closed prematurely at refcount > 0")
+	}
+
+	// Second release: refcount drops to 0, controller closes.
+	registry.ReleaseController(port)
+	if !ctrl.closed.Load() {
+		t.Errorf("expected controller.closed=true after final release")
+	}
+	if err := ctrl.Ping(t.Context()); !errors.Is(err, ErrControllerClosed) {
+		t.Errorf("Ping after final release: expected ErrControllerClosed, got %v", err)
+	}
+}
