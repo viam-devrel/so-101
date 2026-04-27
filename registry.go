@@ -57,7 +57,13 @@ func (r *ControllerRegistry) getExistingController(entry *ControllerEntry, confi
 		if entry.lastError != nil {
 			return nil, fmt.Errorf("cached controller creation error: %w", entry.lastError)
 		}
-		return nil, fmt.Errorf("controller not available for port %s", entry.config.Port)
+		// entry.config may have been nil'd by a concurrent ReleaseController
+		// at refcount zero. Prefer the caller's config to avoid a nil deref.
+		port := config.Port
+		if entry.config != nil {
+			port = entry.config.Port
+		}
+		return nil, fmt.Errorf("controller not available for port %s", port)
 	}
 
 	if !configsEqual(entry.config, config) {
