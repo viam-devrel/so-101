@@ -1,6 +1,7 @@
 package so_arm
 
 import (
+	"io"
 	"sync"
 	"testing"
 	"time"
@@ -25,7 +26,11 @@ func (m *scriptedMockTransport) Read(p []byte) (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if len(m.responses) == 0 {
-		return 0, nil
+		// Match feetech.MockTransport semantics: returning io.EOF on an empty
+		// queue lets feetech.Bus.readRawBytesLocked fall into its 1ms-sleep
+		// retry path instead of busy-spinning under the bus mutex. Important
+		// for PR5's planned 100Hz calibration-sensor reader.
+		return 0, io.EOF
 	}
 	resp := m.responses[0]
 	n := copy(p, resp)
@@ -56,6 +61,9 @@ func (m *scriptedMockTransport) SetReadTimeout(timeout time.Duration) error {
 }
 
 func (m *scriptedMockTransport) Flush() error {
+	// No-op: tests that need to drop unconsumed responses should clear
+	// m.responses explicitly. Mirroring SerialTransport.Flush would risk
+	// silently swallowing scripted frames between operations.
 	return nil
 }
 
