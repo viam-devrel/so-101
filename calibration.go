@@ -108,10 +108,11 @@ func (cfg *SO101CalibrationSensorConfig) Validate(path string) ([]string, []stri
 type so101CalibrationSensor struct {
 	resource.AlwaysRebuild
 
-	name       resource.Name
-	logger     logging.Logger
-	cfg        *SO101CalibrationSensorConfig
-	controller *SafeSoArmController
+	name           resource.Name
+	logger         logging.Logger
+	cfg            *SO101CalibrationSensorConfig
+	controller     *SafeSoArmController
+	controllerPort string // port path used to acquire the shared controller
 
 	// Calibration state
 	mu               sync.RWMutex
@@ -205,6 +206,7 @@ func NewSO101CalibrationSensor(
 		logger:          logger,
 		cfg:             conf,
 		controller:      controller,
+		controllerPort:  controllerConfig.Port,
 		state:           StateIdle,
 		joints:          joints,
 		servoNames:      servoNames,
@@ -1230,7 +1232,7 @@ func (cs *so101CalibrationSensor) Close(ctx context.Context) error {
 	cs.recordingActive = false
 
 	if cs.controller != nil {
-		ReleaseSharedController()
+		globalRegistry.ReleaseController(cs.controllerPort)
 	}
 
 	return nil

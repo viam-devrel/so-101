@@ -2,6 +2,7 @@ package so_arm
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"sync"
@@ -11,6 +12,11 @@ import (
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/utils"
 )
+
+// ErrControllerClosed is returned by SafeSoArmController methods after the
+// underlying bus has been closed via the registry. Callers holding a stale
+// reference should treat this as a permanent failure for that controller.
+var ErrControllerClosed = errors.New("so101: controller is closed")
 
 // isGripperServo checks if a servo ID is the gripper (servo 6)
 func isGripperServo(servoID int) bool {
@@ -26,9 +32,22 @@ type SafeSoArmController struct {
 	logger           logging.Logger
 	calibration      SO101FullCalibration
 	mu               sync.RWMutex
+	closed           atomic.Bool
+}
+
+// checkClosed returns ErrControllerClosed if the controller has been released.
+// checkClosed is best-effort: callers must hold a registry refcount for the duration of any controller call. A concurrent ReleaseController can race the unlocked Load() with an in-flight method.
+func (s *SafeSoArmController) checkClosed() error {
+	if s.closed.Load() {
+		return ErrControllerClosed
+	}
+	return nil
 }
 
 func (s *SafeSoArmController) MoveToJointPositions(ctx context.Context, jointAngles []float64, speed, acc int) error {
+	if err := s.checkClosed(); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -58,6 +77,9 @@ func (s *SafeSoArmController) MoveToJointPositions(ctx context.Context, jointAng
 }
 
 func (s *SafeSoArmController) MoveServosToPositions(ctx context.Context, servoIDs []int, jointAngles []float64, speed, acc int) error {
+	if err := s.checkClosed(); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -92,6 +114,9 @@ func (s *SafeSoArmController) MoveServosToPositions(ctx context.Context, servoID
 }
 
 func (s *SafeSoArmController) GetJointPositions(ctx context.Context) ([]float64, error) {
+	if err := s.checkClosed(); err != nil {
+		return nil, err
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -130,6 +155,9 @@ func (s *SafeSoArmController) GetJointPositions(ctx context.Context) ([]float64,
 }
 
 func (s *SafeSoArmController) GetJointPositionsForServos(ctx context.Context, servoIDs []int) ([]float64, error) {
+	if err := s.checkClosed(); err != nil {
+		return nil, err
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -159,6 +187,9 @@ func (s *SafeSoArmController) GetJointPositionsForServos(ctx context.Context, se
 }
 
 func (s *SafeSoArmController) SetTorqueEnable(ctx context.Context, enable bool) error {
+	if err := s.checkClosed(); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -175,6 +206,9 @@ func (s *SafeSoArmController) SetTorqueEnable(ctx context.Context, enable bool) 
 }
 
 func (s *SafeSoArmController) Stop(ctx context.Context) error {
+	if err := s.checkClosed(); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -190,6 +224,7 @@ func (s *SafeSoArmController) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	s.closed.Store(true)
 	if s.bus != nil {
 		return s.bus.Close()
 	}
@@ -197,6 +232,9 @@ func (s *SafeSoArmController) Close() error {
 }
 
 func (s *SafeSoArmController) Ping(ctx context.Context) error {
+	if err := s.checkClosed(); err != nil {
+		return err
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -210,6 +248,9 @@ func (s *SafeSoArmController) Ping(ctx context.Context) error {
 
 // WriteServoRegister writes to a specific servo register by name
 func (s *SafeSoArmController) WriteServoRegister(ctx context.Context, servoID int, registerName string, data []byte) error {
+	if err := s.checkClosed(); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -222,6 +263,9 @@ func (s *SafeSoArmController) WriteServoRegister(ctx context.Context, servoID in
 }
 
 func (s *SafeSoArmController) SetCalibration(calibration SO101FullCalibration) error {
+	if err := s.checkClosed(); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -296,10 +340,6 @@ func GetSharedControllerWithCalibration(config *SoArm101Config, calibration SO10
 	return globalRegistry.GetController(config.Port, config, calibration, fromFile)
 }
 
-func ReleaseSharedController() {
-	globalRegistry.releaseFromCaller()
-}
-
 func ForceCloseSharedController() error {
 	globalRegistry.mu.RLock()
 	portPaths := make([]string, 0, len(globalRegistry.entries))
@@ -349,12 +389,6 @@ func GetControllerStatus() (int64, bool, string) {
 	}
 
 	return totalRefCount, hasController, configSummary
-}
-
-// With multiple controllers, this returns the default calibration
-// Use GetCurrentCalibrationForPort for port-specific calibration
-func GetCurrentCalibration() SO101FullCalibration {
-	return DefaultSO101FullCalibration
 }
 
 func GetCurrentCalibrationForPort(portPath string) SO101FullCalibration {
