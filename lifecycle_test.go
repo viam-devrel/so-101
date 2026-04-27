@@ -153,3 +153,10 @@ func TestRegistry_ExplicitPortReleaseDecrementsRefcount(t *testing.T) {
 		t.Errorf("expected refCount=2 after release, got %d", got)
 	}
 }
+
+// TestRegistry_ReleaseUnknownPortIsNoop verifies that releasing a port that
+// was never registered does not panic and does not affect other entries.
+func TestRegistry_ReleaseUnknownPortIsNoop(t *testing.T) {
+	registry := NewControllerRegistry()
+	registry.ReleaseController("/dev/never-existed")
+}

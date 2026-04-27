@@ -234,15 +234,18 @@ func NewSO101(ctx context.Context, deps resource.Dependencies, name resource.Nam
 	var ms motion.Service
 	if conf.Motion != "" {
 		if deps == nil {
+			globalRegistry.ReleaseController(controllerConfig.Port)
 			return nil, fmt.Errorf("no deps")
 		}
 		ms, err = motion.FromProvider(deps, conf.Motion)
 		if err != nil {
+			globalRegistry.ReleaseController(controllerConfig.Port)
 			return nil, err
 		}
 	} else {
 		ms, err = motion.FromProvider(deps, "builtin")
 		if err != nil {
+			globalRegistry.ReleaseController(controllerConfig.Port)
 			return nil, err
 		}
 	}
@@ -657,7 +660,9 @@ func (s *so101) initializeServosWithRetry(maxRetries int) error {
 
 // doServoInitialization performs the actual initialization steps
 func (s *so101) doServoInitialization() error {
-	// Use cancelCtx as a temporary placeholder; Task 5 will thread per-call ctx properly.
+	// Task 5 will thread the construction ctx through this helper. Until then,
+	// cancelCtx (background-derived, lives until Close) cannot abort init on
+	// caller cancellation — a regression vs. the previous initCtx capture.
 	ctx := s.cancelCtx
 
 	// Ping all servos to ensure they're responding
@@ -691,7 +696,9 @@ func (s *so101) doServoInitialization() error {
 
 // diagnoseConnection provides detailed diagnostics for troubleshooting
 func (s *so101) diagnoseConnection() error {
-	// Use cancelCtx as a temporary placeholder; Task 5 will thread per-call ctx properly.
+	// Task 5 will thread the DoCommand caller's ctx through this helper.
+	// Until then we ignore the per-call ctx that's available on the stack
+	// at the DoCommand site and use cancelCtx instead.
 	ctx := s.cancelCtx
 
 	s.logger.Debug("Starting SO-101 arm connection diagnosis...")
@@ -719,7 +726,9 @@ func (s *so101) diagnoseConnection() error {
 
 // verifyServoConfig checks servo configuration
 func (s *so101) verifyServoConfig() error {
-	// Use cancelCtx as a temporary placeholder; Task 5 will thread per-call ctx properly.
+	// Task 5 will thread the DoCommand caller's ctx through this helper.
+	// Until then we ignore the per-call ctx that's available on the stack
+	// at the DoCommand site and use cancelCtx instead.
 	ctx := s.cancelCtx
 
 	s.logger.Debug("Verifying arm servo configuration...")
