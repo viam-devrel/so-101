@@ -107,7 +107,6 @@ type so101 struct {
 
 	motion motion.Service
 
-	cancelCtx  context.Context
 	cancelFunc func()
 }
 
@@ -250,7 +249,7 @@ func NewSO101(ctx context.Context, deps resource.Dependencies, name resource.Nam
 		}
 	}
 
-	cancelCtx, cancelFunc := context.WithCancel(context.Background())
+	_, cancelFunc := context.WithCancel(context.Background())
 
 	arm := &so101{
 		name:           name,
@@ -264,7 +263,6 @@ func NewSO101(ctx context.Context, deps resource.Dependencies, name resource.Nam
 		defaultSpeed:   speedDegsPerSec,
 		defaultAcc:     accelerationDegsPerSec,
 		motion:         ms,
-		cancelCtx:      cancelCtx,
 		cancelFunc:     cancelFunc,
 	}
 
