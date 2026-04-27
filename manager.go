@@ -340,10 +340,6 @@ func GetSharedControllerWithCalibration(config *SoArm101Config, calibration SO10
 	return globalRegistry.GetController(config.Port, config, calibration, fromFile)
 }
 
-func ReleaseSharedController() {
-	globalRegistry.releaseFromCaller()
-}
-
 func ForceCloseSharedController() error {
 	globalRegistry.mu.RLock()
 	portPaths := make([]string, 0, len(globalRegistry.entries))
@@ -393,12 +389,6 @@ func GetControllerStatus() (int64, bool, string) {
 	}
 
 	return totalRefCount, hasController, configSummary
-}
-
-// With multiple controllers, this returns the default calibration
-// Use GetCurrentCalibrationForPort for port-specific calibration
-func GetCurrentCalibration() SO101FullCalibration {
-	return DefaultSO101FullCalibration
 }
 
 func GetCurrentCalibrationForPort(portPath string) SO101FullCalibration {

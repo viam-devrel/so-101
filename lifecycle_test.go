@@ -3,6 +3,7 @@ package so_arm
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 )
 
@@ -128,5 +129,27 @@ func TestRegistry_ReleaseClosesAllConsumers(t *testing.T) {
 	}
 	if err := ctrl.Ping(t.Context()); !errors.Is(err, ErrControllerClosed) {
 		t.Errorf("Ping after final release: expected ErrControllerClosed, got %v", err)
+	}
+}
+
+// TestRegistry_ExplicitPortReleaseDecrementsRefcount verifies that callers
+// can release a controller by passing the port path directly, with no
+// dependence on runtime.Caller PC tracking.
+func TestRegistry_ExplicitPortReleaseDecrementsRefcount(t *testing.T) {
+	registry := NewControllerRegistry()
+	port := "/dev/test-port"
+	cfg := testConfig(port)
+	bus, _ := newMockBus(t)
+	registry.entries[port] = &ControllerEntry{
+		controller: &SafeSoArmController{bus: bus, logger: cfg.Logger},
+		config:     cfg,
+		refCount:   3,
+	}
+
+	registry.ReleaseController(port)
+
+	got := atomic.LoadInt64(&registry.entries[port].refCount)
+	if got != 2 {
+		t.Errorf("expected refCount=2 after release, got %d", got)
 	}
 }

@@ -38,10 +38,6 @@ func TestRegistryCreation(t *testing.T) {
 		t.Fatal("Registry entries map not initialized")
 	}
 
-	if registry.callerPorts == nil {
-		t.Fatal("Registry callerPorts map not initialized")
-	}
-
 	if len(registry.entries) != 0 {
 		t.Fatal("Registry should start empty")
 	}

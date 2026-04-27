@@ -87,11 +87,12 @@ func (cfg *SO101ArmConfig) Validate(path string) ([]string, []string, error) {
 type so101 struct {
 	resource.AlwaysRebuild
 
-	name       resource.Name
-	logger     logging.Logger
-	cfg        *SO101ArmConfig
-	opMgr      *operation.SingleOperationManager
-	controller *SafeSoArmController
+	name           resource.Name
+	logger         logging.Logger
+	cfg            *SO101ArmConfig
+	opMgr          *operation.SingleOperationManager
+	controller     *SafeSoArmController
+	controllerPort string // port path used to acquire the shared controller
 
 	mu       sync.RWMutex
 	moveLock sync.Mutex
@@ -108,7 +109,6 @@ type so101 struct {
 
 	cancelCtx  context.Context
 	cancelFunc func()
-	initCtx    context.Context // Context for initialization operations
 }
 
 func makeSO101ModelFrame() (referenceframe.Model, error) {
@@ -227,7 +227,7 @@ func NewSO101(ctx context.Context, deps resource.Dependencies, name resource.Nam
 
 	model, err := makeSO101ModelFrame()
 	if err != nil {
-		ReleaseSharedController() // Clean up on error
+		globalRegistry.ReleaseController(controllerConfig.Port)
 		return nil, fmt.Errorf("failed to create kinematic model: %w", err)
 	}
 
@@ -250,19 +250,19 @@ func NewSO101(ctx context.Context, deps resource.Dependencies, name resource.Nam
 	cancelCtx, cancelFunc := context.WithCancel(context.Background())
 
 	arm := &so101{
-		name:         name,
-		cfg:          conf,
-		opMgr:        operation.NewSingleOperationManager(),
-		logger:       logger,
-		controller:   controller,
-		model:        model,
-		armServoIDs:  conf.ServoIDs, // Store which servos this arm controls
-		defaultSpeed: speedDegsPerSec,
-		defaultAcc:   accelerationDegsPerSec,
-		motion:       ms,
-		cancelCtx:    cancelCtx,
-		cancelFunc:   cancelFunc,
-		initCtx:      ctx, // Store initialization context
+		name:           name,
+		cfg:            conf,
+		opMgr:          operation.NewSingleOperationManager(),
+		logger:         logger,
+		controller:     controller,
+		controllerPort: controllerConfig.Port,
+		model:          model,
+		armServoIDs:    conf.ServoIDs, // Store which servos this arm controls
+		defaultSpeed:   speedDegsPerSec,
+		defaultAcc:     accelerationDegsPerSec,
+		motion:         ms,
+		cancelCtx:      cancelCtx,
+		cancelFunc:     cancelFunc,
 	}
 
 	logger.Debugf("SO-101 configured with speed: %.1f deg/s, acceleration: %.1f deg/s²",
@@ -271,7 +271,7 @@ func NewSO101(ctx context.Context, deps resource.Dependencies, name resource.Nam
 
 	// Initialize and verify servo connections
 	if err := arm.initializeServos(); err != nil {
-		ReleaseSharedController() // Clean up on error
+		globalRegistry.ReleaseController(controllerConfig.Port)
 		return nil, fmt.Errorf("failed to initialize servos: %w", err)
 	}
 
@@ -619,7 +619,7 @@ func (s *so101) Geometries(ctx context.Context, extra map[string]interface{}) ([
 
 func (s *so101) Close(context.Context) error {
 	s.cancelFunc()
-	ReleaseSharedController()
+	globalRegistry.ReleaseController(s.controllerPort)
 	return nil
 }
 
@@ -657,8 +657,8 @@ func (s *so101) initializeServosWithRetry(maxRetries int) error {
 
 // doServoInitialization performs the actual initialization steps
 func (s *so101) doServoInitialization() error {
-	// Use stored initialization context instead of creating new one
-	ctx := s.initCtx
+	// Use cancelCtx as a temporary placeholder; Task 5 will thread per-call ctx properly.
+	ctx := s.cancelCtx
 
 	// Ping all servos to ensure they're responding
 	s.logger.Debug("Pinging all servos...")
@@ -691,8 +691,8 @@ func (s *so101) doServoInitialization() error {
 
 // diagnoseConnection provides detailed diagnostics for troubleshooting
 func (s *so101) diagnoseConnection() error {
-	// Use stored initialization context instead of creating new one
-	ctx := s.initCtx
+	// Use cancelCtx as a temporary placeholder; Task 5 will thread per-call ctx properly.
+	ctx := s.cancelCtx
 
 	s.logger.Debug("Starting SO-101 arm connection diagnosis...")
 
@@ -719,8 +719,8 @@ func (s *so101) diagnoseConnection() error {
 
 // verifyServoConfig checks servo configuration
 func (s *so101) verifyServoConfig() error {
-	// Use stored initialization context instead of creating new one
-	ctx := s.initCtx
+	// Use cancelCtx as a temporary placeholder; Task 5 will thread per-call ctx properly.
+	ctx := s.cancelCtx
 
 	s.logger.Debug("Verifying arm servo configuration...")
 

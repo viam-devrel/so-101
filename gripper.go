@@ -58,11 +58,12 @@ func (cfg *SO101GripperConfig) Validate(path string) ([]string, []string, error)
 type so101Gripper struct {
 	resource.AlwaysRebuild
 
-	name       resource.Name
-	logger     logging.Logger
-	controller *SafeSoArmController
-	geometries []spatialmath.Geometry
-	servoID    int
+	name           resource.Name
+	logger         logging.Logger
+	controller     *SafeSoArmController
+	controllerPort string // port path used to acquire the shared controller
+	geometries     []spatialmath.Geometry
+	servoID        int
 
 	mu       sync.Mutex
 	isMoving atomic.Bool
@@ -131,6 +132,7 @@ func newSO101Gripper(ctx context.Context, deps resource.Dependencies, conf resou
 		name:           conf.ResourceName(),
 		logger:         logger,
 		controller:     controller,
+		controllerPort: controllerConfig.Port,
 		geometries:     geometries,
 		servoID:        cfg.ServoID,
 		speed:          30,
@@ -339,7 +341,7 @@ func (g *so101Gripper) DoCommand(ctx context.Context, cmd map[string]interface{}
 }
 
 func (g *so101Gripper) Close(ctx context.Context) error {
-	ReleaseSharedController()
+	globalRegistry.ReleaseController(g.controllerPort)
 	return nil
 }
 
