@@ -100,14 +100,14 @@ Sensor stays one resource (web app constraint). No structural extraction.
 
 - State-machine race teardown: consistent `if cs.recordingCancel != nil` checks in `Close`, `abortCalibration`, `resetCalibration`, `stopRangeRecording`. Audit for double-call.
 - Replace `positionHistory []map[int]int` (`calibration.go:540-630`) with `var sampleCount atomic.Int64`. The history was only ever read for `len()`. Saves ~100KB churn during recording.
-- Delete commented-out radians-conversion blocks (`:427-457`, `:573-603` — already covered in PR3 if we get there first; otherwise here).
 - Replace emoji status strings (`calibration.go:1077-1080`) with plain text.
+- (Commented-out radians-conversion blocks at `:427-457` and `:573-603` are deleted in PR3.)
 - Tests: state-machine progression test (idle → started → homing_position → range_recording → completed), backed by mock bus. Asserts on register writes and state transitions. Catches the writeHomingOffset class of regressions.
 
 ### PR6 — Discovery improvements + canonical joint mapping
 
 - Worker-pool parallelize port scanning (`discovery.go:82-93`). Cap concurrency at 6 to avoid pathological hub behavior. Use `errgroup.WithContext` for cancellation propagation.
-- Multi-baudrate discovery: either delegate to `feetech.Bus.Discover` (which sweeps internally) or explicit sweep `[1000000, 500000, 115200, 57600]`. Decision driven by what `Bus.Discover` actually does — verify in implementation.
+- Multi-baudrate discovery: delegate to `feetech.Bus.Discover`, which sweeps the package's `DefaultBaudRates` internally. Discovery loop opens a bus per candidate port at a placeholder baudrate, then calls `Discover(ctx)` and lets feetech do the sweep. If `Discover` returns no servos, the port is dropped from the result set.
 - Extract canonical joint mapping into a shared file (likely `config.go` or new `joints.go`):
   ```go
   var SO101Joints = []struct{ ID int; Name string }{
@@ -133,7 +133,7 @@ Sensor stays one resource (web app constraint). No structural extraction.
 - New `.github/workflows/ci.yml` running on PRs: `go vet ./...`, `go test -race ./...`, `make`. Would have caught both the `writeHomingOffset` SA4006-class issue (unused parameter) and the `cmd/cli/` build break.
 - Add `staticcheck` to `make lint`.
 - Hardware build tag: `//go:build hardware` on tests currently using `t.Skip("hardware-dependent")`. Add `make test-hardware` target.
-- Fix `cmd/cli/`: split the kept tools (`debug_cli`, `position_reader`, `read_servo`, `torque_disable`) into per-directory `cmd/<name>/main.go`. Delete throwaways (`simple_test_try`, `sync_test_again`, `gentle_move`, `raw_servo`). Add a `make tools` target that builds the kept ones.
+- Fix `cmd/cli/`: keep only `debug_cli` — move it to `cmd/debug/main.go`. Delete the other 8 files (`main.go`, `gentle_move.go`, `position_reader.go`, `raw_servo.go`, `read_servo.go`, `simple_test_try.go`, `sync_test_again.go`, `torque_disable.go`). Add a `make tools` target that builds `cmd/debug/`.
 
 ## Test strategy
 
@@ -155,7 +155,6 @@ By PR8, the existing `t.Skip("hardware-dependent")` tests in `registry_test.go` 
 
 ## Open questions
 
-- `cmd/cli/` triage: the 4 "kept" tools listed in PR8 are a guess — Nick may want a different cut. Settled at implementation time by skimming each tool's actual utility.
 - Whether to extract `internal/` packages comes after PR8 in the architecture revisit, not in this spec.
 - `Reconfigure` support (today everything is `AlwaysRebuild`) is not in scope; revisit when the architecture decision is made.
 
