@@ -106,8 +106,6 @@ type so101 struct {
 	defaultAcc   float32
 
 	motion motion.Service
-
-	cancelFunc func()
 }
 
 func makeSO101ModelFrame() (referenceframe.Model, error) {
@@ -249,8 +247,6 @@ func NewSO101(ctx context.Context, deps resource.Dependencies, name resource.Nam
 		}
 	}
 
-	_, cancelFunc := context.WithCancel(context.Background())
-
 	arm := &so101{
 		name:           name,
 		cfg:            conf,
@@ -263,7 +259,6 @@ func NewSO101(ctx context.Context, deps resource.Dependencies, name resource.Nam
 		defaultSpeed:   speedDegsPerSec,
 		defaultAcc:     accelerationDegsPerSec,
 		motion:         ms,
-		cancelFunc:     cancelFunc,
 	}
 
 	logger.Debugf("SO-101 configured with speed: %.1f deg/s, acceleration: %.1f deg/s²",
@@ -619,7 +614,6 @@ func (s *so101) Geometries(ctx context.Context, extra map[string]interface{}) ([
 }
 
 func (s *so101) Close(context.Context) error {
-	s.cancelFunc()
 	globalRegistry.ReleaseController(s.controllerPort)
 	return nil
 }
