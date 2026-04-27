@@ -273,7 +273,7 @@ func NewSO101(ctx context.Context, deps resource.Dependencies, name resource.Nam
 	logger.Debugf("Arm controlling servo IDs: %v", arm.armServoIDs)
 
 	// Initialize and verify servo connections
-	if err := arm.initializeServos(); err != nil {
+	if err := arm.initializeServos(ctx); err != nil {
 		globalRegistry.ReleaseController(controllerConfig.Port)
 		return nil, fmt.Errorf("failed to initialize servos: %w", err)
 	}
@@ -473,14 +473,14 @@ func (s *so101) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[
 		}, nil
 
 	case "diagnose":
-		err := s.diagnoseConnection()
+		err := s.diagnoseConnection(ctx)
 		return map[string]interface{}{
 			"success": err == nil,
 			"error":   fmt.Sprintf("%v", err),
 		}, nil
 
 	case "verify_config":
-		err := s.verifyServoConfig()
+		err := s.verifyServoConfig(ctx)
 		return map[string]interface{}{
 			"success": err == nil,
 			"error":   fmt.Sprintf("%v", err),
@@ -491,7 +491,7 @@ func (s *so101) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[
 		if r, ok := cmd["retries"].(float64); ok {
 			retries = int(r)
 		}
-		err := s.initializeServosWithRetry(retries)
+		err := s.initializeServosWithRetry(ctx, retries)
 		return map[string]interface{}{
 			"success": err == nil,
 			"error":   fmt.Sprintf("%v", err),
@@ -627,19 +627,19 @@ func (s *so101) Close(context.Context) error {
 }
 
 // initializeServos pings each servo and enables torque to ensure proper communication
-func (s *so101) initializeServos() error {
-	return s.initializeServosWithRetry(3)
+func (s *so101) initializeServos(ctx context.Context) error {
+	return s.initializeServosWithRetry(ctx, 3)
 }
 
 // initializeServosWithRetry attempts servo initialization with retries
-func (s *so101) initializeServosWithRetry(maxRetries int) error {
+func (s *so101) initializeServosWithRetry(ctx context.Context, maxRetries int) error {
 	s.logger.Debug("Initializing SO-101 arm servos...")
 
 	var lastErr error
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		s.logger.Debugf("Arm servo initialization attempt %d/%d", attempt, maxRetries)
 
-		if err := s.doServoInitialization(); err != nil {
+		if err := s.doServoInitialization(ctx); err != nil {
 			lastErr = err
 			s.logger.Warnf("Initialization attempt %d failed: %v", attempt, err)
 
@@ -659,12 +659,7 @@ func (s *so101) initializeServosWithRetry(maxRetries int) error {
 }
 
 // doServoInitialization performs the actual initialization steps
-func (s *so101) doServoInitialization() error {
-	// Task 5 will thread the construction ctx through this helper. Until then,
-	// cancelCtx (background-derived, lives until Close) cannot abort init on
-	// caller cancellation — a regression vs. the previous initCtx capture.
-	ctx := s.cancelCtx
-
+func (s *so101) doServoInitialization(ctx context.Context) error {
 	// Ping all servos to ensure they're responding
 	s.logger.Debug("Pinging all servos...")
 	if err := s.controller.Ping(ctx); err != nil {
@@ -695,12 +690,7 @@ func (s *so101) doServoInitialization() error {
 }
 
 // diagnoseConnection provides detailed diagnostics for troubleshooting
-func (s *so101) diagnoseConnection() error {
-	// Task 5 will thread the DoCommand caller's ctx through this helper.
-	// Until then we ignore the per-call ctx that's available on the stack
-	// at the DoCommand site and use cancelCtx instead.
-	ctx := s.cancelCtx
-
+func (s *so101) diagnoseConnection(ctx context.Context) error {
 	s.logger.Debug("Starting SO-101 arm connection diagnosis...")
 
 	// Test overall ping
@@ -725,12 +715,7 @@ func (s *so101) diagnoseConnection() error {
 }
 
 // verifyServoConfig checks servo configuration
-func (s *so101) verifyServoConfig() error {
-	// Task 5 will thread the DoCommand caller's ctx through this helper.
-	// Until then we ignore the per-call ctx that's available on the stack
-	// at the DoCommand site and use cancelCtx instead.
-	ctx := s.cancelCtx
-
+func (s *so101) verifyServoConfig(ctx context.Context) error {
 	s.logger.Debug("Verifying arm servo configuration...")
 
 	positions, err := s.controller.GetJointPositionsForServos(ctx, s.armServoIDs)
