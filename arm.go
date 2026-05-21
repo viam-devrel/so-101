@@ -52,6 +52,10 @@ type SO101ArmConfig struct {
 	Motion string `json:"motion,omitempty"`
 
 	CalibrationFile string `json:"calibration_file,omitempty"`
+
+	// VisualizeEEFrame, when true, makes Get3DModels serve a colored XYZ
+	// coordinate-frame marker at the end-effector. Defaults to false.
+	VisualizeEEFrame bool `json:"visualize_ee_frame,omitempty"`
 }
 
 // Validate ensures all parts of the config are valid
@@ -123,6 +127,33 @@ func makeSO101ModelFrame() (referenceframe.Model, error) {
 		return nil, errors.Wrap(err, "failed to unmarshal json file")
 	}
 
+	return m.ParseConfig("soarm_101")
+}
+
+// makeSO101ModelFrameWithEEMarker builds the SO-101 kinematics with a small placeholder
+// geometry on the otherwise-empty "tool" link. so101.json's "tool" link has no geometry,
+// so the 3D viewer never draws it -- and a Get3DModels mesh keyed to a frame the viewer
+// does not draw is dropped. Giving "tool" a geometry makes the viewer draw the link, so
+// the colored EE-frame mesh served by Get3DModels renders there. so101.json is untouched;
+// this is used only when an arm's visualize_ee_frame attribute is enabled.
+func makeSO101ModelFrameWithEEMarker() (referenceframe.Model, error) {
+	m := &referenceframe.ModelConfigJSON{
+		OriginalFile: &referenceframe.ModelFile{
+			Bytes:     so101ModelJson,
+			Extension: "json",
+		},
+	}
+	if err := json.Unmarshal(so101ModelJson, m); err != nil {
+		return nil, errors.Wrap(err, "failed to unmarshal json file")
+	}
+	for i := range m.Links {
+		if m.Links[i].ID == so101EEFrameMeshKey {
+			// A small box; the Get3DModels "tool" mesh replaces it visually.
+			m.Links[i].Geometry = &spatialmath.GeometryConfig{
+				Type: spatialmath.BoxType, X: 10, Y: 10, Z: 10,
+			}
+		}
+	}
 	return m.ParseConfig("soarm_101")
 }
 
@@ -225,7 +256,11 @@ func NewSO101(ctx context.Context, deps resource.Dependencies, name resource.Nam
 		return nil, fmt.Errorf("failed to get shared SO-ARM controller: %w", err)
 	}
 
-	model, err := makeSO101ModelFrame()
+	makeModel := makeSO101ModelFrame
+	if conf.VisualizeEEFrame {
+		makeModel = makeSO101ModelFrameWithEEMarker
+	}
+	model, err := makeModel()
 	if err != nil {
 		ReleaseSharedController() // Clean up on error
 		return nil, fmt.Errorf("failed to create kinematic model: %w", err)
@@ -441,8 +476,14 @@ func (s *so101) GoToInputs(ctx context.Context, inputSteps ...[]referenceframe.I
 	return s.MoveThroughJointPositions(ctx, inputSteps, nil, nil)
 }
 
+// Get3DModels serves a colored XYZ coordinate-frame marker at the end-effector when the
+// visualize_ee_frame attribute is enabled, and nothing otherwise.
 func (s *so101) Get3DModels(ctx context.Context, extra map[string]interface{}) (map[string]*commonpb.Mesh, error) {
-	return nil, fmt.Errorf("Get3DModels is unimplemented for SO-101 arm")
+	models := map[string]*commonpb.Mesh{}
+	if s.cfg.VisualizeEEFrame {
+		models[so101EEFrameMeshKey] = so101EEFrameMesh()
+	}
+	return models, nil
 }
 
 func (s *so101) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {

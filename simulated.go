@@ -52,6 +52,10 @@ type SO101SimulatedArmConfig struct {
 	// real time. Defaults to true. Tests set it false to drive the simulated clock
 	// deterministically via updateForTime.
 	SimulateTime *bool `json:"simulate_time,omitempty"`
+
+	// VisualizeEEFrame, when true, makes Get3DModels also serve a colored XYZ
+	// coordinate-frame marker at the end-effector. Defaults to false.
+	VisualizeEEFrame bool `json:"visualize_ee_frame,omitempty"`
 }
 
 // Validate ensures all parts of the config are valid and declares the motion service
@@ -104,6 +108,9 @@ type simulatedSO101 struct {
 	// speed is the joint travel speed in radians per second.
 	speed float64
 
+	// visualizeEEFrame adds the colored EE coordinate-frame marker to Get3DModels.
+	visualizeEEFrame bool
+
 	// lifetime management
 	closed     atomic.Bool
 	cancelCtx  context.Context
@@ -125,7 +132,11 @@ func newSimulatedSO101(
 		return nil, err
 	}
 
-	model, err := makeSO101ModelFrame()
+	makeModel := makeSO101ModelFrame
+	if conf.VisualizeEEFrame {
+		makeModel = makeSO101ModelFrameWithEEMarker
+	}
+	model, err := makeModel()
 	if err != nil {
 		return nil, fmt.Errorf("failed to create kinematic model: %w", err)
 	}
@@ -151,14 +162,15 @@ func newSimulatedSO101(
 
 	cancelCtx, cancelFunc := context.WithCancel(context.Background())
 	sim := &simulatedSO101{
-		name:       rawConf.ResourceName(),
-		logger:     logger,
-		model:      model,
-		motion:     ms,
-		speed:      speedDegsPerSec * math.Pi / 180.0,
-		cancelCtx:  cancelCtx,
-		cancelFunc: cancelFunc,
-		currInputs: make([]float64, len(model.DoF())),
+		name:             rawConf.ResourceName(),
+		logger:           logger,
+		model:            model,
+		motion:           ms,
+		speed:            speedDegsPerSec * math.Pi / 180.0,
+		visualizeEEFrame: conf.VisualizeEEFrame,
+		cancelCtx:        cancelCtx,
+		cancelFunc:       cancelFunc,
+		currInputs:       make([]float64, len(model.DoF())),
 	}
 
 	// SimulateTime defaults to true so a deployed arm advances on its own.
@@ -404,9 +416,14 @@ func (s *simulatedSO101) Geometries(ctx context.Context, extra map[string]interf
 	return gif.Geometries(), nil
 }
 
-// Get3DModels returns the SO-101 link meshes for the 3D scene viewer.
+// Get3DModels returns the SO-101 link meshes for the 3D scene viewer, plus a colored
+// end-effector coordinate-frame marker when visualize_ee_frame is enabled.
 func (s *simulatedSO101) Get3DModels(ctx context.Context, extra map[string]interface{}) (map[string]*commonpb.Mesh, error) {
-	return so101Meshes(), nil
+	models := so101Meshes()
+	if s.visualizeEEFrame {
+		models[so101EEFrameMeshKey] = so101EEFrameMesh()
+	}
+	return models, nil
 }
 
 func (s *simulatedSO101) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {

@@ -16,6 +16,7 @@ func main() {
 		resource.APIModel{API: arm.API, Model: soArm.SO101Model},
 		resource.APIModel{API: arm.API, Model: soArm.SO101SimulatedModel},
 		resource.APIModel{API: gripper.API, Model: soArm.SO101GripperModel},
+		resource.APIModel{API: gripper.API, Model: soArm.SO101SimulatedGripperModel},
 		resource.APIModel{API: sensor.API, Model: soArm.SO101CalibrationSensorModel},
 		resource.APIModel{API: discovery.API, Model: soArm.SO101DiscoveryModel},
 	)

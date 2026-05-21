@@ -233,3 +233,50 @@ func TestSimulatedTimeSimulation(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, moving)
 }
+
+// TestSimulatedEEFrameMarker checks the visualize_ee_frame attribute gates the
+// colored end-effector coordinate-frame mesh in Get3DModels.
+func TestSimulatedEEFrameMarker(t *testing.T) {
+	ctx := context.Background()
+
+	// visualize_ee_frame defaults off: Get3DModels returns only the 5 link meshes.
+	off := newTestSimArm(t, 1.0)
+	defer func() { require.NoError(t, off.Close(ctx)) }()
+	models, err := off.Get3DModels(ctx, nil)
+	require.NoError(t, err)
+	assert.Len(t, models, 5)
+	assert.NotContains(t, models, "tool")
+
+	// visualize_ee_frame on: the colored EE-frame marker is added at the "tool" frame.
+	simulateTime := false
+	onConf := resource.Config{
+		Name:  "eeSimArm",
+		API:   arm.API,
+		Model: SO101SimulatedModel,
+		ConvertedAttributes: &SO101SimulatedArmConfig{
+			SimulateTime:     &simulateTime,
+			VisualizeEEFrame: true,
+		},
+	}
+	onArm, err := newSimulatedSO101(ctx, nil, onConf, logging.NewTestLogger(t))
+	require.NoError(t, err)
+	defer func() { require.NoError(t, onArm.Close(ctx)) }()
+
+	models, err = onArm.Get3DModels(ctx, nil)
+	require.NoError(t, err)
+	assert.Len(t, models, 6)
+	tool, ok := models["tool"]
+	require.True(t, ok, `expected an EE-frame mesh keyed "tool"`)
+	assert.Equal(t, "model/gltf-binary", tool.ContentType)
+	assert.NotEmpty(t, tool.Mesh)
+
+	// The "tool" link gains a geometry so the viewer draws it (and mounts the mesh):
+	// 5 so101.json link geometries + the tool placeholder.
+	offGeoms, err := off.Geometries(ctx, nil)
+	require.NoError(t, err)
+	assert.Len(t, offGeoms, 5)
+
+	onGeoms, err := onArm.Geometries(ctx, nil)
+	require.NoError(t, err)
+	assert.Len(t, onGeoms, 6)
+}
