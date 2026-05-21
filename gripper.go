@@ -266,16 +266,25 @@ const (
 // the gripper joint. It is split out from Geometries so it can be tested without
 // a hardware controller.
 func buildGripperMeshes(gripperType string, jawAngle float64) ([]spatialmath.Geometry, error) {
-	bodyPLY, movingPLY := so101FollowerBodyPLY, so101FollowerJawPLY
+	// Static meshes (all posed at the gripper body pose) plus the moving-part mesh.
+	// The follower's body is one piece; the leader's is the wrist-roll part (which
+	// connects to the arm) plus the handle attached to it.
+	staticPLYs := [][]byte{so101FollowerBodyPLY}
+	movingPLY := so101FollowerJawPLY
 	if gripperType == leaderGripper {
-		bodyPLY, movingPLY = so101LeaderBodyPLY, so101LeaderTriggerPLY
+		staticPLYs = [][]byte{so101LeaderWristRollPLY, so101LeaderBodyPLY}
+		movingPLY = so101LeaderTriggerPLY
 	}
 
-	body, err := spatialmath.NewMeshFromProto(
-		spatialmath.Compose(toolFromGripperLink, gripperBodyPose),
-		&commonpb.Mesh{ContentType: "ply", Mesh: bodyPLY}, "gripper_body")
-	if err != nil {
-		return nil, err
+	bodyPose := spatialmath.Compose(toolFromGripperLink, gripperBodyPose)
+	geoms := make([]spatialmath.Geometry, 0, len(staticPLYs)+1)
+	for i, ply := range staticPLYs {
+		m, err := spatialmath.NewMeshFromProto(bodyPose,
+			&commonpb.Mesh{ContentType: "ply", Mesh: ply}, fmt.Sprintf("gripper_body_%d", i))
+		if err != nil {
+			return nil, err
+		}
+		geoms = append(geoms, m)
 	}
 
 	// Moving part: joint origin, then a rotation about the joint Z axis, then the
@@ -291,7 +300,7 @@ func buildGripperMeshes(gripperType string, jawAngle float64) ([]spatialmath.Geo
 		return nil, err
 	}
 
-	return []spatialmath.Geometry{body, moving}, nil
+	return append(geoms, moving), nil
 }
 
 // jawAngle maps the gripper's current open percentage onto the URDF gripper-joint

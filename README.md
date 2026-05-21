@@ -367,7 +367,7 @@ Check the shared controller status:
 
 The simulated gripper emulates the SO-101 gripper entirely in software, with **no hardware required**. It serves the gripper meshes (a static body plus a moving jaw/trigger) to the 3D scene viewer, with the moving part posed by the gripper's opening — useful for developing and previewing without a physical robot.
 
-`Open` fully opens the gripper, `Grab` fully closes it, and both apply instantly. A simulated gripper never grasps an object, so `Grab` always reports `false`.
+`Open` opens the gripper and `Grab` closes it, interpolating the jaw open/closed over time so it animates in the 3D viewer (like the simulated arm). Both block until the motion finishes, and `IsMoving` reports `true` while the jaw is travelling. A simulated gripper never grasps an object, so `Grab` always reports `false`.
 
 ### Configuration
 
@@ -387,7 +387,7 @@ All attributes are optional, so the simulated gripper works with an empty config
 
 #### Set Position
 
-Pose the simulated jaw to any opening percentage (0 = closed, 100 = open):
+Set a target opening percentage (0 = closed, 100 = open); the jaw interpolates toward it:
 
 ```json
 {

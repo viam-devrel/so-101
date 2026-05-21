@@ -42,6 +42,9 @@ var so101FollowerBodyPLY []byte
 //go:embed meshes/gripper/follower_jaw.ply
 var so101FollowerJawPLY []byte
 
+//go:embed meshes/gripper/leader_wrist_roll.ply
+var so101LeaderWristRollPLY []byte
+
 //go:embed meshes/gripper/leader_body.ply
 var so101LeaderBodyPLY []byte
 

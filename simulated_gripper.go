@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"math"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"go.viam.com/rdk/components/gripper"
 	"go.viam.com/rdk/logging"
@@ -16,6 +18,13 @@ import (
 
 // SO101SimulatedGripperModel is the model triplet for the hardware-free simulated SO-101 gripper.
 var SO101SimulatedGripperModel = resource.NewModel("devrel", "so101", "simulated-gripper")
+
+const (
+	// gripperTravelPctPerSec is how fast the simulated jaw opens/closes.
+	gripperTravelPctPerSec = 200.0
+	// gripperUpdateInterval is how often the background goroutine advances the jaw.
+	gripperUpdateInterval = 10 * time.Millisecond
+)
 
 func init() {
 	resource.RegisterComponent(gripper.API, SO101SimulatedGripperModel,
@@ -43,18 +52,26 @@ func (cfg *SO101SimulatedGripperConfig) Validate(path string) ([]string, []strin
 	return nil, nil, nil
 }
 
-// simulatedSO101Gripper is a hardware-free SO-101 gripper. Open/Grab move an in-memory
-// opening percentage; Geometries serves the gripper meshes with the moving part posed
-// by that percentage so the jaw/trigger articulates in the 3D viewer.
+// simulatedSO101Gripper is a hardware-free SO-101 gripper. Open/Grab move the jaw toward
+// a target opening; a background goroutine interpolates the opening over time so the
+// jaw/trigger visibly animates in the 3D viewer, mirroring the simulated arm.
 type simulatedSO101Gripper struct {
 	resource.AlwaysRebuild
 
 	name        resource.Name
 	gripperType string
 
-	// mu guards openPct: 0 = fully closed, 100 = fully open.
-	mu      sync.Mutex
-	openPct float64
+	// lifetime management
+	closed     atomic.Bool
+	cancelCtx  context.Context
+	cancelFunc func()
+	workers    sync.WaitGroup
+
+	// mu guards the fields below. currentPct/targetPct are 0 (closed) to 100 (open).
+	mu          sync.Mutex
+	currentPct  float64
+	targetPct   float64
+	lastUpdated time.Time
 }
 
 func newSimulatedSO101Gripper(
@@ -70,41 +87,110 @@ func newSimulatedSO101Gripper(
 		gripperType = followerGripper
 	}
 
-	return &simulatedSO101Gripper{
+	cancelCtx, cancelFunc := context.WithCancel(context.Background())
+	g := &simulatedSO101Gripper{
 		name:        rawConf.ResourceName(),
 		gripperType: gripperType,
-	}, nil
+		cancelCtx:   cancelCtx,
+		cancelFunc:  cancelFunc,
+		lastUpdated: time.Now(),
+	}
+	g.startMotionSimulation()
+	return g, nil
+}
+
+// startMotionSimulation launches the background goroutine that interpolates the jaw.
+func (g *simulatedSO101Gripper) startMotionSimulation() {
+	g.workers.Add(1)
+	go func() {
+		defer g.workers.Done()
+		ticker := time.NewTicker(gripperUpdateInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-g.cancelCtx.Done():
+				return
+			case <-ticker.C:
+				g.updateForTime(time.Now())
+			}
+		}
+	}()
+}
+
+// updateForTime advances the current opening toward the target at gripperTravelPctPerSec.
+func (g *simulatedSO101Gripper) updateForTime(now time.Time) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	elapsed := now.Sub(g.lastUpdated).Seconds()
+	g.lastUpdated = now
+	if g.currentPct == g.targetPct {
+		return
+	}
+
+	step := gripperTravelPctPerSec * elapsed
+	if math.Abs(g.targetPct-g.currentPct) <= step {
+		g.currentPct = g.targetPct
+	} else if g.targetPct > g.currentPct {
+		g.currentPct += step
+	} else {
+		g.currentPct -= step
+	}
+}
+
+// moveTo sets the target opening and blocks until the jaw reaches it, the arm is closed,
+// or the context is canceled.
+func (g *simulatedSO101Gripper) moveTo(ctx context.Context, pct float64) error {
+	g.mu.Lock()
+	g.targetPct = pct
+	g.mu.Unlock()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-g.cancelCtx.Done():
+			return g.cancelCtx.Err()
+		default:
+			g.mu.Lock()
+			done := g.currentPct == g.targetPct
+			g.mu.Unlock()
+			if done {
+				return nil
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
 }
 
 func (g *simulatedSO101Gripper) Name() resource.Name {
 	return g.name
 }
 
-// Open fully opens the simulated gripper.
+// Open opens the simulated gripper, interpolating over time.
 func (g *simulatedSO101Gripper) Open(ctx context.Context, extra map[string]interface{}) error {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	g.openPct = 100
-	return nil
+	return g.moveTo(ctx, 100)
 }
 
-// Grab fully closes the simulated gripper. It always reports false: a simulated gripper
-// never actually grasps an object.
+// Grab closes the simulated gripper, interpolating over time. It always reports false: a
+// simulated gripper never actually grasps an object.
 func (g *simulatedSO101Gripper) Grab(ctx context.Context, extra map[string]interface{}) (bool, error) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	g.openPct = 0
-	return false, nil
+	return false, g.moveTo(ctx, 0)
 }
 
-// Stop is a no-op: Open/Grab apply instantly, so there is never a move to interrupt.
+// Stop halts the jaw where it currently is.
 func (g *simulatedSO101Gripper) Stop(ctx context.Context, extra map[string]interface{}) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.targetPct = g.currentPct
 	return nil
 }
 
-// IsMoving always reports false: Open/Grab apply instantly.
+// IsMoving reports whether the jaw is mid-travel.
 func (g *simulatedSO101Gripper) IsMoving(ctx context.Context) (bool, error) {
-	return false, nil
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.currentPct != g.targetPct, nil
 }
 
 // IsHoldingSomething always reports not-holding: a simulated gripper grasps nothing.
@@ -115,18 +201,18 @@ func (g *simulatedSO101Gripper) IsHoldingSomething(
 }
 
 // Geometries serves the gripper meshes, with the moving part posed by the current
-// opening percentage.
+// opening so the jaw/trigger animates in the 3D viewer.
 func (g *simulatedSO101Gripper) Geometries(
 	ctx context.Context, extra map[string]interface{},
 ) ([]spatialmath.Geometry, error) {
 	g.mu.Lock()
-	pct := g.openPct / 100.0
+	pct := g.currentPct / 100.0
 	g.mu.Unlock()
 	jawAngle := gripperJointMin + pct*(gripperJointMax-gripperJointMin)
 	return buildGripperMeshes(g.gripperType, jawAngle)
 }
 
-// DoCommand supports set_position (0-100%) and get_position for posing the simulated jaw.
+// DoCommand supports set_position (0-100%, interpolated) and get_position.
 func (g *simulatedSO101Gripper) DoCommand(
 	ctx context.Context, cmd map[string]interface{},
 ) (map[string]interface{}, error) {
@@ -138,13 +224,16 @@ func (g *simulatedSO101Gripper) DoCommand(
 		}
 		clamped := math.Max(0, math.Min(100, pct))
 		g.mu.Lock()
-		g.openPct = clamped
+		g.targetPct = clamped
 		g.mu.Unlock()
-		return map[string]interface{}{"position_percentage": clamped}, nil
+		return map[string]interface{}{"target_percentage": clamped}, nil
 	case "get_position":
 		g.mu.Lock()
 		defer g.mu.Unlock()
-		return map[string]interface{}{"position_percentage": g.openPct}, nil
+		return map[string]interface{}{
+			"position_percentage": g.currentPct,
+			"target_percentage":   g.targetPct,
+		}, nil
 	default:
 		return nil, fmt.Errorf("unknown command: %v", cmd["command"])
 	}
@@ -164,5 +253,10 @@ func (g *simulatedSO101Gripper) GoToInputs(ctx context.Context, inputs ...[]refe
 }
 
 func (g *simulatedSO101Gripper) Close(ctx context.Context) error {
+	if g.closed.Swap(true) {
+		return nil
+	}
+	g.cancelFunc()
+	g.workers.Wait()
 	return nil
 }

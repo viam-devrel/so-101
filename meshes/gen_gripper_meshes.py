@@ -25,6 +25,7 @@ BASE = "https://raw.githubusercontent.com/TheRobotStudio/SO-ARM100/main"
 MESHES = {
     "follower_body": (f"{BASE}/Simulation/SO101/assets/wrist_roll_follower_so101_v1.stl", 0.0015, 1.0),
     "follower_jaw": (f"{BASE}/Simulation/SO101/assets/moving_jaw_so101_v1.stl", 0.0015, 1.0),
+    "leader_wrist_roll": (f"{BASE}/STL/SO101/Individual/Wrist_Roll_SO101.stl", 0.0015, 0.001),
     "leader_body": (f"{BASE}/STL/SO101/Individual/Handle_SO101.stl", 0.0015, 0.001),
     "leader_trigger": (f"{BASE}/STL/SO101/Individual/Trigger_SO101.stl", 0.0015, 0.001),
 }
