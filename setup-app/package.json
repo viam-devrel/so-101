@@ -31,12 +31,6 @@
 		"typescript": "^5.0.0",
 		"vite": "^7.0.4"
 	},
-	"pnpm": {
-		"onlyBuiltDependencies": [
-			"@tailwindcss/oxide",
-			"esbuild"
-		]
-	},
 	"dependencies": {
 		"@tanstack/svelte-query": "^5.85.5",
 		"@viamrobotics/sdk": "^0.48.0",
