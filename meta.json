@@ -12,6 +12,12 @@
       "markdown_link": "README.md#model-devrelso101arm"
     },
     {
+      "api": "rdk:component:arm",
+      "model": "devrel:so101:simulated",
+      "short_description": "Hardware-free simulated SO-101 arm; emulates joint motion using the SO-101 kinematics",
+      "markdown_link": "README.md#model-devrelso101simulated"
+    },
+    {
       "api": "rdk:component:gripper",
       "model": "devrel:so101:gripper",
       "short_description": "Control the gripper joint of the SO-101 arm",

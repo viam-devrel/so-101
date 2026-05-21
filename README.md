@@ -213,6 +213,56 @@ Retrieve current calibration data:
 }
 ```
 
+## Model devrel:so101:simulated
+
+The simulated arm component emulates the SO-101 arm entirely in software, with **no hardware required**. It shares the same kinematics as the [`devrel:so101:arm`](#model-devrelso101arm) model, so it is useful for developing and testing configs, motion plans, and the 3D scene viewer without a physical robot.
+
+When commanded to a joint configuration, the simulated arm interpolates its joints toward the target over time at a configurable speed, just like rdk's builtin `simulated` arm. It also serves 3D meshes for each link, so it renders as an SO-101 in the visualizer.
+
+### Configuration
+
+```json
+{}
+```
+
+All attributes are optional, so the simulated arm works with an empty configuration.
+
+### Attributes
+
+The following attributes are available for the simulated arm component:
+
+| Name                 | Type   | Inclusion | Description                                                                                                                                              |
+| -------------------- | ------ | --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `speed_degs_per_sec` | float  | Optional  | How fast each joint travels toward its target, in degrees per second. Default is `90`.                                                                   |
+| `motion`             | string | Optional  | Name of the motion service used to plan `MoveToPosition` requests. Default is `"builtin"`.                                                               |
+| `simulate_time`      | bool   | Optional  | Whether a background goroutine advances the arm's position in real time. Default is `true`. (Tests set it to `false` to drive the simulated clock.)        |
+
+Example configuration with attributes:
+
+```json
+{
+  "speed_degs_per_sec": 60
+}
+```
+
+### Behavior
+
+- `MoveToJointPositions`, `MoveThroughJointPositions`, and `GoToInputs` interpolate the joints toward each target over time; the calls block until the arm arrives.
+- `MoveToPosition` plans through the motion service. Because the SO-101 is a 5-DOF arm, it defaults the planner goal metric to `position_only`; pass your own `goal_metric_type` via `extra` to override.
+- `JointPositions`, `EndPosition`, `Geometries`, and `IsMoving` report the simulated state.
+
+### DoCommand
+
+#### Get Motion Parameters
+
+Retrieve the configured joint speed:
+
+```json
+{
+  "command": "get_motion_params"
+}
+```
+
 ## Model devrel:so101:gripper
 
 The gripper component controls the 6th servo of the SO-101, which functions as a parallel gripper.
