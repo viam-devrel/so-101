@@ -113,10 +113,19 @@ main() {
   # Check if we're on Debian
   check_debian
 
-  # Now we know we're on Debian, check if running as root
+  # If nlopt is already present there is nothing to do -- and no root needed.
+  if is_nlopt_installed; then
+    log_info "nlopt is already installed - nothing to do"
+    exit 0
+  fi
+
+  # nlopt is missing, and installing it needs root. If we cannot install it,
+  # warn rather than fail: a hard failure here aborts the entire viam-server
+  # reconfiguration ("reconfiguration aborted ... falling back to last config").
   if [[ $EUID -ne 0 ]]; then
-    log_error "This script must be run as root on Debian (use sudo)"
-    exit 1
+    log_warn "nlopt is not installed and this script is not running as root."
+    log_warn "Install it manually: sudo apt-get install -y libnlopt-dev libnlopt0"
+    exit 0
   fi
 
   # Check current architecture
@@ -126,14 +135,6 @@ main() {
   if [[ "$arch" != "x86_64" && "$arch" != "aarch64" ]]; then
     log_warn "Unsupported architecture: $arch (expected x86_64 or aarch64)"
     log_warn "Proceeding anyway - nlopt should work on most architectures"
-  fi
-
-  # Check if nlopt is already installed
-  if is_nlopt_installed; then
-    log_info "nlopt is already installed on this system"
-    verify_installation
-    log_info "No installation needed - nlopt dependency satisfied"
-    exit 0
   fi
 
   log_info "nlopt not found - proceeding with installation"
