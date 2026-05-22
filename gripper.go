@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/golang/geo/r3"
+	commonpb "go.viam.com/api/common/v1"
 	"go.viam.com/rdk/components/gripper"
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/referenceframe"
@@ -19,6 +20,12 @@ import (
 
 var (
 	SO101GripperModel = resource.NewModel("devrel", "so101", "gripper")
+)
+
+// Gripper variants selectable via the gripper_type config attribute.
+const (
+	leaderGripper   = "leader"
+	followerGripper = "follower"
 )
 
 type SO101GripperConfig struct {
@@ -32,6 +39,10 @@ type SO101GripperConfig struct {
 
 	// Shared with arm
 	CalibrationFile string `json:"calibration_file,omitempty"`
+
+	// GripperType selects which meshes Geometries() serves: "follower" (moving
+	// jaw, the default) or "leader" (thumb-loop handle + trigger).
+	GripperType string `json:"gripper_type,omitempty"`
 }
 
 // Validate ensures all parts of the config are valid
@@ -52,17 +63,22 @@ func (cfg *SO101GripperConfig) Validate(path string) ([]string, []string, error)
 		cfg.Baudrate = 1000000
 	}
 
+	if cfg.GripperType != "" && cfg.GripperType != leaderGripper && cfg.GripperType != followerGripper {
+		return nil, nil, fmt.Errorf("gripper_type must be %q or %q, got %q",
+			leaderGripper, followerGripper, cfg.GripperType)
+	}
+
 	return nil, nil, nil
 }
 
 type so101Gripper struct {
 	resource.AlwaysRebuild
 
-	name       resource.Name
-	logger     logging.Logger
-	controller *SafeSoArmController
-	geometries []spatialmath.Geometry
-	servoID    int
+	name        resource.Name
+	logger      logging.Logger
+	controller  *SafeSoArmController
+	gripperType string
+	servoID     int
 
 	mu       sync.Mutex
 	isMoving atomic.Bool
@@ -123,15 +139,16 @@ func newSO101Gripper(ctx context.Context, deps resource.Dependencies, conf resou
 		return nil, fmt.Errorf("failed to get shared controller for gripper: %w", err)
 	}
 
-	clawSize := r3.Vector{X: 67.0455, Y: 53.027, Z: 106.4}
-	claws, err := spatialmath.NewBox(spatialmath.NewPoseFromPoint(r3.Vector{X: 0, Y: 0, Z: clawSize.Z / 2}), clawSize, "claws")
-	geometries := []spatialmath.Geometry{claws}
+	gripperType := cfg.GripperType
+	if gripperType == "" {
+		gripperType = followerGripper
+	}
 
 	g := &so101Gripper{
 		name:           conf.ResourceName(),
 		logger:         logger,
 		controller:     controller,
-		geometries:     geometries,
+		gripperType:    gripperType,
 		servoID:        cfg.ServoID,
 		speed:          30,
 		acceleration:   50,
@@ -219,11 +236,88 @@ func (g *so101Gripper) IsMoving(ctx context.Context) (bool, error) {
 	return g.isMoving.Load(), nil
 }
 
-func (g *so101Gripper) Geometries(ctx context.Context, extra map[string]interface{}) ([]spatialmath.Geometry, error) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
+// Gripper geometry from the SO-101 URDF (TheRobotStudio/SO-ARM100), in millimeters.
+// Poses are relative to the gripper component's frame (the arm's tool frame).
+var (
+	// gripperBodyPose places the static body mesh.
+	gripperBodyPose = spatialmath.NewPose(
+		r3.Vector{Y: -0.22, Z: 0.95}, &spatialmath.EulerAngles{Roll: math.Pi})
+	// gripperJointPose is the gripper joint origin; the moving part rotates about its Z axis.
+	gripperJointPose = spatialmath.NewPose(
+		r3.Vector{X: 20.2, Y: 18.8, Z: -23.4}, &spatialmath.EulerAngles{Roll: math.Pi / 2})
+	// gripperMovingVisualPose offsets the moving-part mesh within the joint's link.
+	gripperMovingVisualPose = spatialmath.NewPoseFromPoint(r3.Vector{Z: 18.9})
+	// toolFromGripperLink maps the URDF gripper_link frame (which the poses above are
+	// authored in) into the Viam "tool" frame the gripper component attaches at.
+	// so101.json's "tool" link rotates ~180 deg from gripper_link, so without this
+	// correction the gripper renders facing backwards.
+	toolFromGripperLink = spatialmath.PoseInverse(
+		spatialmath.NewPose(r3.Vector{}, &spatialmath.EulerAngles{Pitch: math.Pi, Yaw: 0.0486795}))
+)
 
-	return g.geometries, nil
+// Gripper joint limits from the SO-101 URDF, in radians.
+const (
+	gripperJointMin = -0.174533
+	gripperJointMax = 1.74533
+)
+
+// buildGripperMeshes returns the gripper's static body mesh plus the moving part
+// (jaw for the follower, trigger for the leader) posed at jawAngle radians about
+// the gripper joint. It is split out from Geometries so it can be tested without
+// a hardware controller.
+func buildGripperMeshes(gripperType string, jawAngle float64) ([]spatialmath.Geometry, error) {
+	// Static meshes (all posed at the gripper body pose) plus the moving-part mesh.
+	// The follower's body is one piece; the leader's is the wrist-roll part (which
+	// connects to the arm) plus the handle attached to it.
+	staticPLYs := [][]byte{so101FollowerBodyPLY}
+	movingPLY := so101FollowerJawPLY
+	if gripperType == leaderGripper {
+		staticPLYs = [][]byte{so101LeaderWristRollPLY, so101LeaderBodyPLY}
+		movingPLY = so101LeaderTriggerPLY
+	}
+
+	bodyPose := spatialmath.Compose(toolFromGripperLink, gripperBodyPose)
+	geoms := make([]spatialmath.Geometry, 0, len(staticPLYs)+1)
+	for i, ply := range staticPLYs {
+		m, err := spatialmath.NewMeshFromProto(bodyPose,
+			&commonpb.Mesh{ContentType: "ply", Mesh: ply}, fmt.Sprintf("gripper_body_%d", i))
+		if err != nil {
+			return nil, err
+		}
+		geoms = append(geoms, m)
+	}
+
+	// Moving part: joint origin, then a rotation about the joint Z axis, then the
+	// moving-part mesh offset -- the whole chain corrected into the tool frame.
+	movingPose := spatialmath.Compose(toolFromGripperLink, spatialmath.Compose(
+		spatialmath.Compose(gripperJointPose,
+			spatialmath.NewPose(r3.Vector{}, &spatialmath.EulerAngles{Yaw: jawAngle})),
+		gripperMovingVisualPose,
+	))
+	moving, err := spatialmath.NewMeshFromProto(movingPose,
+		&commonpb.Mesh{ContentType: "ply", Mesh: movingPLY}, "gripper_moving")
+	if err != nil {
+		return nil, err
+	}
+
+	return append(geoms, moving), nil
+}
+
+// jawAngle maps the gripper's current open percentage onto the URDF gripper-joint
+// range. If the live position cannot be read it assumes the gripper is closed.
+func (g *so101Gripper) jawAngle(ctx context.Context) float64 {
+	positions, err := g.controller.GetJointPositionsForServos(ctx, []int{g.servoID})
+	if err != nil || len(positions) == 0 {
+		return gripperJointMin
+	}
+	pct := math.Max(0, math.Min(1, g.radiansToPercent(positions[0])/100.0))
+	return gripperJointMin + pct*(gripperJointMax-gripperJointMin)
+}
+
+// Geometries serves the gripper as meshes: a static body and a moving part posed by
+// the live gripper opening, so the jaw/trigger articulates in the 3D viewer.
+func (g *so101Gripper) Geometries(ctx context.Context, extra map[string]interface{}) ([]spatialmath.Geometry, error) {
+	return buildGripperMeshes(g.gripperType, g.jawAngle(ctx))
 }
 
 func (g *so101Gripper) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {

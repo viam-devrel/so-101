@@ -64,6 +64,7 @@ The following attributes are available for the arm component:
 | `baudrate`         | int      | Optional     | The baud rate for serial communication. Default is `1000000`.                                                                                                          |
 | `servo_ids`        | []int    | Optional     | List of servo IDs for the arm joints. Default is `[1, 2, 3, 4, 5]`.                                                                                                    |
 | `timeout`          | duration | Optional     | Communication timeout. Default is system default.                                                                                                                      |
+| `visualize_ee_frame` | bool   | Optional     | When `true`, serves a colored XYZ coordinate-frame marker at the end-effector for the 3D viewer. Default is `false`.                                                    |
 
 **If you're building and setting up an arm for the first time, please see the [calibration sensor component](#model-devrelso101calibration) for setup instructions.**
 
@@ -213,6 +214,57 @@ Retrieve current calibration data:
 }
 ```
 
+## Model devrel:so101:simulated
+
+The simulated arm component emulates the SO-101 arm entirely in software, with **no hardware required**. It shares the same kinematics as the [`devrel:so101:arm`](#model-devrelso101arm) model, so it is useful for developing and testing configs, motion plans, and the 3D scene viewer without a physical robot.
+
+When commanded to a joint configuration, the simulated arm interpolates its joints toward the target over time at a configurable speed, just like rdk's builtin `simulated` arm. It also serves 3D meshes for each link, so it renders as an SO-101 in the visualizer.
+
+### Configuration
+
+```json
+{}
+```
+
+All attributes are optional, so the simulated arm works with an empty configuration.
+
+### Attributes
+
+The following attributes are available for the simulated arm component:
+
+| Name                 | Type   | Inclusion | Description                                                                                                                                              |
+| -------------------- | ------ | --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `speed_degs_per_sec` | float  | Optional  | How fast each joint travels toward its target, in degrees per second. Default is `90`.                                                                   |
+| `motion`             | string | Optional  | Name of the motion service used to plan `MoveToPosition` requests. Default is `"builtin"`.                                                               |
+| `simulate_time`      | bool   | Optional  | Whether a background goroutine advances the arm's position in real time. Default is `true`. (Tests set it to `false` to drive the simulated clock.)        |
+| `visualize_ee_frame` | bool   | Optional  | When `true`, serves a colored XYZ coordinate-frame marker at the end-effector for the 3D viewer. Default is `false`.                                       |
+
+Example configuration with attributes:
+
+```json
+{
+  "speed_degs_per_sec": 60
+}
+```
+
+### Behavior
+
+- `MoveToJointPositions`, `MoveThroughJointPositions`, and `GoToInputs` interpolate the joints toward each target over time; the calls block until the arm arrives.
+- `MoveToPosition` plans through the motion service. Because the SO-101 is a 5-DOF arm, it defaults the planner goal metric to `position_only`; pass your own `goal_metric_type` via `extra` to override.
+- `JointPositions`, `EndPosition`, `Geometries`, and `IsMoving` report the simulated state.
+
+### DoCommand
+
+#### Get Motion Parameters
+
+Retrieve the configured joint speed:
+
+```json
+{
+  "command": "get_motion_params"
+}
+```
+
 ## Model devrel:so101:gripper
 
 The gripper component controls the 6th servo of the SO-101, which functions as a parallel gripper.
@@ -240,6 +292,7 @@ Follow the [arm setup steps](#first-time-arm-setup) to learn how to set up the a
 | `baudrate`         | int      | Optional  | The baud rate for serial communication. Default is `1000000`. |
 | `servo_id`         | int      | Optional  | The servo ID for the gripper. Default is `6`.                 |
 | `timeout`          | duration | Optional  | Communication timeout. Default is system default.             |
+| `gripper_type`     | string   | Optional  | Which gripper meshes `Geometries()` serves for the 3D viewer: `follower` (moving jaw, default) or `leader` (thumb-loop handle + trigger). The moving part articulates with the live gripper opening. |
 
 ### Communication
 
@@ -307,6 +360,47 @@ Check the shared controller status:
 ```json
 {
   "command": "controller_status"
+}
+```
+
+## Model devrel:so101:simulated-gripper
+
+The simulated gripper emulates the SO-101 gripper entirely in software, with **no hardware required**. It serves the gripper meshes (a static body plus a moving jaw/trigger) to the 3D scene viewer, with the moving part posed by the gripper's opening — useful for developing and previewing without a physical robot.
+
+`Open` opens the gripper and `Grab` closes it, interpolating the jaw open/closed over time so it animates in the 3D viewer (like the simulated arm). Both block until the motion finishes, and `IsMoving` reports `true` while the jaw is travelling. A simulated gripper never grasps an object, so `Grab` always reports `false`.
+
+### Configuration
+
+```json
+{}
+```
+
+All attributes are optional, so the simulated gripper works with an empty configuration.
+
+### Attributes
+
+| Name           | Type   | Inclusion | Description                                                                                                |
+| -------------- | ------ | --------- | ---------------------------------------------------------------------------------------------------------- |
+| `gripper_type` | string | Optional  | Which gripper meshes to serve: `follower` (moving jaw, the default) or `leader` (thumb-loop handle + trigger). |
+
+### DoCommand
+
+#### Set Position
+
+Set a target opening percentage (0 = closed, 100 = open); the jaw interpolates toward it:
+
+```json
+{
+  "command": "set_position",
+  "percentage": 50
+}
+```
+
+#### Get Position
+
+```json
+{
+  "command": "get_position"
 }
 ```
 
