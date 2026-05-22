@@ -48,9 +48,9 @@ fi
 
 echo "✅ Node.js $(node --version) installed"
 
-# Install pnpm
+# Install pnpm v11
 echo "📦 Installing pnpm..."
-mise use -g pnpm
+mise use -g pnpm@11
 
 eval "$(mise activate bash)"
 

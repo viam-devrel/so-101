@@ -82,6 +82,8 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
 - Leader gripper meshes are printable STLs with no assembly transforms (the SO-ARM100
   repo ships only a *follower* URDF/sim model), so leader placement is best-effort. The
   follower gripper meshes come from the SO-ARM100 simulation assets + URDF and are accurate.
-- The release build currently fails: `setup.sh` installs an unpinned `pnpm` (now v11)
-  that no longer reads `package.json`'s `pnpm.onlyBuiltDependencies`. Pin pnpm in
-  `setup.sh` or migrate that setting to `pnpm-workspace.yaml`.
+- pnpm 11 approves dependency install-scripts via `allowBuilds` (a map of dependency
+  name to true/false) in `setup-app/pnpm-workspace.yaml` — not the older
+  `onlyBuiltDependencies` list, and not `package.json`'s `pnpm` field. `setup.sh` pins
+  `pnpm@11` (matching the `node@22` pin) so a future pnpm major can't silently break
+  the build again.
