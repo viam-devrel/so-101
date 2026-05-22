@@ -1,5 +1,6 @@
-# Dependencies allowed to run install build scripts. pnpm 10+ reads this from
-# pnpm-workspace.yaml; it no longer reads the "pnpm" field in package.json.
-onlyBuiltDependencies:
-  - '@tailwindcss/oxide'
-  - esbuild
+# Allow these dependencies to run their install build scripts.
+# pnpm 11 reads `allowBuilds` from pnpm-workspace.yaml (it replaced the
+# `onlyBuiltDependencies` list, and no longer reads package.json's `pnpm` field).
+allowBuilds:
+  '@tailwindcss/oxide': true
+  esbuild: true
