@@ -94,6 +94,8 @@ The hardware arm enforces a real per-joint speed cap on the Feetech servos: each
 
 `IsMoving()` reports whether a move call is currently in progress. On the internal safety-timeout edge case (a move times out waiting for servos to settle), `IsMoving` may briefly differ from whether the servos are physically moving.
 
+`Stop()` does not currently interrupt an in-progress joint move: a move blocks until the servos settle (or the internal safety timeout elapses), so a `Stop()` issued mid-move takes effect only once that move returns. Interrupting in-flight motion is a planned follow-up.
+
 `acceleration_degs_per_sec_per_sec` is validated and stored when set via config or `set_acceleration` DoCommand, but is not yet written to the servo hardware. Acceleration enforcement is a planned follow-up.
 
 ### Communication
