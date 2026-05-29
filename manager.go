@@ -53,7 +53,16 @@ func (s *SafeSoArmController) MoveToJointPositions(ctx context.Context, jointAng
 		rawPositions[servoID] = raw
 	}
 
-	// Use ServoGroup to write positions
+	// Speed mode (independent joints): when a positive speed is supplied, command every
+	// servo at the same goal velocity. speed <= 0 keeps the legacy max-speed path, which
+	// the gripper component relies on (it always calls with speed 0).
+	if speed > 0 {
+		speeds := make(feetech.PositionMap, len(rawPositions))
+		for id := range rawPositions {
+			speeds[id] = speed
+		}
+		return s.group.SetPositionsWithSpeed(ctx, rawPositions, speeds)
+	}
 	return s.group.SetPositions(ctx, rawPositions)
 }
 
@@ -87,7 +96,16 @@ func (s *SafeSoArmController) MoveServosToPositions(ctx context.Context, servoID
 		rawPositions[servoID] = raw
 	}
 
-	// Use appropriate ServoGroup
+	// Speed mode (independent joints): when a positive speed is supplied, command every
+	// servo at the same goal velocity. speed <= 0 keeps the legacy max-speed path, which
+	// the gripper component relies on (it always calls with speed 0).
+	if speed > 0 {
+		speeds := make(feetech.PositionMap, len(rawPositions))
+		for id := range rawPositions {
+			speeds[id] = speed
+		}
+		return s.group.SetPositionsWithSpeed(ctx, rawPositions, speeds)
+	}
 	return s.group.SetPositions(ctx, rawPositions)
 }
 
