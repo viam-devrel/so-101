@@ -28,6 +28,21 @@ type SafeSoArmController struct {
 	mu               sync.RWMutex
 }
 
+// writePositions writes goal positions to the servo group. When speed > 0 it commands
+// every servo at the same goal velocity (independent-joint speed mode, steps/sec);
+// speed <= 0 uses the legacy max-speed path, which the gripper component relies on (it
+// always calls with speed 0).
+func (s *SafeSoArmController) writePositions(ctx context.Context, rawPositions feetech.PositionMap, speed int) error {
+	if speed > 0 {
+		speeds := make(feetech.PositionMap, len(rawPositions))
+		for id := range rawPositions {
+			speeds[id] = speed
+		}
+		return s.group.SetPositionsWithSpeed(ctx, rawPositions, speeds)
+	}
+	return s.group.SetPositions(ctx, rawPositions)
+}
+
 func (s *SafeSoArmController) MoveToJointPositions(ctx context.Context, jointAngles []float64, speed, acc int) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -53,17 +68,7 @@ func (s *SafeSoArmController) MoveToJointPositions(ctx context.Context, jointAng
 		rawPositions[servoID] = raw
 	}
 
-	// Speed mode (independent joints): when a positive speed is supplied, command every
-	// servo at the same goal velocity. speed <= 0 keeps the legacy max-speed path, which
-	// the gripper component relies on (it always calls with speed 0).
-	if speed > 0 {
-		speeds := make(feetech.PositionMap, len(rawPositions))
-		for id := range rawPositions {
-			speeds[id] = speed
-		}
-		return s.group.SetPositionsWithSpeed(ctx, rawPositions, speeds)
-	}
-	return s.group.SetPositions(ctx, rawPositions)
+	return s.writePositions(ctx, rawPositions, speed)
 }
 
 func (s *SafeSoArmController) MoveServosToPositions(ctx context.Context, servoIDs []int, jointAngles []float64, speed, acc int) error {
@@ -96,17 +101,7 @@ func (s *SafeSoArmController) MoveServosToPositions(ctx context.Context, servoID
 		rawPositions[servoID] = raw
 	}
 
-	// Speed mode (independent joints): when a positive speed is supplied, command every
-	// servo at the same goal velocity. speed <= 0 keeps the legacy max-speed path, which
-	// the gripper component relies on (it always calls with speed 0).
-	if speed > 0 {
-		speeds := make(feetech.PositionMap, len(rawPositions))
-		for id := range rawPositions {
-			speeds[id] = speed
-		}
-		return s.group.SetPositionsWithSpeed(ctx, rawPositions, speeds)
-	}
-	return s.group.SetPositions(ctx, rawPositions)
+	return s.writePositions(ctx, rawPositions, speed)
 }
 
 func (s *SafeSoArmController) GetJointPositions(ctx context.Context) ([]float64, error) {
