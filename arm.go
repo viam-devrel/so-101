@@ -362,7 +362,7 @@ func (s *so101) MoveToPosition(ctx context.Context, pose spatialmath.Pose, extra
 	return err
 }
 
-// clampPositions converts joint inputs to radians and clamps each to the joint's calibrated
+// clampPositions clamps joint inputs (already in radians) to each joint's calibrated
 // limits, warning on out-of-range values.
 func (s *so101) clampPositions(positions []referenceframe.Input) ([]float64, error) {
 	if len(positions) != len(s.armServoIDs) {

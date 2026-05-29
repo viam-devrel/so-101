@@ -65,6 +65,8 @@ The following attributes are available for the arm component:
 | `servo_ids`        | []int    | Optional     | List of servo IDs for the arm joints. Default is `[1, 2, 3, 4, 5]`.                                                                                                    |
 | `timeout`          | duration | Optional     | Communication timeout. Default is system default.                                                                                                                      |
 | `visualize_ee_frame` | bool   | Optional     | When `true`, serves a colored XYZ coordinate-frame marker at the end-effector for the 3D viewer. Default is `false`.                                                    |
+| `speed_degs_per_sec` | float  | Optional     | Real per-joint speed cap enforced on the servos, in degrees per second. Each joint moves at this speed independently, so joints with longer travel finish later (planned motion stays smooth because the planner sends fine-grained waypoints). Default `50`, valid range 3–180. |
+| `acceleration_degs_per_sec_per_sec` | float | Optional | Validated and stored but **not yet enforced** on hardware (planned follow-up). Default `100`, valid range 10–500. |
 
 **If you're building and setting up an arm for the first time, please see the [calibration sensor component](#model-devrelso101calibration) for setup instructions.**
 
@@ -81,6 +83,18 @@ The module uses this calibration priority:
 The servo register fallback provides better out-of-box experience by using actual hardware settings instead of generic defaults. Each startup without a calibration file will re-read from servos to ensure fresh data.
 
 **Note:** Calibration read from servos is used in-memory only and not automatically saved. To persist servo-read calibration, use the calibration sensor component's workflow.
+
+### Motion and speed
+
+The hardware arm enforces a real per-joint speed cap on the Feetech servos: each joint moves at the configured `speed_degs_per_sec` (or the per-move override, see below). Because joints move independently rather than coordinating arrival times, a joint with a larger travel angle will take longer to reach its target than one with smaller travel. For RDK motion-planned paths this remains smooth in practice because the planner generates many fine-grained waypoints, keeping per-waypoint joint displacements small.
+
+`MoveThroughJointPositions` accepts an optional `MoveOptions.MaxVelRads` (in radians/second) that overrides the configured default for that move. `MaxAccRads` is accepted but intentionally ignored — acceleration is not yet enforced on hardware. `GoToInputs` routes through this same path.
+
+`MoveThroughJointPositions` streams waypoints back-to-back: intermediate waypoints are commanded without waiting for the arm to settle (flythrough), and the arm waits to stop only after the **final** waypoint. As a result, intermediate waypoints are not guaranteed stop-points. `GoToInputs` shares this same streaming path.
+
+`IsMoving()` reports whether a move call is currently in progress. On the internal safety-timeout edge case (a move times out waiting for servos to settle), `IsMoving` may briefly differ from whether the servos are physically moving.
+
+`acceleration_degs_per_sec_per_sec` is validated and stored when set via config or `set_acceleration` DoCommand, but is not yet written to the servo hardware. Acceleration enforcement is a planned follow-up.
 
 ### Communication
 
@@ -211,6 +225,61 @@ Retrieve current calibration data:
 ```json
 {
   "command": "get_calibration"
+}
+```
+
+#### Set Speed
+
+Update the per-joint speed cap at runtime without reconfiguring the component. `set_speed` is a key in the request map (not a `"command"` value). Valid range: 3–180 degrees/second.
+
+```json
+{
+  "set_speed": 60.0
+}
+```
+
+Response:
+
+```json
+{
+  "speed_set": 60.0
+}
+```
+
+#### Set Acceleration
+
+Update the acceleration parameter at runtime. `set_acceleration` is a key in the request map (not a `"command"` value). Valid range: 10–500 degrees/second². **Note:** acceleration is validated and stored but not yet enforced on hardware.
+
+```json
+{
+  "set_acceleration": 150.0
+}
+```
+
+Response:
+
+```json
+{
+  "acceleration_set": 150.0
+}
+```
+
+#### Get Motion Parameters
+
+Retrieve the current speed and acceleration values in use. `get_motion_params` is a key set to `true` in the request map (not a `"command"` value). Both `set_speed` and `get_motion_params` can be combined in one request.
+
+```json
+{
+  "get_motion_params": true
+}
+```
+
+Response:
+
+```json
+{
+  "current_speed_degs_per_sec": 50.0,
+  "current_acceleration_degs_per_sec_per_sec": 100.0
 }
 ```
 
