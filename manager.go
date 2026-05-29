@@ -6,6 +6,7 @@ import (
 	"math"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/hipsterbrown/feetech-servo/feetech"
 	"go.viam.com/rdk/logging"
@@ -197,6 +198,53 @@ func (s *SafeSoArmController) Stop(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// WaitForServosToStop polls only the given servos' Moving register until all report
+// stopped, ctx is cancelled, or timeoutMs elapses (best-effort: timeout returns nil).
+//
+// Scoped to the requested servos so an in-flight gripper move on the shared bus cannot
+// block an arm move's completion wait. Polls lock-free after capturing servo references
+// under a brief read lock, so a concurrent Stop is not blocked.
+func (s *SafeSoArmController) WaitForServosToStop(ctx context.Context, servoIDs []int, timeoutMs int) error {
+	s.mu.RLock()
+	servos := make([]*CalibratedServo, 0, len(servoIDs))
+	for _, id := range servoIDs {
+		if cs, ok := s.calibratedServos[id]; ok {
+			servos = append(servos, cs)
+		}
+	}
+	s.mu.RUnlock()
+
+	deadline := time.Now().Add(time.Duration(timeoutMs) * time.Millisecond)
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		allStopped := true
+		for _, cs := range servos {
+			moving, err := cs.Moving(ctx)
+			if err != nil {
+				return fmt.Errorf("failed to read moving state: %w", err)
+			}
+			if moving {
+				allStopped = false
+				break
+			}
+		}
+		if allStopped {
+			return nil
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+		if time.Now().After(deadline) {
+			return nil
+		}
+	}
 }
 
 func (s *SafeSoArmController) Close() error {
