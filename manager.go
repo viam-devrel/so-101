@@ -201,16 +201,24 @@ func (s *SafeSoArmController) Stop(ctx context.Context) error {
 }
 
 // WaitForServosToStop polls only the given servos' Moving register until all report
-// stopped, ctx is cancelled, or timeoutMs elapses (best-effort: timeout returns nil).
+// stopped, ctx is cancelled, or timeoutMs elapses (best-effort: on timeout it logs a
+// warning and returns nil, so a still-settling servo doesn't fail an otherwise-complete
+// move).
 //
 // Scoped to the requested servos so an in-flight gripper move on the shared bus cannot
 // block an arm move's completion wait. Polls lock-free after capturing servo references
 // under a brief read lock, so a concurrent Stop is not blocked.
+//
+// Each cycle issues one Moving read per servo; those reads serialize at the feetech bus
+// mutex alongside in-flight motion writes. At the 50ms cadence this is negligible, but a
+// future optimization could batch them into a single SyncRead of the Moving register.
 func (s *SafeSoArmController) WaitForServosToStop(ctx context.Context, servoIDs []int, timeoutMs int) error {
 	s.mu.RLock()
+	ids := make([]int, 0, len(servoIDs))
 	servos := make([]*CalibratedServo, 0, len(servoIDs))
 	for _, id := range servoIDs {
 		if cs, ok := s.calibratedServos[id]; ok {
+			ids = append(ids, id)
 			servos = append(servos, cs)
 		}
 	}
@@ -222,10 +230,10 @@ func (s *SafeSoArmController) WaitForServosToStop(ctx context.Context, servoIDs 
 
 	for {
 		allStopped := true
-		for _, cs := range servos {
+		for i, cs := range servos {
 			moving, err := cs.Moving(ctx)
 			if err != nil {
-				return fmt.Errorf("failed to read moving state: %w", err)
+				return fmt.Errorf("failed to read moving state for servo %d: %w", ids[i], err)
 			}
 			if moving {
 				allStopped = false
@@ -235,14 +243,15 @@ func (s *SafeSoArmController) WaitForServosToStop(ctx context.Context, servoIDs 
 		if allStopped {
 			return nil
 		}
+		if time.Now().After(deadline) {
+			s.logger.Warnf("WaitForServosToStop: servos %v still moving after %dms timeout", ids, timeoutMs)
+			return nil
+		}
 
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
-		}
-		if time.Now().After(deadline) {
-			return nil
 		}
 	}
 }
