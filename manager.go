@@ -6,6 +6,7 @@ import (
 	"math"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/hipsterbrown/feetech-servo/feetech"
 	"go.viam.com/rdk/logging"
@@ -26,6 +27,21 @@ type SafeSoArmController struct {
 	logger           logging.Logger
 	calibration      SO101FullCalibration
 	mu               sync.RWMutex
+}
+
+// writePositions writes goal positions to the servo group. When speed > 0 it commands
+// every servo at the same goal velocity (independent-joint speed mode, steps/sec);
+// speed <= 0 uses the legacy max-speed path, which the gripper component relies on (it
+// always calls with speed 0).
+func (s *SafeSoArmController) writePositions(ctx context.Context, rawPositions feetech.PositionMap, speed int) error {
+	if speed > 0 {
+		speeds := make(feetech.PositionMap, len(rawPositions))
+		for id := range rawPositions {
+			speeds[id] = speed
+		}
+		return s.group.SetPositionsWithSpeed(ctx, rawPositions, speeds)
+	}
+	return s.group.SetPositions(ctx, rawPositions)
 }
 
 func (s *SafeSoArmController) MoveToJointPositions(ctx context.Context, jointAngles []float64, speed, acc int) error {
@@ -53,8 +69,7 @@ func (s *SafeSoArmController) MoveToJointPositions(ctx context.Context, jointAng
 		rawPositions[servoID] = raw
 	}
 
-	// Use ServoGroup to write positions
-	return s.group.SetPositions(ctx, rawPositions)
+	return s.writePositions(ctx, rawPositions, speed)
 }
 
 func (s *SafeSoArmController) MoveServosToPositions(ctx context.Context, servoIDs []int, jointAngles []float64, speed, acc int) error {
@@ -87,8 +102,7 @@ func (s *SafeSoArmController) MoveServosToPositions(ctx context.Context, servoID
 		rawPositions[servoID] = raw
 	}
 
-	// Use appropriate ServoGroup
-	return s.group.SetPositions(ctx, rawPositions)
+	return s.writePositions(ctx, rawPositions, speed)
 }
 
 func (s *SafeSoArmController) GetJointPositions(ctx context.Context) ([]float64, error) {
@@ -184,6 +198,62 @@ func (s *SafeSoArmController) Stop(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// WaitForServosToStop polls only the given servos' Moving register until all report
+// stopped, ctx is cancelled, or timeoutMs elapses (best-effort: on timeout it logs a
+// warning and returns nil, so a still-settling servo doesn't fail an otherwise-complete
+// move).
+//
+// Scoped to the requested servos so an in-flight gripper move on the shared bus cannot
+// block an arm move's completion wait. Polls lock-free after capturing servo references
+// under a brief read lock, so a concurrent Stop is not blocked.
+//
+// Each cycle issues one Moving read per servo; those reads serialize at the feetech bus
+// mutex alongside in-flight motion writes. At the 50ms cadence this is negligible, but a
+// future optimization could batch them into a single SyncRead of the Moving register.
+func (s *SafeSoArmController) WaitForServosToStop(ctx context.Context, servoIDs []int, timeoutMs int) error {
+	s.mu.RLock()
+	ids := make([]int, 0, len(servoIDs))
+	servos := make([]*CalibratedServo, 0, len(servoIDs))
+	for _, id := range servoIDs {
+		if cs, ok := s.calibratedServos[id]; ok {
+			ids = append(ids, id)
+			servos = append(servos, cs)
+		}
+	}
+	s.mu.RUnlock()
+
+	deadline := time.Now().Add(time.Duration(timeoutMs) * time.Millisecond)
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		allStopped := true
+		for i, cs := range servos {
+			moving, err := cs.Moving(ctx)
+			if err != nil {
+				return fmt.Errorf("failed to read moving state for servo %d: %w", ids[i], err)
+			}
+			if moving {
+				allStopped = false
+				break
+			}
+		}
+		if allStopped {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			s.logger.Warnf("WaitForServosToStop: servos %v still moving after %dms timeout", ids, timeoutMs)
+			return nil
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
 }
 
 func (s *SafeSoArmController) Close() error {

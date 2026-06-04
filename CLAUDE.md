@@ -87,3 +87,9 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
   `onlyBuiltDependencies` list, and not `package.json`'s `pnpm` field. `setup.sh` pins
   `pnpm@11` (matching the `node@22` pin) so a future pnpm major can't silently break
   the build again.
+- The **simulated arm** uses coordinated-arrival interpolation (all joints finish together),
+  while the **hardware arm** uses independent-joint speed mode (each joint moves at the
+  configured `speed_degs_per_sec`; joints with longer travel finish later). This is intentional:
+  the RDK motion planner feeds dense waypoints that keep per-waypoint displacements small, so
+  independent-joint motion stays smooth on planned paths. Also note: `acceleration_degs_per_sec_per_sec`
+  is validated and stored on the hardware arm but not yet written to servo hardware (planned follow-up).

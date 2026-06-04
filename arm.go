@@ -362,6 +362,71 @@ func (s *so101) MoveToPosition(ctx context.Context, pose spatialmath.Pose, extra
 	return err
 }
 
+// clampPositions clamps joint inputs (already in radians) to each joint's calibrated
+// limits, warning on out-of-range values.
+func (s *so101) clampPositions(positions []referenceframe.Input) ([]float64, error) {
+	if len(positions) != len(s.armServoIDs) {
+		return nil, fmt.Errorf("expected %d joint positions for SO-101 arm, got %d", len(s.armServoIDs), len(positions))
+	}
+
+	values := make([]float64, len(positions))
+	copy(values, positions) // referenceframe.Input is an alias for float64
+
+	jointLimits := s.calculateJointLimits()
+
+	clamped := make([]float64, len(values))
+	for i, pos := range values {
+		min, max := jointLimits[i][0], jointLimits[i][1]
+		if pos < min || pos > max {
+			s.logger.Warnf("Joint %d position %.3f rad (%.1f°) out of range [%.3f, %.3f] rad ([%.1f°, %.1f°]), clamping",
+				s.armServoIDs[i], pos, pos*180/math.Pi, min, max, min*180/math.Pi, max*180/math.Pi)
+		}
+		clamped[i] = math.Max(min, math.Min(max, pos))
+	}
+	return clamped, nil
+}
+
+// moveJoints commands the arm joints at speedDegsPerSec (independent-joint speed mode) and,
+// when wait is true, blocks until the arm servos stop (bounded by a safety timeout).
+// The caller must hold s.moveLock and manage s.isMoving.
+func (s *so101) moveJoints(ctx context.Context, clampedPositions []float64, speedDegsPerSec float64, wait bool) error {
+	// Read current positions BEFORE commanding so the travel/timeout estimate is accurate.
+	var currentPositions []float64
+	if wait {
+		cp, err := s.controller.GetJointPositionsForServos(ctx, s.armServoIDs)
+		if err != nil {
+			s.logger.Warnf("Failed to read positions for timeout calculation: %v", err)
+		} else {
+			currentPositions = cp
+		}
+	}
+
+	speedSteps := degPerSecToStepsPerSec(speedDegsPerSec)
+	if err := s.controller.MoveServosToPositions(ctx, s.armServoIDs, clampedPositions, speedSteps, 0); err != nil {
+		return fmt.Errorf("failed to move SO-101 arm: %w", err)
+	}
+
+	if !wait {
+		return nil
+	}
+
+	timeout := maxMoveTimeoutMs
+	if currentPositions != nil {
+		maxTravelDeg := 0.0
+		for i, target := range clampedPositions {
+			if i < len(currentPositions) {
+				d := math.Abs(target-currentPositions[i]) * 180.0 / math.Pi
+				if d > maxTravelDeg {
+					maxTravelDeg = d
+				}
+			}
+		}
+		timeout = moveTimeoutMs(maxTravelDeg, speedDegsPerSec)
+	}
+	s.logger.Debugf("moveJoints: %.1f deg/s -> %d steps/s, wait timeout %d ms", speedDegsPerSec, speedSteps, timeout)
+	return s.controller.WaitForServosToStop(ctx, s.armServoIDs, timeout)
+}
+
 func (s *so101) MoveToJointPositions(ctx context.Context, positions []referenceframe.Input, extra map[string]interface{}) error {
 	s.moveLock.Lock()
 	defer s.moveLock.Unlock()
@@ -369,69 +434,46 @@ func (s *so101) MoveToJointPositions(ctx context.Context, positions []referencef
 	s.isMoving.Store(true)
 	defer s.isMoving.Store(false)
 
-	if len(positions) != len(s.armServoIDs) {
-		return fmt.Errorf("expected %d joint positions for SO-101 arm, got %d", len(s.armServoIDs), len(positions))
-	}
-
-	values := make([]float64, len(positions))
-	copy(values, positions)
-
-	// Calculate joint limits dynamically from calibration
-	jointLimits := s.calculateJointLimits()
-
-	// Validate input ranges and clamp positions for the arm joints
-	clampedPositions := make([]float64, len(values))
-	for i, pos := range values {
-		min, max := jointLimits[i][0], jointLimits[i][1]
-
-		// Validate and clamp the position
-		if pos < min || pos > max {
-			s.logger.Warnf("Joint %d position %.3f rad (%.1f°) out of range [%.3f, %.3f] rad ([%.1f°, %.1f°]), clamping",
-				s.armServoIDs[i], pos, pos*180/math.Pi, min, max, min*180/math.Pi, max*180/math.Pi)
-		}
-		clampedPositions[i] = math.Max(min, math.Min(max, pos))
-	}
-
-	if err := s.controller.MoveServosToPositions(ctx, s.armServoIDs, clampedPositions, 0, 0); err != nil {
-		return fmt.Errorf("failed to move SO-101 arm: %w", err)
-	}
-
-	currentPositions, err := s.controller.GetJointPositionsForServos(ctx, s.armServoIDs)
+	clamped, err := s.clampPositions(positions)
 	if err != nil {
-		s.logger.Warnf("Failed to get current positions for timing calculation: %v", err)
-		currentPositions = make([]float64, len(s.armServoIDs)) // Use zeros as fallback
+		return err
 	}
 
-	maxMovement := 0.0
-	for i, target := range clampedPositions {
-		if i < len(currentPositions) {
-			movement := math.Abs(target - currentPositions[i])
-			if movement > maxMovement {
-				maxMovement = movement
-			}
-		}
-	}
+	s.mu.RLock()
+	speed := float64(s.defaultSpeed)
+	s.mu.RUnlock()
 
-	speedRadPerSec := float64(s.defaultSpeed) * math.Pi / 180.0
-	moveTimeSeconds := maxMovement / speedRadPerSec
-	if moveTimeSeconds < 0.1 {
-		moveTimeSeconds = 0.1 // Minimum move time
-	}
-	if moveTimeSeconds > 10.0 {
-		moveTimeSeconds = 10.0 // Maximum move time for safety
-	}
-
-	time.Sleep(time.Duration(moveTimeSeconds * float64(time.Second)))
-
-	return nil
+	return s.moveJoints(ctx, clamped, speed, true)
 }
 
 func (s *so101) MoveThroughJointPositions(ctx context.Context, positions [][]referenceframe.Input, options *arm.MoveOptions, extra map[string]interface{}) error {
-	for _, jointPositions := range positions {
-		if err := s.MoveToJointPositions(ctx, jointPositions, extra); err != nil {
+	s.moveLock.Lock()
+	defer s.moveLock.Unlock()
+
+	s.isMoving.Store(true)
+	defer s.isMoving.Store(false)
+
+	s.mu.RLock()
+	defaultSpeed := float64(s.defaultSpeed)
+	s.mu.RUnlock()
+
+	maxVelRads := 0.0
+	if options != nil {
+		maxVelRads = options.MaxVelRads // MaxAccRads is intentionally ignored (speed-only)
+	}
+	speed := resolveSpeedDegsPerSec(maxVelRads, defaultSpeed)
+
+	// Stream waypoints back-to-back; only wait for the arm to settle after the last one so
+	// intermediate waypoints don't stutter.
+	for idx, jointPositions := range positions {
+		clamped, err := s.clampPositions(jointPositions)
+		if err != nil {
 			return err
 		}
-
+		isLast := idx == len(positions)-1
+		if err := s.moveJoints(ctx, clamped, speed, isLast); err != nil {
+			return err
+		}
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
