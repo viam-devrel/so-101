@@ -90,5 +90,67 @@ func newSO101Teleop(
 	conf resource.Config,
 	logger logging.Logger,
 ) (resource.Resource, error) {
-	return nil, fmt.Errorf("not implemented")
+	cfg, err := resource.NativeConfig[*SO101TeleopConfig](conf)
+	if err != nil {
+		return nil, err
+	}
+
+	leaderArm, err := arm.FromDependencies(deps, cfg.LeaderArm)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get leader_arm %q: %w", cfg.LeaderArm, err)
+	}
+	followerArm, err := arm.FromDependencies(deps, cfg.FollowerArm)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get follower_arm %q: %w", cfg.FollowerArm, err)
+	}
+
+	var leaderGripper, followerGripper gripper.Gripper
+	if cfg.LeaderGripper != "" {
+		leaderGripper, err = gripper.FromDependencies(deps, cfg.LeaderGripper)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get leader_gripper %q: %w", cfg.LeaderGripper, err)
+		}
+	}
+	if cfg.FollowerGripper != "" {
+		followerGripper, err = gripper.FromDependencies(deps, cfg.FollowerGripper)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get follower_gripper %q: %w", cfg.FollowerGripper, err)
+		}
+	}
+
+	rateHz := cfg.RateHz
+	if rateHz == 0 {
+		rateHz = defaultTeleopRateHz
+	}
+	maxErr := cfg.MaxConsecutiveErrors
+	if maxErr == 0 {
+		maxErr = defaultMaxConsecutiveErrors
+	}
+	manageTorque := true
+	if cfg.ManageLeaderTorque != nil {
+		manageTorque = *cfg.ManageLeaderTorque
+	}
+
+	tp := &so101Teleop{
+		Named:              conf.ResourceName().AsNamed(),
+		logger:             logger,
+		leaderArm:          leaderArm,
+		followerArm:        followerArm,
+		leaderGripper:      leaderGripper,
+		followerGripper:    followerGripper,
+		rateHz:             rateHz,
+		manageLeaderTorque: manageTorque,
+		maxConsecutiveErr:  maxErr,
+	}
+
+	if cfg.AutoStart {
+		if err := tp.start(ctx); err != nil {
+			return nil, fmt.Errorf("auto_start failed: %w", err)
+		}
+	}
+
+	return tp, nil
 }
+
+func (tp *so101Teleop) start(ctx context.Context) error { return nil }
+func (tp *so101Teleop) Close(ctx context.Context) error { return nil }
