@@ -161,6 +161,12 @@ func TestTeleopConfigValidate(t *testing.T) {
 		test.That(t, err, test.ShouldNotBeNil)
 	})
 
+	t.Run("rejects rate above max", func(t *testing.T) {
+		cfg := &SO101TeleopConfig{LeaderArm: "l", FollowerArm: "f", RateHz: 1e12}
+		_, _, err := cfg.Validate("p")
+		test.That(t, err, test.ShouldNotBeNil)
+	})
+
 	t.Run("deps are arms plus configured grippers only", func(t *testing.T) {
 		cfg := &SO101TeleopConfig{LeaderArm: "l", FollowerArm: "f"}
 		req, _, err := cfg.Validate("p")
@@ -204,6 +210,33 @@ func TestTeleopStartStopStatus(t *testing.T) {
 	la.mu.Lock()
 	test.That(t, la.torqueLog, test.ShouldResemble, []bool{false, true})
 	la.mu.Unlock()
+}
+
+func TestTeleopTickErrorThreshold(t *testing.T) {
+	la := &fakeArm{name: arm.Named("l"), jpErr: errors.New("boom")}
+	fa := &fakeArm{name: arm.Named("f")}
+	tp := newTestTeleop(t, la, fa, nil, nil)
+	tp.maxConsecutiveErr = 3
+	tp.running = true
+
+	// first two failures: keep going, counter climbs
+	test.That(t, tp.tick(context.Background()), test.ShouldBeFalse)
+	test.That(t, tp.tick(context.Background()), test.ShouldBeFalse)
+	test.That(t, tp.consecutiveErrors, test.ShouldEqual, 2)
+
+	// third failure hits threshold -> signal stop
+	test.That(t, tp.tick(context.Background()), test.ShouldBeTrue)
+	test.That(t, tp.lastError, test.ShouldNotBeBlank)
+
+	// a success resets the counter
+	la.mu.Lock()
+	la.jpErr = nil
+	la.jp = []referenceframe.Input{0.5}
+	la.mu.Unlock()
+	tp.consecutiveErrors = 1
+	test.That(t, tp.tick(context.Background()), test.ShouldBeFalse)
+	test.That(t, tp.consecutiveErrors, test.ShouldEqual, 0)
+	test.That(t, tp.cycles, test.ShouldEqual, uint64(1))
 }
 
 func TestTeleopConstructorWiring(t *testing.T) {

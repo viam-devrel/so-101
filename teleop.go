@@ -19,6 +19,7 @@ var SO101TeleopModel = resource.NewModel("devrel", "so101", "teleop")
 const (
 	defaultTeleopRateHz         = 20.0
 	defaultMaxConsecutiveErrors = 10
+	maxTeleopRateHz             = 1000.0
 )
 
 func init() {
@@ -50,6 +51,9 @@ func (cfg *SO101TeleopConfig) Validate(path string) ([]string, []string, error) 
 	}
 	if cfg.RateHz < 0 {
 		return nil, nil, fmt.Errorf("rate_hz must not be negative, got %v", cfg.RateHz)
+	}
+	if cfg.RateHz > maxTeleopRateHz {
+		return nil, nil, fmt.Errorf("rate_hz must be <= %v, got %v", maxTeleopRateHz, cfg.RateHz)
 	}
 	deps := []string{cfg.LeaderArm, cfg.FollowerArm}
 	if cfg.LeaderGripper != "" {
@@ -291,9 +295,29 @@ func (tp *so101Teleop) runLoop(ctx context.Context) {
 	}
 }
 
-// tick runs one cycle and returns true when the loop should stop. Replaced in the next task.
+// tick runs one syncOnce, updates counters, and returns true when the loop
+// should stop (consecutive-error threshold exceeded). All shared-state writes
+// happen under tp.mu so a concurrent status DoCommand reads a consistent view.
 func (tp *so101Teleop) tick(ctx context.Context) bool {
-	_ = tp.syncOnce(ctx)
+	err := tp.syncOnce(ctx)
+
+	tp.mu.Lock()
+	defer tp.mu.Unlock()
+	if err != nil {
+		tp.consecutiveErrors++
+		tp.lastError = err.Error()
+		tp.logger.Warnf("Teleop cycle error (%d/%d): %v",
+			tp.consecutiveErrors, tp.maxConsecutiveErr, err)
+		if tp.consecutiveErrors >= tp.maxConsecutiveErr {
+			tp.logger.Errorf("Teleop stopping after %d consecutive errors", tp.consecutiveErrors)
+			tp.running = false
+			return true
+		}
+		return false
+	}
+	tp.consecutiveErrors = 0
+	tp.lastError = ""
+	tp.cycles++
 	return false
 }
 
