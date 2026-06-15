@@ -231,6 +231,7 @@ func (tp *so101Teleop) start(ctx context.Context) error {
 	loopCtx, cancel := context.WithCancel(context.Background())
 	tp.cancel = cancel
 	tp.running = true
+	tp.cycles = 0
 	tp.consecutiveErrors = 0
 	tp.lastError = ""
 	tp.wg.Add(1)
