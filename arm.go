@@ -427,6 +427,18 @@ func (s *so101) moveJoints(ctx context.Context, clampedPositions []float64, spee
 	return s.controller.WaitForServosToStop(ctx, s.armServoIDs, timeout)
 }
 
+// parseWaitExtra reads the optional "wait" bool from a DoCommand/extra map.
+// Absent or non-bool values default to true so the motion planner and existing
+// callers keep the blocking behavior; teleop passes wait=false to stream setpoints.
+func parseWaitExtra(extra map[string]interface{}) bool {
+	if extra != nil {
+		if w, ok := extra["wait"].(bool); ok {
+			return w
+		}
+	}
+	return true
+}
+
 func (s *so101) MoveToJointPositions(ctx context.Context, positions []referenceframe.Input, extra map[string]interface{}) error {
 	s.moveLock.Lock()
 	defer s.moveLock.Unlock()
@@ -443,7 +455,7 @@ func (s *so101) MoveToJointPositions(ctx context.Context, positions []referencef
 	speed := float64(s.defaultSpeed)
 	s.mu.RUnlock()
 
-	return s.moveJoints(ctx, clamped, speed, true)
+	return s.moveJoints(ctx, clamped, speed, parseWaitExtra(extra))
 }
 
 func (s *so101) MoveThroughJointPositions(ctx context.Context, positions [][]referenceframe.Input, options *arm.MoveOptions, extra map[string]interface{}) error {
