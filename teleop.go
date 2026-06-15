@@ -152,5 +152,42 @@ func newSO101Teleop(
 	return tp, nil
 }
 
+// syncOnce performs a single leader->follower mirror cycle. Any error means the
+// cycle did not fully complete; the caller decides how to count it.
+func (tp *so101Teleop) syncOnce(ctx context.Context) error {
+	positions, err := tp.leaderArm.JointPositions(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("read leader joints: %w", err)
+	}
+
+	var gripperPct float64
+	haveGripper := tp.leaderGripper != nil && tp.followerGripper != nil
+	if haveGripper {
+		resp, err := tp.leaderGripper.DoCommand(ctx, map[string]interface{}{"command": "get_position"})
+		if err != nil {
+			return fmt.Errorf("read leader gripper: %w", err)
+		}
+		pct, ok := resp["position_percentage"].(float64)
+		if !ok {
+			return fmt.Errorf("leader gripper get_position missing position_percentage")
+		}
+		gripperPct = pct
+	}
+
+	if err := tp.followerArm.MoveToJointPositions(ctx, positions, map[string]interface{}{"wait": false}); err != nil {
+		return fmt.Errorf("write follower joints: %w", err)
+	}
+
+	if haveGripper {
+		if _, err := tp.followerGripper.DoCommand(ctx, map[string]interface{}{
+			"command":    "set_position",
+			"percentage": gripperPct,
+		}); err != nil {
+			return fmt.Errorf("write follower gripper: %w", err)
+		}
+	}
+	return nil
+}
+
 func (tp *so101Teleop) start(ctx context.Context) error { return nil }
 func (tp *so101Teleop) Close(ctx context.Context) error { return nil }

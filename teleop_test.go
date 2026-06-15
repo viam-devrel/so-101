@@ -2,6 +2,8 @@ package so_arm
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"sync"
 	"testing"
 
@@ -45,9 +47,7 @@ func (f *fakeArm) MoveToJointPositions(ctx context.Context, positions []referenc
 		return f.moveErr
 	}
 	f.moved = positions
-	if extra != nil {
-		f.moveWait = extra["wait"]
-	}
+	f.moveWait = extra["wait"]
 	return nil
 }
 
@@ -55,7 +55,9 @@ func (f *fakeArm) DoCommand(ctx context.Context, cmd map[string]interface{}) (ma
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if cmd["command"] == "set_torque" {
-		f.torqueLog = append(f.torqueLog, cmd["enable"].(bool))
+		if enable, ok := cmd["enable"].(bool); ok {
+			f.torqueLog = append(f.torqueLog, enable)
+		}
 	}
 	return map[string]interface{}{}, nil
 }
@@ -86,10 +88,63 @@ func (f *fakeGripper) DoCommand(ctx context.Context, cmd map[string]interface{})
 		if f.setErr != nil {
 			return nil, f.setErr
 		}
-		f.setPct = append(f.setPct, cmd["percentage"].(float64))
+		if pct, ok := cmd["percentage"].(float64); ok {
+			f.setPct = append(f.setPct, pct)
+		}
 		return map[string]interface{}{"success": true}, nil
 	}
-	return nil, nil
+	return nil, fmt.Errorf("unknown command: %v", cmd["command"])
+}
+
+func newTestTeleop(t testing.TB, la, fa *fakeArm, lg, fg *fakeGripper) *so101Teleop {
+	tp := &so101Teleop{
+		logger:            logging.NewTestLogger(t),
+		leaderArm:         la,
+		followerArm:       fa,
+		rateHz:            20,
+		maxConsecutiveErr: 10,
+	}
+	if lg != nil {
+		tp.leaderGripper = lg
+	}
+	if fg != nil {
+		tp.followerGripper = fg
+	}
+	return tp
+}
+
+func TestTeleopSyncOnce(t *testing.T) {
+	t.Run("forwards joints non-blocking and gripper percentage", func(t *testing.T) {
+		la := &fakeArm{name: arm.Named("l"), jp: []referenceframe.Input{0.1, 0.2, 0.3, 0.4, 0.5}}
+		fa := &fakeArm{name: arm.Named("f")}
+		lg := &fakeGripper{name: gripper.Named("lg"), pct: 42}
+		fg := &fakeGripper{name: gripper.Named("fg")}
+		tp := newTestTeleop(t, la, fa, lg, fg)
+
+		err := tp.syncOnce(context.Background())
+		test.That(t, err, test.ShouldBeNil)
+		test.That(t, fa.moved, test.ShouldResemble, la.jp)
+		test.That(t, fa.moveWait, test.ShouldEqual, false)
+		test.That(t, fg.setPct, test.ShouldResemble, []float64{42})
+	})
+
+	t.Run("arm-only when grippers absent", func(t *testing.T) {
+		la := &fakeArm{name: arm.Named("l"), jp: []referenceframe.Input{1}}
+		fa := &fakeArm{name: arm.Named("f")}
+		tp := newTestTeleop(t, la, fa, nil, nil)
+		err := tp.syncOnce(context.Background())
+		test.That(t, err, test.ShouldBeNil)
+		test.That(t, fa.moved, test.ShouldResemble, la.jp)
+	})
+
+	t.Run("leader read error propagates and skips follower write", func(t *testing.T) {
+		la := &fakeArm{name: arm.Named("l"), jpErr: errors.New("serial timeout")}
+		fa := &fakeArm{name: arm.Named("f")}
+		tp := newTestTeleop(t, la, fa, nil, nil)
+		err := tp.syncOnce(context.Background())
+		test.That(t, err, test.ShouldNotBeNil)
+		test.That(t, fa.moved, test.ShouldBeNil)
+	})
 }
 
 func TestTeleopConfigValidate(t *testing.T) {
