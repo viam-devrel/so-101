@@ -7,6 +7,7 @@ import (
 	"go.viam.com/rdk/module"
 	"go.viam.com/rdk/resource"
 	"go.viam.com/rdk/services/discovery"
+	"go.viam.com/rdk/services/generic"
 	soArm "so_arm"
 )
 
@@ -19,5 +20,6 @@ func main() {
 		resource.APIModel{API: gripper.API, Model: soArm.SO101SimulatedGripperModel},
 		resource.APIModel{API: sensor.API, Model: soArm.SO101CalibrationSensorModel},
 		resource.APIModel{API: discovery.API, Model: soArm.SO101DiscoveryModel},
+		resource.APIModel{API: generic.API, Model: soArm.SO101TeleopModel},
 	)
 }
