@@ -177,6 +177,35 @@ func TestTeleopConfigValidate(t *testing.T) {
 	})
 }
 
+func TestTeleopStartStopStatus(t *testing.T) {
+	la := &fakeArm{name: arm.Named("l"), jp: []referenceframe.Input{0.1}}
+	fa := &fakeArm{name: arm.Named("f")}
+	tp := newTestTeleop(t, la, fa, nil, nil)
+	tp.manageLeaderTorque = true
+
+	resp, err := tp.DoCommand(context.Background(), map[string]interface{}{"command": "start"})
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, resp["running"], test.ShouldBeTrue)
+
+	// torque disabled on start
+	la.mu.Lock()
+	test.That(t, la.torqueLog, test.ShouldResemble, []bool{false})
+	la.mu.Unlock()
+
+	st, err := tp.DoCommand(context.Background(), map[string]interface{}{"command": "status"})
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, st["running"], test.ShouldBeTrue)
+
+	resp, err = tp.DoCommand(context.Background(), map[string]interface{}{"command": "stop"})
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, resp["running"], test.ShouldBeFalse)
+
+	// torque restored on stop (restored in runLoop's defer before wg.Wait returns)
+	la.mu.Lock()
+	test.That(t, la.torqueLog, test.ShouldResemble, []bool{false, true})
+	la.mu.Unlock()
+}
+
 func TestTeleopConstructorWiring(t *testing.T) {
 	logger := logging.NewTestLogger(t)
 	la := &fakeArm{name: arm.Named("l")}

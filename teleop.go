@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"go.viam.com/rdk/components/arm"
 	"go.viam.com/rdk/components/gripper"
@@ -189,5 +190,111 @@ func (tp *so101Teleop) syncOnce(ctx context.Context) error {
 	return nil
 }
 
-func (tp *so101Teleop) start(ctx context.Context) error { return nil }
+func (tp *so101Teleop) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
+	switch cmd["command"] {
+	case "start":
+		if err := tp.start(ctx); err != nil {
+			return nil, err
+		}
+		return map[string]interface{}{"running": true}, nil
+	case "stop":
+		tp.stop()
+		return map[string]interface{}{"running": false}, nil
+	case "status":
+		tp.mu.Lock()
+		defer tp.mu.Unlock()
+		return map[string]interface{}{
+			"running":            tp.running,
+			"cycles":             tp.cycles,
+			"consecutive_errors": tp.consecutiveErrors,
+			"last_error":         tp.lastError,
+			"rate_hz":            tp.rateHz,
+		}, nil
+	default:
+		return nil, fmt.Errorf("unknown command: %v", cmd["command"])
+	}
+}
+
+func (tp *so101Teleop) start(ctx context.Context) error {
+	tp.mu.Lock()
+	defer tp.mu.Unlock()
+	if tp.running {
+		return nil
+	}
+	if tp.manageLeaderTorque {
+		tp.setLeaderTorque(ctx, false)
+	}
+	loopCtx, cancel := context.WithCancel(context.Background())
+	tp.cancel = cancel
+	tp.running = true
+	tp.consecutiveErrors = 0
+	tp.lastError = ""
+	tp.wg.Add(1)
+	go tp.runLoop(loopCtx)
+	tp.logger.Infof("Teleop started at %.1f Hz", tp.rateHz)
+	return nil
+}
+
+func (tp *so101Teleop) stop() {
+	tp.mu.Lock()
+	if !tp.running {
+		tp.mu.Unlock()
+		return
+	}
+	cancel := tp.cancel
+	tp.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+	tp.wg.Wait()
+
+	tp.mu.Lock()
+	tp.running = false
+	tp.mu.Unlock()
+	tp.logger.Info("Teleop stopped")
+}
+
+// setLeaderTorque best-effort enables/disables torque on the leader arm.
+// SetTorqueEnable acts on the whole 6-servo group and the leader arm + gripper share
+// one controller, so this single call also covers the leader gripper servo. We do not
+// call set_torque on the gripper (it has no such command and it would be redundant).
+func (tp *so101Teleop) setLeaderTorque(ctx context.Context, enable bool) {
+	if _, err := tp.leaderArm.DoCommand(ctx, map[string]interface{}{
+		"command": "set_torque", "enable": enable,
+	}); err != nil {
+		tp.logger.Warnf("Failed to set leader arm torque=%v: %v", enable, err)
+	}
+}
+
+func (tp *so101Teleop) runLoop(ctx context.Context) {
+	defer tp.wg.Done()
+	// Restore leader torque on ANY loop exit (cancel or future self-stop), exactly once.
+	// Deferred AFTER wg.Done is registered, so by LIFO it runs BEFORE wg.Done —
+	// the restore therefore completes before stop()'s wg.Wait() returns.
+	if tp.manageLeaderTorque {
+		defer tp.setLeaderTorque(context.Background(), true)
+	}
+
+	interval := time.Duration(float64(time.Second) / tp.rateHz)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if tp.tick(ctx) {
+				return // threshold exceeded (implemented in a later task)
+			}
+		}
+	}
+}
+
+// tick runs one cycle and returns true when the loop should stop. Replaced in the next task.
+func (tp *so101Teleop) tick(ctx context.Context) bool {
+	_ = tp.syncOnce(ctx)
+	return false
+}
+
 func (tp *so101Teleop) Close(ctx context.Context) error { return nil }
