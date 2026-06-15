@@ -321,4 +321,7 @@ func (tp *so101Teleop) tick(ctx context.Context) bool {
 	return false
 }
 
-func (tp *so101Teleop) Close(ctx context.Context) error { return nil }
+func (tp *so101Teleop) Close(ctx context.Context) error {
+	tp.stop()
+	return nil
+}

@@ -239,6 +239,26 @@ func TestTeleopTickErrorThreshold(t *testing.T) {
 	test.That(t, tp.cycles, test.ShouldEqual, uint64(1))
 }
 
+func TestTeleopCloseStopsLoop(t *testing.T) {
+	la := &fakeArm{name: arm.Named("l"), jp: []referenceframe.Input{0.1}}
+	fa := &fakeArm{name: arm.Named("f")}
+	tp := newTestTeleop(t, la, fa, nil, nil)
+	tp.manageLeaderTorque = true
+
+	_, err := tp.DoCommand(context.Background(), map[string]interface{}{"command": "start"})
+	test.That(t, err, test.ShouldBeNil)
+
+	test.That(t, tp.Close(context.Background()), test.ShouldBeNil)
+
+	tp.mu.Lock()
+	test.That(t, tp.running, test.ShouldBeFalse)
+	tp.mu.Unlock()
+	// torque restored exactly once (false on start, true on close)
+	la.mu.Lock()
+	test.That(t, la.torqueLog, test.ShouldResemble, []bool{false, true})
+	la.mu.Unlock()
+}
+
 func TestTeleopConstructorWiring(t *testing.T) {
 	logger := logging.NewTestLogger(t)
 	la := &fakeArm{name: arm.Named("l")}
