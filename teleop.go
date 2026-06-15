@@ -48,7 +48,7 @@ func (cfg *SO101TeleopConfig) Validate(path string) ([]string, []string, error) 
 		return nil, nil, fmt.Errorf("follower_arm is required")
 	}
 	if cfg.RateHz < 0 {
-		return nil, nil, fmt.Errorf("rate_hz must be > 0, got %v", cfg.RateHz)
+		return nil, nil, fmt.Errorf("rate_hz must not be negative, got %v", cfg.RateHz)
 	}
 	deps := []string{cfg.LeaderArm, cfg.FollowerArm}
 	if cfg.LeaderGripper != "" {
