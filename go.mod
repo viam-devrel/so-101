@@ -10,6 +10,7 @@ require (
 	go.bug.st/serial v1.6.4
 	go.viam.com/api v0.1.485
 	go.viam.com/rdk v0.102.0
+	go.viam.com/test v1.2.4
 	go.viam.com/utils v0.1.176
 )
 
@@ -148,7 +149,6 @@ require (
 	go.uber.org/goleak v1.3.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.27.0 // indirect
-	go.viam.com/test v1.2.4 // indirect
 	go4.org/unsafe/assume-no-moving-gc v0.0.0-20230525183740-e7c30c78aeb2 // indirect
 	golang.org/x/arch v0.18.0 // indirect
 	golang.org/x/crypto v0.41.0 // indirect
