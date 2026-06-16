@@ -40,6 +40,12 @@
       "model": "devrel:so101:discovery",
       "short_description": "Discover available arm, gripper, and calibration components related to SO101 ARM",
       "markdown_link": "README.md#model-devrelso101discovery"
+    },
+    {
+      "api": "rdk:service:generic",
+      "model": "devrel:so101:teleop",
+      "short_description": "Mirror a leader arm's joint positions and gripper onto a follower arm for hand-guided teleoperation",
+      "markdown_link": "README.md#model-devrelso101teleop"
     }
   ],
   "applications": [
