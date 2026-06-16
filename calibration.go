@@ -1093,7 +1093,8 @@ func (cs *so101CalibrationSensor) motorSetupScanBus(ctx context.Context) (map[st
 	cs.setupStatus = "Scanning servo bus for connected motors..."
 	cs.logger.Infof("Motor setup: %s", cs.setupStatus)
 
-	// Use the controller's bus Discover method for more efficient discovery
+	// Discover sweeps every bus ID (1..253) and reliably returns all responders;
+	// each absent ID costs one BusConfig.PingTimeout, so a sparse bus takes a few seconds.
 	discovered, err := cs.controller.bus.Discover(ctx)
 	if err != nil {
 		cs.setupStatus = fmt.Sprintf("Bus scan failed: %v", err)
@@ -1153,9 +1154,9 @@ func (cs *so101CalibrationSensor) motorSetupResetStatus(ctx context.Context) (ma
 
 // Helper function to discover a single motor using the bus Discover method
 func (cs *so101CalibrationSensor) discoverOneMotor(ctx context.Context, expectedModel string) (*feetech.FoundServo, int, error) {
-	// Since we're using a shared controller, we need to work with the existing bus
-	// Use the more efficient Discover method instead of scanning all IDs
-
+	// Since we're using a shared controller, we need to work with the existing bus.
+	// Discover sweeps all bus IDs, so a lone motor is found whatever ID it carries —
+	// and finding more than one responder is a real error, not a collision artifact.
 	discovered, err := cs.controller.bus.Discover(ctx)
 	if err != nil {
 		return nil, 0, fmt.Errorf("discovery failed: %w", err)
