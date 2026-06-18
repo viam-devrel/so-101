@@ -321,6 +321,41 @@ func (g *so101Gripper) Geometries(ctx context.Context, extra map[string]interfac
 }
 
 func (g *so101Gripper) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
+	if cmd["get"] == true {
+		positions, err := g.controller.GetJointPositionsForServos(ctx, []int{g.servoID})
+		if err != nil {
+			return nil, err
+		}
+		if len(positions) == 0 {
+			return nil, fmt.Errorf("no position data available")
+		}
+
+		percentPos := g.radiansToPercent(positions[0])
+		return map[string]interface{}{"position": percentPos}, nil
+	}
+
+	if percentPos, ok := cmd["set"].(float64); ok {
+		if percentPos < 0 {
+			percentPos = 0
+		}
+		if percentPos > 100 {
+			percentPos = 100
+		}
+
+		g.mu.Lock()
+		defer g.mu.Unlock()
+
+		g.isMoving.Store(true)
+		defer g.isMoving.Store(false)
+
+		targetRadians := g.percentToRadians(percentPos)
+		err := g.controller.MoveServosToPositions(ctx, []int{g.servoID}, []float64{targetRadians}, 0, 0)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]interface{}{"position": percentPos}, nil
+	}
+
 	switch cmd["command"] {
 	case "get_position":
 		positions, err := g.controller.GetJointPositionsForServos(ctx, []int{g.servoID})
@@ -343,7 +378,7 @@ func (g *so101Gripper) DoCommand(ctx context.Context, cmd map[string]interface{}
 	case "set_position":
 		var targetPercent float64
 
-		if percentPos, ok := cmd["percentage"].(float64); ok {
+		if percentPos, ok := cmd["position_percentage"].(float64); ok {
 			targetPercent = percentPos
 		} else if servoPos, ok := cmd["servo_position"].(float64); ok {
 			cal := g.controller.getCalibrationForServo(g.servoID)
@@ -450,7 +485,7 @@ func (g *so101Gripper) Kinematics(ctx context.Context) (referenceframe.Model, er
 }
 
 func (g *so101Gripper) IsHoldingSomething(ctx context.Context, extra map[string]interface{}) (gripper.HoldingStatus, error) {
-	return gripper.HoldingStatus{}, errors.ErrUnsupported
+	return gripper.HoldingStatus{}, nil
 }
 
 func (g *so101Gripper) openPositionRadians() float64 {
