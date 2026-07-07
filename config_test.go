@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/stretchr/testify/require"
 	"go.viam.com/rdk/logging"
 )
 
@@ -61,6 +62,19 @@ func TestLoadCalibrationFromFile(t *testing.T) {
 			t.Error("Expected default calibration")
 		}
 	})
+}
+
+func TestSO101ArmConfigValidateMeshRatios(t *testing.T) {
+	// Out-of-range ratio is rejected.
+	bad := &SO101ArmConfig{Port: "/dev/null", UseURDF: true, MeshDecimationRatios: []float64{1.5}}
+	_, _, err := bad.Validate("")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "mesh_decimation_ratios")
+
+	// Valid ratios pass.
+	ok := &SO101ArmConfig{Port: "/dev/null", UseURDF: true, MeshDecimationRatios: []float64{0.1, 0.2}}
+	_, _, err = ok.Validate("")
+	require.NoError(t, err)
 }
 
 func TestGetNormModeForServo(t *testing.T) {

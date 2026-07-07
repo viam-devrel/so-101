@@ -80,6 +80,16 @@ type SO101ArmConfig struct {
 	// VisualizeEEFrame, when true, makes Get3DModels serve a colored XYZ
 	// coordinate-frame marker at the end-effector. Defaults to false.
 	VisualizeEEFrame bool `json:"visualize_ee_frame,omitempty"`
+
+	// UseURDF sources kinematics + mesh collision geometry from the bundled
+	// arm/so101.urdf instead of the embedded so101.json. Requires VIAM_MODULE_ROOT
+	// (set by viam-server). Default false.
+	UseURDF bool `json:"use_urdf,omitempty"`
+	// MeshDecimationRatios is the per-collision-mesh simplification ratio in [0,1],
+	// applied in URDF document order (one per link: base/shoulder/upper_arm/lower_arm/
+	// wrist/gripper_link). Only values strictly in (0,1) actually decimate. Defaults
+	// to 0.1 per mesh when empty. Ignored unless UseURDF is set.
+	MeshDecimationRatios []float64 `json:"mesh_decimation_ratios,omitempty"`
 }
 
 // Validate ensures all parts of the config are valid
@@ -97,6 +107,12 @@ func (cfg *SO101ArmConfig) Validate(path string) ([]string, []string, error) {
 	for _, id := range cfg.ServoIDs {
 		if id < 1 || id > 5 {
 			return nil, nil, fmt.Errorf("arm servo IDs must be 1-5, got %d", id)
+		}
+	}
+
+	for i, r := range cfg.MeshDecimationRatios {
+		if math.IsNaN(r) || r < 0 || r > 1 {
+			return nil, nil, fmt.Errorf("mesh_decimation_ratios[%d] must be in [0, 1], got %f", i, r)
 		}
 	}
 
