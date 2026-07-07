@@ -115,7 +115,7 @@ type so101 struct {
 	initCtx    context.Context // Context for initialization operations
 }
 
-func makeSO101ModelFrame() (referenceframe.Model, error) {
+func makeSO101ModelFrame(resourceName string) (referenceframe.Model, error) {
 	m := &referenceframe.ModelConfigJSON{
 		OriginalFile: &referenceframe.ModelFile{
 			Bytes:     so101ModelJson,
@@ -127,7 +127,7 @@ func makeSO101ModelFrame() (referenceframe.Model, error) {
 		return nil, errors.Wrap(err, "failed to unmarshal json file")
 	}
 
-	return m.ParseConfig("soarm_101")
+	return m.ParseConfig(resourceName)
 }
 
 // makeSO101ModelFrameWithEEMarker builds the SO-101 kinematics with a small placeholder
@@ -136,7 +136,7 @@ func makeSO101ModelFrame() (referenceframe.Model, error) {
 // does not draw is dropped. Giving "tool" a geometry makes the viewer draw the link, so
 // the colored EE-frame mesh served by Get3DModels renders there. so101.json is untouched;
 // this is used only when an arm's visualize_ee_frame attribute is enabled.
-func makeSO101ModelFrameWithEEMarker() (referenceframe.Model, error) {
+func makeSO101ModelFrameWithEEMarker(resourceName string) (referenceframe.Model, error) {
 	m := &referenceframe.ModelConfigJSON{
 		OriginalFile: &referenceframe.ModelFile{
 			Bytes:     so101ModelJson,
@@ -154,7 +154,7 @@ func makeSO101ModelFrameWithEEMarker() (referenceframe.Model, error) {
 			}
 		}
 	}
-	return m.ParseConfig("soarm_101")
+	return m.ParseConfig(resourceName)
 }
 
 // calculateJointLimits dynamically calculates joint limits from calibration data
@@ -260,7 +260,7 @@ func NewSO101(ctx context.Context, deps resource.Dependencies, name resource.Nam
 	if conf.VisualizeEEFrame {
 		makeModel = makeSO101ModelFrameWithEEMarker
 	}
-	model, err := makeModel()
+	model, err := makeModel(name.Name)
 	if err != nil {
 		ReleaseSharedController() // Clean up on error
 		return nil, fmt.Errorf("failed to create kinematic model: %w", err)
