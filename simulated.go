@@ -276,7 +276,7 @@ func (s *simulatedSO101) EndPosition(ctx context.Context, extra map[string]inter
 	if err != nil {
 		return nil, err
 	}
-	return referenceframe.ComputeOOBPosition(s.model, inputs)
+	return computeOOBPosition(s.model, inputs)
 }
 
 // MoveToPosition moves the arm's end effector to the target pose using the motion service.
@@ -420,6 +420,11 @@ func (s *simulatedSO101) Geometries(ctx context.Context, extra map[string]interf
 // end-effector coordinate-frame marker when visualize_ee_frame is enabled.
 func (s *simulatedSO101) Get3DModels(ctx context.Context, extra map[string]interface{}) (map[string]*commonpb.Mesh, error) {
 	return so101ArmModels(s.visualizeEEFrame), nil
+}
+
+// Status returns the current status of the resource as a map of key-value pairs.
+func (s *simulatedSO101) Status(ctx context.Context) (map[string]interface{}, error) {
+	return map[string]interface{}{}, nil
 }
 
 func (s *simulatedSO101) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {

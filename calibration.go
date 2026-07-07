@@ -286,6 +286,11 @@ func (cs *so101CalibrationSensor) Readings(ctx context.Context, extra map[string
 	return readings, nil
 }
 
+// Status returns the current status of the resource as a map of key-value pairs.
+func (cs *so101CalibrationSensor) Status(ctx context.Context) (map[string]interface{}, error) {
+	return map[string]interface{}{}, nil
+}
+
 // DoCommand handles calibration workflow commands
 func (cs *so101CalibrationSensor) DoCommand(ctx context.Context, cmd map[string]any) (map[string]any, error) {
 	command, ok := cmd["command"].(string)

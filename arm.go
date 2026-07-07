@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -28,6 +29,29 @@ var (
 
 //go:embed so101.json
 var so101ModelJson []byte
+
+// computeOOBPosition takes a frame and a slice of Inputs and returns the cartesian position of
+// the frame after transforming it by the given inputs even if the inputs given would violate the
+// Limits of the frame. This is performed statelessly without changing any data.
+//
+// This replaces referenceframe.ComputeOOBPosition, which was removed upstream; the behavior is
+// preserved here since callers rely on being able to compute a pose for out-of-bounds joint
+// positions (e.g. reporting EndPosition while a joint is slightly past its calibrated limit).
+func computeOOBPosition(frame referenceframe.Frame, inputs []referenceframe.Input) (spatialmath.Pose, error) {
+	if inputs == nil {
+		return nil, errors.New("cannot compute position for nil joints")
+	}
+	if frame == nil {
+		return nil, errors.New("cannot compute position for nil frame")
+	}
+
+	pose, err := frame.Transform(inputs)
+	if err != nil && !strings.Contains(err.Error(), referenceframe.OOBErrString) {
+		return nil, err
+	}
+
+	return pose, nil
+}
 
 func init() {
 	resource.RegisterComponent(arm.API, SO101Model,
@@ -330,7 +354,7 @@ func (s *so101) EndPosition(ctx context.Context, extra map[string]interface{}) (
 		return nil, err
 	}
 
-	pose, err := referenceframe.ComputeOOBPosition(s.model, inputs)
+	pose, err := computeOOBPosition(s.model, inputs)
 	if err != nil {
 		return nil, fmt.Errorf("failed to compute end position: %w", err)
 	}
@@ -535,6 +559,11 @@ func (s *so101) GoToInputs(ctx context.Context, inputSteps ...[]referenceframe.I
 // enabled.
 func (s *so101) Get3DModels(ctx context.Context, extra map[string]interface{}) (map[string]*commonpb.Mesh, error) {
 	return so101ArmModels(s.cfg.VisualizeEEFrame), nil
+}
+
+// Status returns the current status of the resource as a map of key-value pairs.
+func (s *so101) Status(ctx context.Context) (map[string]interface{}, error) {
+	return map[string]interface{}{}, nil
 }
 
 func (s *so101) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {

@@ -212,6 +212,11 @@ func (g *simulatedSO101Gripper) Geometries(
 	return buildGripperMeshes(g.gripperType, jawAngle)
 }
 
+// Status returns the current status of the resource as a map of key-value pairs.
+func (g *simulatedSO101Gripper) Status(ctx context.Context) (map[string]interface{}, error) {
+	return map[string]interface{}{}, nil
+}
+
 // DoCommand supports set_position (0-100%, interpolated) and get_position.
 func (g *simulatedSO101Gripper) DoCommand(
 	ctx context.Context, cmd map[string]interface{},

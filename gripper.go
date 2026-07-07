@@ -320,6 +320,11 @@ func (g *so101Gripper) Geometries(ctx context.Context, extra map[string]interfac
 	return buildGripperMeshes(g.gripperType, g.jawAngle(ctx))
 }
 
+// Status returns the current status of the resource as a map of key-value pairs.
+func (g *so101Gripper) Status(ctx context.Context) (map[string]interface{}, error) {
+	return map[string]interface{}{}, nil
+}
+
 func (g *so101Gripper) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
 	if cmd["get"] == true {
 		positions, err := g.controller.GetJointPositionsForServos(ctx, []int{g.servoID})
