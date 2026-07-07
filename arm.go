@@ -530,14 +530,11 @@ func (s *so101) GoToInputs(ctx context.Context, inputSteps ...[]referenceframe.I
 	return s.MoveThroughJointPositions(ctx, inputSteps, nil, nil)
 }
 
-// Get3DModels serves a colored XYZ coordinate-frame marker at the end-effector when the
-// visualize_ee_frame attribute is enabled, and nothing otherwise.
+// Get3DModels serves the SO-101 link meshes for the 3D scene viewer, plus a colored XYZ
+// coordinate-frame marker at the end-effector when the visualize_ee_frame attribute is
+// enabled.
 func (s *so101) Get3DModels(ctx context.Context, extra map[string]interface{}) (map[string]*commonpb.Mesh, error) {
-	models := map[string]*commonpb.Mesh{}
-	if s.cfg.VisualizeEEFrame {
-		models[so101EEFrameMeshKey] = so101EEFrameMesh()
-	}
-	return models, nil
+	return so101ArmModels(s.cfg.VisualizeEEFrame), nil
 }
 
 func (s *so101) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
