@@ -7,6 +7,8 @@ import (
 	"go.viam.com/rdk/referenceframe"
 )
 
+// TEMPORARY smoke test (plan Task 1.1). Superseded by the real URDF/JSON
+// frame-alignment test in Task 4.1, which removes this file. Do not extend.
 func TestParseSO101URDF(t *testing.T) {
 	// The arm-only URDF has 6 mesh collision geometries consumed by rdk: one
 	// Collision[0] per link for base/shoulder/upper_arm/lower_arm/wrist/gripper_link.
