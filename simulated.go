@@ -136,7 +136,7 @@ func newSimulatedSO101(
 	if conf.VisualizeEEFrame {
 		makeModel = makeSO101ModelFrameWithEEMarker
 	}
-	model, err := makeModel()
+	model, err := makeModel(rawConf.Name)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create kinematic model: %w", err)
 	}
