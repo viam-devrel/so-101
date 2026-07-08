@@ -207,8 +207,15 @@ func makeSO101ModelFrameWithEEMarker(resourceName string) (referenceframe.Model,
 // handling under URDF mode is deferred to a later task (frame-alignment), so it is not
 // applied here.
 func makeModelFrame(cfg *SO101ArmConfig, name string) (referenceframe.Model, error) {
-	if !cfg.UseURDF {
-		if cfg.VisualizeEEFrame {
+	return makeSO101Model(cfg.UseURDF, cfg.MeshDecimationRatios, cfg.VisualizeEEFrame, name)
+}
+
+// makeSO101Model builds the SO-101 kinematic model from either the embedded so101.json
+// (default) or the bundled arm/so101.urdf (when useURDF). Shared by the hardware and
+// simulated arms. See makeModelFrame for the JSON/URDF and VisualizeEEFrame semantics.
+func makeSO101Model(useURDF bool, ratios []float64, visualizeEE bool, name string) (referenceframe.Model, error) {
+	if !useURDF {
+		if visualizeEE {
 			return makeSO101ModelFrameWithEEMarker(name)
 		}
 		return makeSO101ModelFrame(name)
@@ -219,10 +226,10 @@ func makeModelFrame(cfg *SO101ArmConfig, name string) (referenceframe.Model, err
 	}
 	path := filepath.Join(root, "arm", "so101.urdf")
 	// The bundled collision meshes ship pre-decimated (arm/gen_decimated_meshes.py), so
-	// runtime decimation is off by default: cfg.MeshDecimationRatios is empty unless a user
-	// explicitly opts into further decimation. (rdk's runtime decimation is unusably slow on
-	// dense meshes, which is why the meshes are decimated offline instead.)
-	model, err := referenceframe.ParseModelXMLFile(path, name, cfg.MeshDecimationRatios)
+	// runtime decimation is off by default: ratios is empty unless a user explicitly opts
+	// into further decimation. (rdk's runtime decimation is unusably slow on dense meshes,
+	// which is why the meshes are decimated offline instead.)
+	model, err := referenceframe.ParseModelXMLFile(path, name, ratios)
 	if err != nil {
 		return nil, fmt.Errorf("parsing URDF %q: %w", path, err)
 	}

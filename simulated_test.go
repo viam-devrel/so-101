@@ -69,6 +69,32 @@ func TestSimulatedConfigValidate(t *testing.T) {
 	})
 }
 
+func TestSimulatedConfigValidateMeshRatios(t *testing.T) {
+	bad := &SO101SimulatedArmConfig{UseURDF: true, MeshDecimationRatios: []float64{1.5}}
+	_, _, err := bad.Validate("")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "mesh_decimation_ratios")
+
+	ok := &SO101SimulatedArmConfig{UseURDF: true, MeshDecimationRatios: []float64{0.1, 0.2}}
+	_, _, err = ok.Validate("")
+	require.NoError(t, err)
+}
+
+func TestSimulatedUseURDF(t *testing.T) {
+	t.Setenv("VIAM_MODULE_ROOT", ".")
+	simulateTime := false
+	conf := resource.Config{
+		Name: "urdfSimArm", API: arm.API, Model: SO101SimulatedModel,
+		ConvertedAttributes: &SO101SimulatedArmConfig{UseURDF: true, SimulateTime: &simulateTime},
+	}
+	a, err := newSimulatedSO101(context.Background(), nil, conf, logging.NewTestLogger(t))
+	require.NoError(t, err)
+	defer func() { require.NoError(t, a.Close(context.Background())) }()
+	m, err := a.Kinematics(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, 5, len(m.DoF()))
+}
+
 func TestSimulatedKinematics(t *testing.T) {
 	sim := newTestSimArm(t, 1.0)
 	defer func() { require.NoError(t, sim.Close(context.Background())) }()
