@@ -220,6 +220,38 @@ func makeSO101Model(useURDF bool, ratios []float64, visualizeEE bool, name strin
 		}
 		return makeSO101ModelFrame(name)
 	}
+	return makeSO101ModelURDF(ratios, visualizeEE, name)
+}
+
+// urdfWristRollJointID is the arm/so101.urdf revolute joint (servo 5, the wrist-roll servo)
+// whose output frame so101.json's "tool" link is grafted onto -- see makeSO101ModelURDF.
+const urdfWristRollJointID = "wrist_roll"
+
+// urdfGraftedOutIDs are the arm/so101.urdf link entries between the wrist-roll joint and its
+// native end effector (gripper_frame_link) that get dropped when grafting so101.json's "tool"
+// frame onto the URDF model (see makeSO101ModelURDF). referenceframe.UnmarshalModelXML folds
+// URDF fixed joints into synthetic LinkConfig entries keyed by the joint's own name rather than
+// adding them to ModelConfigJSON.Joints, so "gripper_frame_joint" -- the fixed joint between
+// gripper_link and gripper_frame_link -- shows up here as a link entry, not a joint.
+var urdfGraftedOutIDs = map[string]bool{
+	"gripper_link":        true,
+	"gripper_frame_joint": true,
+	"gripper_frame_link":  true,
+}
+
+// makeSO101ModelURDF builds the SO-101 URDF kinematic model (5 revolute joints + mesh
+// collision geometry, servos 1-5) and grafts so101.json's exact "tool" LinkConfig onto the
+// wrist-roll joint's output as its new leaf, replacing the URDF's own end effector chain
+// (gripper_link -> gripper_frame_joint -> gripper_frame_link). That native URDF end frame
+// sits ~98mm further out, at the fingertip, than so101.json's "tool" TCP; grafting makes
+// use_urdf a true drop-in with identical kinematics/TCP to the JSON model (see
+// TestURDFvsJSONFrameAlignment) -- only the collision geometry becomes meshes.
+//
+// The graft works because the URDF's wrist-roll joint frame coincides exactly with
+// so101.json's joint "5" frame (proven for all 5 arm joints/links by
+// TestURDFvsJSONFrameAlignment), so grafting a copy of so101.json's "tool" link (parented to
+// json joint "5") onto "wrist_roll" here lands it on that identical pose.
+func makeSO101ModelURDF(ratios []float64, visualizeEE bool, name string) (referenceframe.Model, error) {
 	root := os.Getenv("VIAM_MODULE_ROOT")
 	if root == "" {
 		return nil, errors.New("use_urdf is set but VIAM_MODULE_ROOT is empty")
@@ -228,12 +260,59 @@ func makeSO101Model(useURDF bool, ratios []float64, visualizeEE bool, name strin
 	// The bundled collision meshes ship pre-decimated (arm/gen_decimated_meshes.py), so
 	// runtime decimation is off by default: ratios is empty unless a user explicitly opts
 	// into further decimation. (rdk's runtime decimation is unusably slow on dense meshes,
-	// which is why the meshes are decimated offline instead.)
-	model, err := referenceframe.ParseModelXMLFile(path, name, ratios)
+	// which is why the meshes are decimated offline instead.) ratios is passed straight
+	// through to ParseModelXMLFile; the graft below doesn't touch it.
+	urdfModel, err := referenceframe.ParseModelXMLFile(path, name, ratios)
 	if err != nil {
 		return nil, fmt.Errorf("parsing URDF %q: %w", path, err)
 	}
+	urdfSM, ok := urdfModel.(*referenceframe.SimpleModel)
+	if !ok {
+		return nil, fmt.Errorf("parsing URDF %q: expected *referenceframe.SimpleModel, got %T", path, urdfModel)
+	}
+	mcURDF := urdfSM.ModelConfig()
+
+	toolLink, err := so101JSONToolLink()
+	if err != nil {
+		return nil, err
+	}
+	toolLink.Parent = urdfWristRollJointID
+	if visualizeEE {
+		// Same placeholder box makeSO101ModelFrameWithEEMarker gives "tool" on the JSON
+		// path, so the viewer draws the link and Get3DModels' EE-frame mesh renders there.
+		toolLink.Geometry = &spatialmath.GeometryConfig{Type: spatialmath.BoxType, X: 10, Y: 10, Z: 10}
+	}
+
+	graftedLinks := make([]referenceframe.LinkConfig, 0, len(mcURDF.Links)+1)
+	for _, l := range mcURDF.Links {
+		if urdfGraftedOutIDs[l.ID] {
+			continue
+		}
+		graftedLinks = append(graftedLinks, l)
+	}
+	mcURDF.Links = append(graftedLinks, toolLink)
+
+	model, err := mcURDF.ParseConfig(name)
+	if err != nil {
+		return nil, fmt.Errorf("parsing grafted URDF model %q: %w", path, err)
+	}
 	return model, nil
+}
+
+// so101JSONToolLink returns a copy of so101.json's "tool" LinkConfig (its Parent still set to
+// so101.json's own joint "5" ID; callers that graft it elsewhere must overwrite Parent). Used
+// by makeSO101ModelURDF to give the URDF model the same TCP frame as the JSON model.
+func so101JSONToolLink() (referenceframe.LinkConfig, error) {
+	m := &referenceframe.ModelConfigJSON{}
+	if err := json.Unmarshal(so101ModelJson, m); err != nil {
+		return referenceframe.LinkConfig{}, errors.Wrap(err, "failed to unmarshal json file")
+	}
+	for _, l := range m.Links {
+		if l.ID == so101EEFrameMeshKey {
+			return l, nil
+		}
+	}
+	return referenceframe.LinkConfig{}, fmt.Errorf("so101.json has no %q link", so101EEFrameMeshKey)
 }
 
 // calculateJointLimits dynamically calculates joint limits from calibration data

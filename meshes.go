@@ -53,7 +53,11 @@ var so101LeaderTriggerPLY []byte
 
 const gltfBinary = "model/gltf-binary"
 
-// so101EEFrameMeshKey is the so101.json frame the EE-frame marker mounts on.
+// so101EEFrameMeshKey is the frame the EE-frame marker mounts on. It works in both kinematic
+// modes: makeSO101ModelURDF (arm.go) grafts so101.json's exact "tool" LinkConfig onto the
+// wrist-roll joint's output of the URDF model too, so the URDF-sourced model has a "tool" leaf
+// coincident with so101.json's (see TestURDFvsJSONFrameAlignment) and visualize_ee_frame gives
+// it the same placeholder geometry under use_urdf as it does on the JSON path.
 const so101EEFrameMeshKey = "tool"
 
 // so101ArmMeshParts maps each embedded link GLB to the frame name it is keyed by under
