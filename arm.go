@@ -179,6 +179,14 @@ func makeSO101ModelFrame(resourceName string) (referenceframe.Model, error) {
 // does not draw is dropped. Giving "tool" a geometry makes the viewer draw the link, so
 // the colored EE-frame mesh served by Get3DModels renders there. so101.json is untouched;
 // this is used only when an arm's visualize_ee_frame attribute is enabled.
+// eeMarkerGeometry returns the small placeholder box given to the "tool" link so the 3D
+// viewer draws that frame (a Get3DModels mesh keyed to a geometry-less frame is dropped).
+// The colored EE-frame mesh from Get3DModels replaces it visually. Shared by the JSON and
+// URDF model builders so the two visualize_ee_frame paths use the identical placeholder.
+func eeMarkerGeometry() *spatialmath.GeometryConfig {
+	return &spatialmath.GeometryConfig{Type: spatialmath.BoxType, X: 10, Y: 10, Z: 10}
+}
+
 func makeSO101ModelFrameWithEEMarker(resourceName string) (referenceframe.Model, error) {
 	m := &referenceframe.ModelConfigJSON{
 		OriginalFile: &referenceframe.ModelFile{
@@ -191,10 +199,7 @@ func makeSO101ModelFrameWithEEMarker(resourceName string) (referenceframe.Model,
 	}
 	for i := range m.Links {
 		if m.Links[i].ID == so101EEFrameMeshKey {
-			// A small box; the Get3DModels "tool" mesh replaces it visually.
-			m.Links[i].Geometry = &spatialmath.GeometryConfig{
-				Type: spatialmath.BoxType, X: 10, Y: 10, Z: 10,
-			}
+			m.Links[i].Geometry = eeMarkerGeometry()
 		}
 	}
 	return m.ParseConfig(resourceName)
@@ -280,7 +285,7 @@ func makeSO101ModelURDF(ratios []float64, visualizeEE bool, name string) (refere
 	if visualizeEE {
 		// Same placeholder box makeSO101ModelFrameWithEEMarker gives "tool" on the JSON
 		// path, so the viewer draws the link and Get3DModels' EE-frame mesh renders there.
-		toolLink.Geometry = &spatialmath.GeometryConfig{Type: spatialmath.BoxType, X: 10, Y: 10, Z: 10}
+		toolLink.Geometry = eeMarkerGeometry()
 	}
 
 	graftedLinks := make([]referenceframe.LinkConfig, 0, len(mcURDF.Links)+1)

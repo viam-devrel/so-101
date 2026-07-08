@@ -114,8 +114,8 @@ func TestURDFvsJSONFrameAlignment(t *testing.T) {
 	require.NoError(t, err)
 
 	// Both models are 5-DOF (servos 1-5: shoulder_pan, shoulder_lift, elbow_flex, wrist_flex,
-	// wrist_roll). Retains the URDF geometry-count sanity check from the superseded smoke test
-	// (urdf_smoke_test.go): one mesh collision geometry per link (base/shoulder/upper_arm/
+	// wrist_roll). Retains the URDF geometry-count sanity check from the superseded Task 1.1
+	// smoke test: one mesh collision geometry per link (base/shoulder/upper_arm/
 	// lower_arm/wrist) -- the grafted model's "tool" leaf has no geometry (visualizeEE=false
 	// here), and gripper_link's mesh is gone along with the rest of the grafted-out chain.
 	require.Equal(t, 5, len(jsonModel.DoF()))
