@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -88,7 +90,8 @@ type SO101ArmConfig struct {
 	// MeshDecimationRatios is the per-collision-mesh simplification ratio in [0,1],
 	// applied in URDF document order (one per link: base/shoulder/upper_arm/lower_arm/
 	// wrist/gripper_link). Only values strictly in (0,1) actually decimate. Defaults
-	// to 0.1 per mesh when empty. Ignored unless UseURDF is set.
+	// to no runtime decimation when empty; the bundled collision meshes already ship
+	// pre-decimated (see arm/gen_decimated_meshes.py). Ignored unless UseURDF is set.
 	MeshDecimationRatios []float64 `json:"mesh_decimation_ratios,omitempty"`
 }
 
@@ -197,6 +200,35 @@ func makeSO101ModelFrameWithEEMarker(resourceName string) (referenceframe.Model,
 	return m.ParseConfig(resourceName)
 }
 
+// makeModelFrame builds the SO-101 kinematic model from either the embedded so101.json
+// (default) or the bundled arm/so101.urdf (when cfg.UseURDF). On the JSON path, when
+// visualize_ee_frame is set the "tool" link gets a placeholder geometry so the viewer
+// draws the EE marker (see makeSO101ModelFrameWithEEMarker). VisualizeEEFrame's placeholder
+// handling under URDF mode is deferred to a later task (frame-alignment), so it is not
+// applied here.
+func makeModelFrame(cfg *SO101ArmConfig, name string) (referenceframe.Model, error) {
+	if !cfg.UseURDF {
+		if cfg.VisualizeEEFrame {
+			return makeSO101ModelFrameWithEEMarker(name)
+		}
+		return makeSO101ModelFrame(name)
+	}
+	root := os.Getenv("VIAM_MODULE_ROOT")
+	if root == "" {
+		return nil, errors.New("use_urdf is set but VIAM_MODULE_ROOT is empty")
+	}
+	path := filepath.Join(root, "arm", "so101.urdf")
+	// The bundled collision meshes ship pre-decimated (arm/gen_decimated_meshes.py), so
+	// runtime decimation is off by default: cfg.MeshDecimationRatios is empty unless a user
+	// explicitly opts into further decimation. (rdk's runtime decimation is unusably slow on
+	// dense meshes, which is why the meshes are decimated offline instead.)
+	model, err := referenceframe.ParseModelXMLFile(path, name, cfg.MeshDecimationRatios)
+	if err != nil {
+		return nil, fmt.Errorf("parsing URDF %q: %w", path, err)
+	}
+	return model, nil
+}
+
 // calculateJointLimits dynamically calculates joint limits from calibration data
 func (s *so101) calculateJointLimits() [][2]float64 {
 	limits := make([][2]float64, len(s.armServoIDs))
@@ -296,11 +328,7 @@ func NewSO101(ctx context.Context, deps resource.Dependencies, name resource.Nam
 		return nil, fmt.Errorf("failed to get shared SO-ARM controller: %w", err)
 	}
 
-	makeModel := makeSO101ModelFrame
-	if conf.VisualizeEEFrame {
-		makeModel = makeSO101ModelFrameWithEEMarker
-	}
-	model, err := makeModel(name.Name)
+	model, err := makeModelFrame(conf, name.Name)
 	if err != nil {
 		ReleaseSharedController() // Clean up on error
 		return nil, fmt.Errorf("failed to create kinematic model: %w", err)
