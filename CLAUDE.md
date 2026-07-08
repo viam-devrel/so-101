@@ -2,7 +2,7 @@
 
 `viam-devrel/so-101` — a Viam module for the LeRobot **SO-101 / SO-ARM101** robot arm
 (TheRobotStudio open hardware: 6× Feetech STS3215 servos on one serial/USB bus @ 1 Mbaud).
-Go module `so_arm`, Go 1.25, `go.viam.com/rdk v0.102.0`. It can drive either the leader or
+Go module `so_arm`, Go 1.25, `go.viam.com/rdk v0.123.0`. It can drive either the leader or
 the follower arm, or both as separate components for mirrored teleoperation.
 
 ## Models
@@ -40,9 +40,22 @@ in `README.md` (one `## Model …` section each).
 ## Kinematics & meshes
 
 - `so101.json` — SVA kinematics, `//go:embed`-ed, shared by both arm models. Derived from
-  TheRobotStudio/SO-ARM100's URDF; its `tool` link is the end-effector (TCP) frame.
+  TheRobotStudio/SO-ARM100's URDF; its `tool` link is the end-effector (TCP) frame. This is
+  the default kinematic source for both arm models.
+- `arm/so101.urdf` — the alternate kinematic source, used when an arm model's `use_urdf`
+  config attribute is set. Vendored from TheRobotStudio/SO-ARM100 (Apache-2.0, see
+  `arm/SO-ARM100-LICENSE`), trimmed to the arm-only 5-DOF chain (servos 1-5), with collision
+  meshes pre-decimated offline (`arm/gen_decimated_meshes.py` — rdk's runtime mesh
+  decimation is too slow to use routinely, hence the `mesh_decimation_ratios` config
+  attribute normally stays empty). Its `tool` frame is grafted from `so101.json` so
+  `use_urdf` is a true drop-in: identical kinematics/TCP to the JSON model, upgrading only
+  the collision geometry from `so101.json`'s primitives to accurate per-link meshes (see
+  `arm_frame_alignment_test.go`). Assets ship under `arm/` in `module.tar.gz` and are
+  located at runtime via `VIAM_MODULE_ROOT`.
 - `meshes/so101/*.glb` — arm-link meshes (Draco GLB) + `ee_frame.glb` (the colored EE
-  coordinate-frame marker). Served via the arm's `Get3DModels`.
+  coordinate-frame marker). Served via the arm's `Get3DModels`. `visualize_ee_frame` works
+  in both JSON and URDF modes, since the grafted `tool` frame gets the same EE-marker
+  placeholder either way.
 - `meshes/gripper/*.ply` — gripper meshes (ASCII PLY — rdk's `spatialmath.Mesh` reads PLY
   only, not GLB). Served via the gripper's `Geometries()` as `spatialmath.Mesh`.
 - Asset generators: `meshes/gen_ee_frame.py`, `meshes/gen_gripper_meshes.py`. Meshes are
@@ -76,6 +89,8 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
 
 - A `*_arm.go` filename is treated by Go as a GOARCH=`arm`-only file — the simulated-arm
   model lives in `simulated.go` (not `simulated_arm.go`), its tests in `simulated_test.go`.
+- The `arm/` directory holds vendored URDF assets (`so101.urdf`, its meshes, the
+  decimation script, the SO-ARM100 license) — not Go source, despite the name.
 - The Viam `tool` frame in `so101.json` is rotated ~180° from the URDF `gripper_link`
   frame (the TCP convention). Gripper meshes are authored in `gripper_link` coords, so
   `gripper.go`'s `toolFromGripperLink` transform corrects them in `buildGripperMeshes`.
