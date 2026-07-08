@@ -7,9 +7,9 @@ import (
 )
 
 // SO-101 link meshes. These are decimated, Draco-compressed glTF binaries derived
-// from the meshes originally authored for the rdk fake-arm SO-101 model. The keys
-// returned by so101Meshes match the link ids in so101.json so the 3D scene viewer
-// can attach each mesh to the correct moving link.
+// from the meshes originally authored for the rdk fake-arm SO-101 model. so101ArmModels
+// keys them by the active kinematic source's link frame names (so101.json or
+// arm/so101.urdf) so the 3D scene viewer can attach each mesh to the correct moving link.
 
 //go:embed meshes/so101/base.glb
 var so101BaseGLB []byte
@@ -56,16 +56,18 @@ const gltfBinary = "model/gltf-binary"
 // so101EEFrameMeshKey is the so101.json frame the EE-frame marker mounts on.
 const so101EEFrameMeshKey = "tool"
 
-// so101Meshes returns the 3D mesh for each SO-101 link, keyed by the link id used
-// in so101.json. so101.json's "tool" link has no geometry and therefore no mesh.
-func so101Meshes() map[string]*commonpb.Mesh {
-	return map[string]*commonpb.Mesh{
-		"base":      {ContentType: gltfBinary, Mesh: so101BaseGLB},
-		"shoulder":  {ContentType: gltfBinary, Mesh: so101ShoulderGLB},
-		"upper_arm": {ContentType: gltfBinary, Mesh: so101UpperArmGLB},
-		"lower_arm": {ContentType: gltfBinary, Mesh: so101LowerArmGLB},
-		"wrist":     {ContentType: gltfBinary, Mesh: so101WristGLB},
-	}
+// so101ArmMeshParts maps each embedded link GLB to the frame name it is keyed by under
+// each kinematic source. The JSON (so101.json) and URDF (arm/so101.urdf) link frames
+// coincide geometrically, so the same GLB serves both — only the key differs.
+var so101ArmMeshParts = []struct {
+	glb                []byte
+	jsonName, urdfName string
+}{
+	{so101BaseGLB, "base", "base_link"},
+	{so101ShoulderGLB, "shoulder", "shoulder_link"},
+	{so101UpperArmGLB, "upper_arm", "upper_arm_link"},
+	{so101LowerArmGLB, "lower_arm", "lower_arm_link"},
+	{so101WristGLB, "wrist", "wrist_link"},
 }
 
 // so101EEFrameMesh returns the colored end-effector coordinate-frame marker mesh.
@@ -73,12 +75,20 @@ func so101EEFrameMesh() *commonpb.Mesh {
 	return &commonpb.Mesh{ContentType: gltfBinary, Mesh: so101EEFrameGLB}
 }
 
-// so101ArmModels returns the SO-101 link meshes for the 3D scene viewer, adding the
-// colored EE coordinate-frame marker at the "tool" frame when visualizeEEFrame is set.
-// Shared by the hardware and simulated arm so the two Get3DModels implementations never
-// drift.
-func so101ArmModels(visualizeEEFrame bool) map[string]*commonpb.Mesh {
-	models := so101Meshes()
+// so101ArmModels returns the SO-101 link meshes for the 3D scene viewer, keyed by the
+// active kinematic source's frame names (URDF link names when useURDF, so101.json names
+// otherwise). Adds the colored EE coordinate-frame marker at the "tool" frame when
+// visualizeEEFrame is set. Shared by the hardware and simulated arm so the two
+// Get3DModels implementations never drift.
+func so101ArmModels(visualizeEEFrame, useURDF bool) map[string]*commonpb.Mesh {
+	models := make(map[string]*commonpb.Mesh, len(so101ArmMeshParts)+1)
+	for _, p := range so101ArmMeshParts {
+		name := p.jsonName
+		if useURDF {
+			name = p.urdfName
+		}
+		models[name] = &commonpb.Mesh{ContentType: gltfBinary, Mesh: p.glb}
+	}
 	if visualizeEEFrame {
 		models[so101EEFrameMeshKey] = so101EEFrameMesh()
 	}

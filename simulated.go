@@ -129,6 +129,10 @@ type simulatedSO101 struct {
 	// visualizeEEFrame adds the colored EE coordinate-frame marker to Get3DModels.
 	visualizeEEFrame bool
 
+	// useURDF selects which kinematic source's link frame names Get3DModels keys its
+	// meshes by (URDF link names when true, so101.json names otherwise).
+	useURDF bool
+
 	// lifetime management
 	closed     atomic.Bool
 	cancelCtx  context.Context
@@ -182,6 +186,7 @@ func newSimulatedSO101(
 		motion:           ms,
 		speed:            speedDegsPerSec * math.Pi / 180.0,
 		visualizeEEFrame: conf.VisualizeEEFrame,
+		useURDF:          conf.UseURDF,
 		cancelCtx:        cancelCtx,
 		cancelFunc:       cancelFunc,
 		currInputs:       make([]float64, len(model.DoF())),
@@ -433,7 +438,7 @@ func (s *simulatedSO101) Geometries(ctx context.Context, extra map[string]interf
 // Get3DModels returns the SO-101 link meshes for the 3D scene viewer, plus a colored
 // end-effector coordinate-frame marker when visualize_ee_frame is enabled.
 func (s *simulatedSO101) Get3DModels(ctx context.Context, extra map[string]interface{}) (map[string]*commonpb.Mesh, error) {
-	return so101ArmModels(s.visualizeEEFrame), nil
+	return so101ArmModels(s.visualizeEEFrame, s.useURDF), nil
 }
 
 // Status returns the current status of the resource as a map of key-value pairs.

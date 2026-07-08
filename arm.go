@@ -609,7 +609,7 @@ func (s *so101) GoToInputs(ctx context.Context, inputSteps ...[]referenceframe.I
 // coordinate-frame marker at the end-effector when the visualize_ee_frame attribute is
 // enabled.
 func (s *so101) Get3DModels(ctx context.Context, extra map[string]interface{}) (map[string]*commonpb.Mesh, error) {
-	return so101ArmModels(s.cfg.VisualizeEEFrame), nil
+	return so101ArmModels(s.cfg.VisualizeEEFrame, s.cfg.UseURDF), nil
 }
 
 // Status returns the current status of the resource as a map of key-value pairs.
