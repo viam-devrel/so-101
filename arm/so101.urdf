@@ -15,6 +15,13 @@
         arm-only 5-DOF model (servos 1-5) with "gripper_frame_link" as the
         single end effector — matching so101.json (which ends at "tool").
         The gripper is a separate Viam servo-6 component with its own meshes.
+    (c) the meshes/*.stl collision meshes were decimated offline (via
+        arm/gen_decimated_meshes.py, target ~2000 triangles/mesh) from the
+        upstream assets, because rdk's runtime mesh decimation
+        (ParseModelXMLFile with non-zero mesh_decimation_ratios) hangs on
+        the original ~10-54k-triangle meshes; runtime decimation is kept
+        off (ratios = 0) and these lighter meshes are used as-is for
+        collision geometry.
 
   Units: meters (URDF convention); the SVA kinematics in so101.json are in mm.
 -->
