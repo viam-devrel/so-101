@@ -105,3 +105,44 @@ func keysOf(m map[string]r3.Vector) []string {
 	}
 	return out
 }
+
+// TestURDFGeometryPoseMatchesJSON guards GLB visual-mesh placement. The 3D scene viewer places
+// each Get3DModels GLB at the link's *geometry* pose (not the bare frame origin), and the same
+// GLB serves both kinematic sources (so101ArmMeshParts). so101.json's per-link geometry is a
+// primitive box with a translation offset, so the URDF collision mesh must share that exact
+// geometry pose or the GLBs scatter by the box offsets (tens of mm/link) under use_urdf. The
+// merged meshes are generated relative to the box pose and arm/so101.urdf carries the matching
+// <collision><origin> (see arm/gen_collision_meshes.py, URDF_TO_JSON_LINK). This asserts the two
+// sources agree per link; the collision *shape* is unchanged (TestURDFCollisionCoversWholeLink),
+// only its reported pose is aligned to so101.json's.
+func TestURDFGeometryPoseMatchesJSON(t *testing.T) {
+	t.Setenv("VIAM_MODULE_ROOT", ".")
+	jsonModel, err := makeSO101ModelFrame("so101")
+	require.NoError(t, err)
+	urdfModel, err := makeSO101Model(true, nil, false, "so101")
+	require.NoError(t, err)
+
+	zero := make([]referenceframe.Input, 5)
+	geomPoses := func(m referenceframe.Model) map[string]spatialmath.Pose {
+		gif, err := m.Geometries(zero)
+		require.NoError(t, err)
+		out := map[string]spatialmath.Pose{}
+		for _, g := range gif.Geometries() {
+			out[g.Label()] = g.Pose()
+		}
+		return out
+	}
+	jp := geomPoses(jsonModel)
+	up := geomPoses(urdfModel)
+	for _, label := range []string{"so101:base", "so101:shoulder", "so101:upper_arm", "so101:lower_arm", "so101:wrist"} {
+		j, ok := jp[label]
+		require.Truef(t, ok, "missing JSON geometry %q", label)
+		u, ok := up[label]
+		require.Truef(t, ok, "missing URDF geometry %q", label)
+		posD := j.Point().Sub(u.Point()).Norm()
+		require.Lessf(t, posD, 1.0,
+			"%s geometry pose differs by %.2fmm between JSON and URDF -- the shared Get3DModels GLB "+
+				"would render offset by that much under use_urdf (viewer places it at the geometry pose)",
+			label, posD)
+	}
+}

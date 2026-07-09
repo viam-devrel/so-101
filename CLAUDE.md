@@ -49,9 +49,12 @@ in `README.md` (one `## Model …` section each).
   tris / 4.2 MB total): rdk's URDF parser keeps only the *first* `<collision>` per link
   (`referenceframe/model_urdf.go`), but the upstream links are multi-part assemblies, so
   `arm/gen_collision_meshes.py` bakes every sub-part's `<collision>` origin into its vertices
-  and concatenates them per link into a single mesh referenced with an identity origin —
-  otherwise a lone offset sub-part would survive per link (see
-  `arm_collision_coverage_test.go`). Printable parts use the optimized `STL/SO101/Individual`
+  and concatenates them per link into a single mesh — otherwise a lone offset sub-part would
+  survive per link (see `arm_collision_coverage_test.go`). Each mesh is generated relative to
+  so101.json's per-link box pose, with a matching `<collision><origin>` in the URDF, so the
+  geometry pose equals so101.json's — the 3D viewer places each Get3DModels GLB at the link's
+  *geometry* pose, so without this the shared GLBs scatter by the box offsets under `use_urdf`
+  (see `TestURDFGeometryPoseMatchesJSON`). Printable parts use the optimized `STL/SO101/Individual`
   print files (scaled mm→m; same local frame as the sim meshes); the servo body comes from
   `Simulation/SO101/assets` decimated to ~3k tris. The merged mesh is not decimated (that
   created sliver artifacts), so `mesh_decimation_ratios` normally stays empty (rdk's runtime

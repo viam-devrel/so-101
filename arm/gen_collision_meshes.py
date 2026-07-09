@@ -13,9 +13,11 @@ Why one merged mesh per link:
 
   This script fixes that offline: for each of the 5 arm links it loads every
   collision sub-part, bakes that sub-part's <origin> into the mesh vertices,
-  and concatenates them into a single mesh expressed in the link frame.
-  arm/so101.urdf then references exactly one such mesh per link with an identity
-  <origin>, so rdk's Collision[0] IS the full link.
+  concatenates them, and shifts the result to be relative to so101.json's
+  per-link box pose (see URDF_TO_JSON_LINK). arm/so101.urdf then references
+  exactly one such mesh per link, with a <collision><origin> equal to that box
+  offset, so rdk's Collision[0] IS the full link AND its geometry pose matches
+  so101.json's (which the 3D viewer needs to place the shared GLBs correctly).
 
 Mesh sources (both from TheRobotStudio/SO-ARM100, Apache-2.0, pinned to
 UPSTREAM_COMMIT):
@@ -50,6 +52,7 @@ Run from the repo root:
     python3 arm/gen_collision_meshes.py --individual-dir DIR --assets-dir DIR --layout-urdf FILE
 """
 import argparse
+import json
 import os
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -85,6 +88,20 @@ INDIVIDUAL_PARTS = {
 # Individual STLs are authored in millimeters; the simulation meshes / URDF are in meters.
 MM_TO_M = 0.001
 SERVO_TARGET_TRIANGLES = 3000
+
+# Upstream URDF link name -> so101.json link name. The generated meshes are expressed relative
+# to so101.json's per-link geometry (box) pose, not the bare link frame, so the 3D scene viewer --
+# which places each Get3DModels GLB at the link's *geometry* pose -- lands the GLB in the same
+# spot under use_urdf as under so101.json. Each merged mesh is therefore shifted by minus that
+# box's translation offset, and arm/so101.urdf gives the matching <collision><origin>. Without
+# this the GLBs scatter by the box offsets (tens of mm/link) in URDF mode.
+URDF_TO_JSON_LINK = {
+    "base_link": "base",
+    "shoulder_link": "shoulder",
+    "upper_arm_link": "upper_arm",
+    "lower_arm_link": "lower_arm",
+    "wrist_link": "wrist",
+}
 
 
 def rpy_to_matrix(roll, pitch, yaw):
@@ -129,6 +146,21 @@ def load_layout(layout_urdf):
     return layout
 
 
+def load_box_offsets(so101_json_path):
+    """Return {json_link_name: np.array([x, y, z]) in meters} of each link's primitive box
+    translation offset in so101.json. so101.json is in mm; the meshes/URDF are in meters."""
+    with open(so101_json_path) as f:
+        model = json.load(f)
+    offsets = {}
+    for link in model["links"]:
+        geom = link.get("geometry")
+        if geom is None:
+            continue
+        t = geom.get("translation", {})
+        offsets[link["id"]] = np.array([t.get("x", 0.0), t.get("y", 0.0), t.get("z", 0.0)]) * MM_TO_M
+    return offsets
+
+
 def load_subpart(basename, args):
     """Load a collision sub-part in meters. Printable parts come from the optimized Individual
     set (scaled mm->m); servo bodies come from the simulation assets and are decimated."""
@@ -158,10 +190,15 @@ def main():
     ap.add_argument("--layout-urdf", help="URDF carrying the arm links' upstream <collision> layout (else download)")
     ap.add_argument("--servo-triangles", type=int, default=SERVO_TARGET_TRIANGLES,
                     help="decimate each servo sub-part to this many triangles before merge (0 = keep full)")
+    ap.add_argument("--so101-json", help="path to so101.json (default: ../so101.json next to arm/)")
     args = ap.parse_args()
 
-    out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "meshes")
+    here = os.path.dirname(os.path.abspath(__file__))
+    out_dir = os.path.join(here, "meshes")
     os.makedirs(out_dir, exist_ok=True)
+
+    so101_json = args.so101_json or os.path.join(here, os.pardir, "so101.json")
+    box_offsets = load_box_offsets(so101_json)
 
     layout = load_layout(args.layout_urdf)
     cache = {}
@@ -186,12 +223,22 @@ def main():
         if not merged.faces.size or not merged.vertices.size:
             raise SystemExit(f"{link}: merge produced an empty mesh -- aborting")
 
+        # Express the mesh relative to so101.json's box pose (shift by -offset) so its geometry
+        # pose matches the JSON model's; arm/so101.urdf's <collision><origin> must be +offset to
+        # put the collision shape back at the true link location. See URDF_TO_JSON_LINK.
+        offset = box_offsets[URDF_TO_JSON_LINK[link]]
+        merged.apply_translation(-offset)
+
         path = os.path.join(out_dir, f"{link}_collision.stl")
         merged.export(path, file_type="stl")  # binary STL, meters
         total_tris += len(merged.faces)
-        print(f"{link:16s} {len(parts)} parts -> {len(merged.faces):6d} tris  {os.path.getsize(path) // 1024}KB")
+        off_mm = offset * 1000
+        print(f"{link:16s} {len(parts)} parts -> {len(merged.faces):6d} tris  {os.path.getsize(path) // 1024}KB  "
+              f"origin=({off_mm[0]:.3f},{off_mm[1]:.3f},{off_mm[2]:.3f})mm")
 
     print(f"{'TOTAL':16s}   {total_tris:6d} tris")
+    print("Set each arm link's <collision>/<visual> <origin xyz> in arm/so101.urdf to the "
+          "printed origin (converted to meters).")
 
 
 if __name__ == "__main__":
