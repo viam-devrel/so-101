@@ -244,6 +244,27 @@ var urdfGraftedOutIDs = map[string]bool{
 	"gripper_frame_link":  true,
 }
 
+// urdfToJSONFrameNames renames the URDF's link and joint frames to so101.json's frame names,
+// so use_urdf is a true drop-in: an arm configured with use_urdf exposes the *same* frame-system
+// frames (base, shoulder, ..., wrist, tool; joints 1-5) as the default JSON arm. Without this,
+// toggling use_urdf would rename every arm frame (base -> base_link, joint "1" -> shoulder_pan,
+// ...), breaking anything that references them by name -- e.g. a gripper or camera whose frame is
+// parented to an arm link, which would fail to resolve and fall back toward the world origin. The
+// poses are already proven identical per frame (TestURDFvsJSONFrameAlignment); this aligns the
+// names too. The "tool" leaf is grafted from so101.json and already carries that name.
+var urdfToJSONFrameNames = map[string]string{
+	"base_link":      "base",
+	"shoulder_link":  "shoulder",
+	"upper_arm_link": "upper_arm",
+	"lower_arm_link": "lower_arm",
+	"wrist_link":     "wrist",
+	"shoulder_pan":   "1",
+	"shoulder_lift":  "2",
+	"elbow_flex":     "3",
+	"wrist_flex":     "4",
+	"wrist_roll":     "5",
+}
+
 // makeSO101ModelURDF builds the SO-101 URDF kinematic model (5 revolute joints + mesh
 // collision geometry, servos 1-5) and grafts so101.json's exact "tool" LinkConfig onto the
 // wrist-roll joint's output as its new leaf, replacing the URDF's own end effector chain
@@ -296,6 +317,25 @@ func makeSO101ModelURDF(ratios []float64, visualizeEE bool, name string) (refere
 		graftedLinks = append(graftedLinks, l)
 	}
 	mcURDF.Links = append(graftedLinks, toolLink)
+
+	// Rename URDF link/joint frames to so101.json's names so use_urdf is a true drop-in
+	// (see urdfToJSONFrameNames). Applied after the graft so toolLink.Parent ("wrist_roll")
+	// is remapped to "5" along with everything else; unmapped names ("world", "tool") pass
+	// through.
+	rename := func(id string) string {
+		if n, ok := urdfToJSONFrameNames[id]; ok {
+			return n
+		}
+		return id
+	}
+	for i := range mcURDF.Links {
+		mcURDF.Links[i].ID = rename(mcURDF.Links[i].ID)
+		mcURDF.Links[i].Parent = rename(mcURDF.Links[i].Parent)
+	}
+	for i := range mcURDF.Joints {
+		mcURDF.Joints[i].ID = rename(mcURDF.Joints[i].ID)
+		mcURDF.Joints[i].Parent = rename(mcURDF.Joints[i].Parent)
+	}
 
 	model, err := mcURDF.ParseConfig(name)
 	if err != nil {
@@ -693,7 +733,7 @@ func (s *so101) GoToInputs(ctx context.Context, inputSteps ...[]referenceframe.I
 // coordinate-frame marker at the end-effector when the visualize_ee_frame attribute is
 // enabled.
 func (s *so101) Get3DModels(ctx context.Context, extra map[string]interface{}) (map[string]*commonpb.Mesh, error) {
-	return so101ArmModels(s.cfg.VisualizeEEFrame, s.cfg.UseURDF), nil
+	return so101ArmModels(s.cfg.VisualizeEEFrame), nil
 }
 
 // Status returns the current status of the resource as a map of key-value pairs.

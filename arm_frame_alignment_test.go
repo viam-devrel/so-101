@@ -105,6 +105,38 @@ func toInputs(values []float64) []referenceframe.Input {
 // depends on. If this test ever fails, the two kinematic sources have drifted apart and the
 // graft (or the shared-mesh keying) needs a design decision -- do NOT loosen the tolerances
 // here to force a pass; stop and report the deltas instead.
+// TestURDFExposesJSONFrameNames is the drop-in guard: use_urdf must expose the exact same
+// frame-system frame names as the default JSON arm, so any config that references an arm frame
+// by name (a gripper, camera, or obstacle parented to an arm link) keeps resolving when
+// use_urdf is toggled. Without the rename in makeSO101ModelURDF the URDF model would expose
+// base_link/shoulder_pan/... instead of base/1/..., silently detaching such children toward the
+// world origin. Covers moveable (joint) frames, link geometry labels, and the tool leaf.
+func TestURDFExposesJSONFrameNames(t *testing.T) {
+	t.Setenv("VIAM_MODULE_ROOT", ".")
+
+	jsonModel, err := makeSO101ModelFrame("so101")
+	require.NoError(t, err)
+	urdfModel, err := makeSO101Model(true, nil, false, "so101")
+	require.NoError(t, err)
+
+	jSM := jsonModel.(*referenceframe.SimpleModel)
+	uSM := urdfModel.(*referenceframe.SimpleModel)
+	require.Equal(t, jSM.MoveableFrameNames(), uSM.MoveableFrameNames(),
+		"URDF moveable (joint) frame names must match JSON's exactly")
+
+	labels := func(m referenceframe.Model) []string {
+		gif, err := m.Geometries(make([]referenceframe.Input, len(m.DoF())))
+		require.NoError(t, err)
+		out := []string{}
+		for _, g := range gif.Geometries() {
+			out = append(out, g.Label())
+		}
+		return out
+	}
+	require.ElementsMatch(t, labels(jsonModel), labels(urdfModel),
+		"URDF geometry frame labels must match JSON's exactly")
+}
+
 func TestURDFvsJSONFrameAlignment(t *testing.T) {
 	t.Setenv("VIAM_MODULE_ROOT", ".")
 
@@ -151,15 +183,16 @@ func TestURDFvsJSONFrameAlignment(t *testing.T) {
 		require.InDeltaf(t, jMaxDeg, uMaxDeg, limitTolDeg, "joint[%d] max limit mismatch", i)
 	}
 
-	// Frame-name correspondence: so101.json name <-> grafted URDF model name. "tool" <->
-	// "tool" is the load-bearing end-effector / TCP pair -- both models now use the exact
-	// same LinkConfig for it (see makeSO101ModelURDF), so this should align almost exactly.
+	// Frame-name correspondence: the URDF model renames its frames to so101.json's names
+	// (see urdfToJSONFrameNames in arm.go), so the JSON and URDF frames pair up by identical
+	// name. "tool" is the load-bearing end-effector / TCP pair -- both models use the exact
+	// same LinkConfig for it (see makeSO101ModelURDF), so this aligns almost exactly.
 	pairs := [][2]string{
-		{"base", "base_link"},
-		{"shoulder", "shoulder_link"},
-		{"upper_arm", "upper_arm_link"},
-		{"lower_arm", "lower_arm_link"},
-		{"wrist", "wrist_link"},
+		{"base", "base"},
+		{"shoulder", "shoulder"},
+		{"upper_arm", "upper_arm"},
+		{"lower_arm", "lower_arm"},
+		{"wrist", "wrist"},
 		{"tool", "tool"},
 	}
 

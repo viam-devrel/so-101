@@ -60,18 +60,18 @@ const gltfBinary = "model/gltf-binary"
 // it the same placeholder geometry under use_urdf as it does on the JSON path.
 const so101EEFrameMeshKey = "tool"
 
-// so101ArmMeshParts maps each embedded link GLB to the frame name it is keyed by under
-// each kinematic source. The JSON (so101.json) and URDF (arm/so101.urdf) link frames
-// coincide geometrically, so the same GLB serves both — only the key differs.
+// so101ArmMeshParts maps each embedded link GLB to the frame it mounts on. The URDF model renames
+// its frames to these same so101.json names (see urdfToJSONFrameNames in arm.go), so one key set
+// serves both kinematic sources — the same GLB attaches to the same frame regardless of use_urdf.
 var so101ArmMeshParts = []struct {
-	glb                []byte
-	jsonName, urdfName string
+	glb  []byte
+	name string
 }{
-	{so101BaseGLB, "base", "base_link"},
-	{so101ShoulderGLB, "shoulder", "shoulder_link"},
-	{so101UpperArmGLB, "upper_arm", "upper_arm_link"},
-	{so101LowerArmGLB, "lower_arm", "lower_arm_link"},
-	{so101WristGLB, "wrist", "wrist_link"},
+	{so101BaseGLB, "base"},
+	{so101ShoulderGLB, "shoulder"},
+	{so101UpperArmGLB, "upper_arm"},
+	{so101LowerArmGLB, "lower_arm"},
+	{so101WristGLB, "wrist"},
 }
 
 // so101EEFrameMesh returns the colored end-effector coordinate-frame marker mesh.
@@ -79,19 +79,14 @@ func so101EEFrameMesh() *commonpb.Mesh {
 	return &commonpb.Mesh{ContentType: gltfBinary, Mesh: so101EEFrameGLB}
 }
 
-// so101ArmModels returns the SO-101 link meshes for the 3D scene viewer, keyed by the
-// active kinematic source's frame names (URDF link names when useURDF, so101.json names
-// otherwise). Adds the colored EE coordinate-frame marker at the "tool" frame when
-// visualizeEEFrame is set. Shared by the hardware and simulated arm so the two
-// Get3DModels implementations never drift.
-func so101ArmModels(visualizeEEFrame, useURDF bool) map[string]*commonpb.Mesh {
+// so101ArmModels returns the SO-101 link meshes for the 3D scene viewer, keyed by the arm's
+// frame names (identical in JSON and URDF modes). Adds the colored EE coordinate-frame marker
+// at the "tool" frame when visualizeEEFrame is set. Shared by the hardware and simulated arm so
+// the two Get3DModels implementations never drift.
+func so101ArmModels(visualizeEEFrame bool) map[string]*commonpb.Mesh {
 	models := make(map[string]*commonpb.Mesh, len(so101ArmMeshParts)+1)
 	for _, p := range so101ArmMeshParts {
-		name := p.jsonName
-		if useURDF {
-			name = p.urdfName
-		}
-		models[name] = &commonpb.Mesh{ContentType: gltfBinary, Mesh: p.glb}
+		models[p.name] = &commonpb.Mesh{ContentType: gltfBinary, Mesh: p.glb}
 	}
 	if visualizeEEFrame {
 		models[so101EEFrameMeshKey] = so101EEFrameMesh()

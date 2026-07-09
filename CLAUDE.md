@@ -53,9 +53,13 @@ in `README.md` (one `## Model …` section each).
   origin — otherwise a lone offset sub-part would survive per link (see
   `arm_collision_coverage_test.go`). Decimation is offline because rdk's runtime mesh
   decimation is too slow, hence `mesh_decimation_ratios` normally stays empty. Its `tool`
-  frame is grafted from `so101.json` so `use_urdf` is a true drop-in: identical
-  kinematics/TCP to the JSON model, upgrading only the collision geometry from `so101.json`'s
-  primitives to accurate per-link meshes (see `arm_frame_alignment_test.go`). Assets ship
+  frame is grafted from `so101.json`, and its link/joint frames are **renamed to so101.json's
+  names** (`base_link`→`base`, `shoulder_pan`→`1`, …; see `urdfToJSONFrameNames` in `arm.go`)
+  so `use_urdf` is a true drop-in: identical kinematics/TCP **and identical frame-system frame
+  names** as the JSON model (guarded by `TestURDFExposesJSONFrameNames`), so a gripper/camera
+  parented to an arm frame keeps resolving when `use_urdf` is toggled. Only the collision
+  geometry changes — from `so101.json`'s primitives to accurate per-link meshes (see
+  `arm_frame_alignment_test.go`). Assets ship
   under `arm/` in `module.tar.gz` and are located at runtime via `VIAM_MODULE_ROOT`.
 - `meshes/so101/*.glb` — arm-link meshes (Draco GLB) + `ee_frame.glb` (the colored EE
   coordinate-frame marker). Served via the arm's `Get3DModels`. `visualize_ee_frame` works
