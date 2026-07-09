@@ -45,14 +45,17 @@ in `README.md` (one `## Model …` section each).
 - `arm/so101.urdf` — the alternate kinematic source, used when an arm model's `use_urdf`
   config attribute is set. Vendored from TheRobotStudio/SO-ARM100 (Apache-2.0, see
   `arm/SO-ARM100-LICENSE`), trimmed to the arm-only 5-DOF chain (servos 1-5). Each of the 5
-  arm links carries **one merged collision mesh** (`arm/meshes/<link>_collision.stl`): rdk's
-  URDF parser keeps only the *first* `<collision>` per link (`referenceframe/model_urdf.go`),
-  but the upstream links are multi-part assemblies, so `arm/gen_collision_meshes.py` bakes
-  every sub-part's `<collision>` origin into its vertices, concatenates them per link, and
-  decimates the result (~800 tris/link) into a single mesh referenced with an identity
-  origin — otherwise a lone offset sub-part would survive per link (see
-  `arm_collision_coverage_test.go`). Decimation is offline because rdk's runtime mesh
-  decimation is too slow, hence `mesh_decimation_ratios` normally stays empty. Its `tool`
+  arm links carries **one merged collision mesh** (`arm/meshes/<link>_collision.stl`, ~88k
+  tris / 4.2 MB total): rdk's URDF parser keeps only the *first* `<collision>` per link
+  (`referenceframe/model_urdf.go`), but the upstream links are multi-part assemblies, so
+  `arm/gen_collision_meshes.py` bakes every sub-part's `<collision>` origin into its vertices
+  and concatenates them per link into a single mesh referenced with an identity origin —
+  otherwise a lone offset sub-part would survive per link (see
+  `arm_collision_coverage_test.go`). Printable parts use the optimized `STL/SO101/Individual`
+  print files (scaled mm→m; same local frame as the sim meshes); the servo body comes from
+  `Simulation/SO101/assets` decimated to ~3k tris. The merged mesh is not decimated (that
+  created sliver artifacts), so `mesh_decimation_ratios` normally stays empty (rdk's runtime
+  mesh decimation is also too slow). Its `tool`
   frame is grafted from `so101.json`, and its link/joint frames are **renamed to so101.json's
   names** (`base_link`→`base`, `shoulder_pan`→`1`, …; see `urdfToJSONFrameNames` in `arm.go`)
   so `use_urdf` is a true drop-in: identical kinematics/TCP **and identical frame-system frame

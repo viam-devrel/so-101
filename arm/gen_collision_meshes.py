@@ -13,27 +13,41 @@ Why one merged mesh per link:
 
   This script fixes that offline: for each of the 5 arm links it loads every
   collision sub-part, bakes that sub-part's <origin> into the mesh vertices,
-  concatenates them into a single mesh expressed in the link frame, quadric-
-  decimates the result to ~TARGET_TRIANGLES, and writes one
-  arm/meshes/<link>_collision.stl. arm/so101.urdf then references exactly one
-  such mesh per link with an identity <origin>, so rdk's Collision[0] IS the
-  full link. (rdk's runtime mesh decimation hangs on dense meshes, so
-  decimation is done here, offline, and use_urdf ships these light meshes with
-  mesh_decimation_ratios empty.)
+  and concatenates them into a single mesh expressed in the link frame.
+  arm/so101.urdf then references exactly one such mesh per link with an identity
+  <origin>, so rdk's Collision[0] IS the full link.
 
-Source of truth: TheRobotStudio/SO-ARM100, Apache-2.0 (see SO-ARM100-LICENSE),
-pinned to UPSTREAM_COMMIT below. By default the sub-part meshes and their
-per-link collision layout are downloaded from that commit. For offline / CI
-runs, pass --assets-dir DIR (a directory of the upstream *.stl files) and
---layout-urdf FILE (a URDF whose 5 arm links carry the upstream <collision>
-elements -- arm/so101.urdf's own history, or the upstream file, both work).
+Mesh sources (both from TheRobotStudio/SO-ARM100, Apache-2.0, pinned to
+UPSTREAM_COMMIT):
+  * Printable plastic parts -> STL/SO101/Individual/*.stl. These are the
+    optimized/decimated print files (~3x lighter than the simulation assets)
+    and, once scaled from millimeters to meters, sit in the exact same local
+    frame as the simulation meshes (verified corner-for-corner), so the URDF
+    collision origins apply unchanged. Merged as-is -- no decimation -- so the
+    geometry stays clean (decimating the *merged* non-manifold mesh created
+    sliver artifacts, hence per-source-part handling instead).
+  * Servo bodies (sts3215_03a*, not a printed part, so absent from Individual)
+    -> Simulation/SO101/assets/*.stl. The servo is a single clean manifold
+    reused at every joint and dominates the triangle budget, so it is quadric-
+    decimated to SERVO_TARGET_TRIANGLES *before* merging (a single manifold
+    decimates cleanly, unlike the merged mesh).
+
+  Net: ~88k triangles / ~4.2 MB total, full clean coverage. Because the meshes
+  ship pre-optimized, use_urdf runs with mesh_decimation_ratios empty (rdk's
+  runtime mesh decimation hangs on dense meshes anyway).
+
+By default all inputs are downloaded from UPSTREAM_COMMIT. For offline / CI
+runs, pass --individual-dir (STL/SO101/Individual), --assets-dir
+(Simulation/SO101/assets), and --layout-urdf (a URDF whose 5 arm links carry
+the upstream <collision> elements -- the upstream so101_new_calib.urdf, or
+arm/so101.urdf from before it was rewritten to single-collision).
 
 Requires trimesh + fast-simplification (for simplify_quadric_decimation) and,
 for the default download path, network access.
 
 Run from the repo root:
-    python3 arm/gen_collision_meshes.py                     # download from upstream
-    python3 arm/gen_collision_meshes.py --assets-dir /path  --layout-urdf /path.urdf
+    python3 arm/gen_collision_meshes.py
+    python3 arm/gen_collision_meshes.py --individual-dir DIR --assets-dir DIR --layout-urdf FILE
 """
 import argparse
 import os
@@ -45,13 +59,32 @@ import trimesh
 
 UPSTREAM_REPO = "TheRobotStudio/SO-ARM100"
 UPSTREAM_COMMIT = "fda892cba81032c46c40976a48c9ceadbf40a9ca"
-UPSTREAM_DIR = "Simulation/SO101"  # so101_new_calib.urdf + assets/*.stl live here
-RAW = f"https://raw.githubusercontent.com/{UPSTREAM_REPO}/{UPSTREAM_COMMIT}/{UPSTREAM_DIR}"
+RAW = f"https://raw.githubusercontent.com/{UPSTREAM_REPO}/{UPSTREAM_COMMIT}"
+INDIVIDUAL_PATH = "STL/SO101/Individual"       # printable parts, millimeters
+ASSETS_PATH = "Simulation/SO101/assets"        # simulation meshes (servo), meters
+LAYOUT_URDF_PATH = "Simulation/SO101/so101_new_calib.urdf"
 
-# The 5 arm links (servos 1-5), tip-excluded gripper. Order is cosmetic.
+# The 5 arm links (servos 1-5), gripper excluded. Order is cosmetic.
 ARM_LINKS = ["base_link", "shoulder_link", "upper_arm_link", "lower_arm_link", "wrist_link"]
 
-TARGET_TRIANGLES = 800
+# URDF sub-part filename (simulation-assets basename, as referenced by the layout URDF's
+# <collision> elements) -> optimized Individual print-file name. Sub-parts absent from this map
+# (the sts3215 servo bodies) are pulled from the simulation assets and decimated instead.
+INDIVIDUAL_PARTS = {
+    "base_motor_holder_so101_v1.stl": "Base_motor_holder_SO101.stl",
+    "base_so101_v2.stl": "Base_SO101.stl",
+    "waveshare_mounting_plate_so101_v2.stl": "WaveShare_Mounting_Plate_SO101.stl",
+    "motor_holder_so101_base_v1.stl": "Motor_holder_SO101_Base.stl",
+    "rotation_pitch_so101_v1.stl": "Rotation_Pitch_SO101.stl",
+    "upper_arm_so101_v1.stl": "Upper_arm_SO101.stl",
+    "under_arm_so101_v1.stl": "Under_arm_SO101.stl",
+    "motor_holder_so101_wrist_v1.stl": "Motor_holder_SO101_Wrist.stl",
+    "wrist_roll_pitch_so101_v2.stl": "Wrist_Roll_Pitch_SO101.stl",
+}
+
+# Individual STLs are authored in millimeters; the simulation meshes / URDF are in meters.
+MM_TO_M = 0.001
+SERVO_TARGET_TRIANGLES = 3000
 
 
 def rpy_to_matrix(roll, pitch, yaw):
@@ -64,17 +97,19 @@ def rpy_to_matrix(roll, pitch, yaw):
     return rz @ ry @ rx
 
 
-def fetch(url):
+def fetch_stl(url):
     with urllib.request.urlopen(url) as resp:  # noqa: S310 (pinned raw.githubusercontent URL)
-        return resp.read()
+        data = resp.read()
+    return trimesh.load(trimesh.util.wrap_as_stream(data), file_type="stl", process=False)
 
 
 def load_layout(layout_urdf):
-    """Return {link_name: [(mesh_basename, xyz, rpy), ...]} for the arm links."""
+    """Return {link_name: [(subpart_basename, xyz, rpy), ...]} for the arm links."""
     if layout_urdf:
         root = ET.parse(layout_urdf).getroot()
     else:
-        root = ET.fromstring(fetch(f"{RAW}/so101_new_calib.urdf"))
+        with urllib.request.urlopen(f"{RAW}/{LAYOUT_URDF_PATH}") as resp:  # noqa: S310
+            root = ET.fromstring(resp.read())
     layout = {}
     for link in root.findall("link"):
         name = link.get("name")
@@ -94,18 +129,35 @@ def load_layout(layout_urdf):
     return layout
 
 
-def load_submesh(basename, assets_dir):
-    if assets_dir:
-        return trimesh.load(os.path.join(assets_dir, basename), process=False)
-    data = fetch(f"{RAW}/assets/{basename}")
-    return trimesh.load(trimesh.util.wrap_as_stream(data), file_type="stl", process=False)
+def load_subpart(basename, args):
+    """Load a collision sub-part in meters. Printable parts come from the optimized Individual
+    set (scaled mm->m); servo bodies come from the simulation assets and are decimated."""
+    if basename in INDIVIDUAL_PARTS:
+        indiv_name = INDIVIDUAL_PARTS[basename]
+        if args.individual_dir:
+            mesh = trimesh.load(os.path.join(args.individual_dir, indiv_name), process=False)
+        else:
+            mesh = fetch_stl(f"{RAW}/{INDIVIDUAL_PATH}/{indiv_name}")
+        mesh.apply_scale(MM_TO_M)
+        return mesh
+    # Servo body (meters already) -> decimate the single manifold before merging.
+    if args.assets_dir:
+        mesh = trimesh.load(os.path.join(args.assets_dir, basename), process=False)
+    else:
+        mesh = fetch_stl(f"{RAW}/{ASSETS_PATH}/{basename}")
+    if args.servo_triangles and len(mesh.faces) > args.servo_triangles:
+        mesh = mesh.simplify_quadric_decimation(face_count=args.servo_triangles)
+        mesh.remove_unreferenced_vertices()
+    return mesh
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--assets-dir", help="local dir of upstream *.stl sub-part meshes (else download)")
+    ap.add_argument("--individual-dir", help="local dir of STL/SO101/Individual print files (else download)")
+    ap.add_argument("--assets-dir", help="local dir of Simulation/SO101/assets meshes for the servo (else download)")
     ap.add_argument("--layout-urdf", help="URDF carrying the arm links' upstream <collision> layout (else download)")
-    ap.add_argument("--target-triangles", type=int, default=TARGET_TRIANGLES)
+    ap.add_argument("--servo-triangles", type=int, default=SERVO_TARGET_TRIANGLES,
+                    help="decimate each servo sub-part to this many triangles before merge (0 = keep full)")
     args = ap.parse_args()
 
     out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "meshes")
@@ -114,16 +166,16 @@ def main():
     layout = load_layout(args.layout_urdf)
     cache = {}
 
-    def submesh(basename):
+    def subpart(basename):
         if basename not in cache:
-            cache[basename] = load_submesh(basename, args.assets_dir)
+            cache[basename] = load_subpart(basename, args)
         return cache[basename].copy()
 
-    total_out = 0
+    total_tris = 0
     for link in ARM_LINKS:
         parts = []
         for basename, xyz, rpy in layout[link]:
-            mesh = submesh(basename)
+            mesh = subpart(basename)
             transform = np.eye(4)
             transform[:3, :3] = rpy_to_matrix(*rpy)
             transform[:3, 3] = xyz
@@ -131,21 +183,15 @@ def main():
             parts.append(mesh)
 
         merged = trimesh.util.concatenate(parts)
-        before = len(merged.faces)
-        target = min(args.target_triangles, before)
-        if target < before:
-            merged = merged.simplify_quadric_decimation(face_count=target)
-            merged.remove_unreferenced_vertices()
-        after = len(merged.faces)
-        if after == 0 or not merged.vertices.size:
-            raise SystemExit(f"{link}: merge/decimation collapsed the mesh -- aborting")
+        if not merged.faces.size or not merged.vertices.size:
+            raise SystemExit(f"{link}: merge produced an empty mesh -- aborting")
 
         path = os.path.join(out_dir, f"{link}_collision.stl")
-        merged.export(path, file_type="stl")  # binary STL, meters (unchanged)
-        total_out += after
-        print(f"{link:16s} {len(parts)} parts, {before:6d} -> {after:5d} tris  {os.path.getsize(path) // 1024}KB")
+        merged.export(path, file_type="stl")  # binary STL, meters
+        total_tris += len(merged.faces)
+        print(f"{link:16s} {len(parts)} parts -> {len(merged.faces):6d} tris  {os.path.getsize(path) // 1024}KB")
 
-    print(f"{'TOTAL':16s} {'':8s}          {total_out:5d} tris")
+    print(f"{'TOTAL':16s}   {total_tris:6d} tris")
 
 
 if __name__ == "__main__":
