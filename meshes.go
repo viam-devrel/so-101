@@ -72,3 +72,15 @@ func so101Meshes() map[string]*commonpb.Mesh {
 func so101EEFrameMesh() *commonpb.Mesh {
 	return &commonpb.Mesh{ContentType: gltfBinary, Mesh: so101EEFrameGLB}
 }
+
+// so101ArmModels returns the SO-101 link meshes for the 3D scene viewer, adding the
+// colored EE coordinate-frame marker at the "tool" frame when visualizeEEFrame is set.
+// Shared by the hardware and simulated arm so the two Get3DModels implementations never
+// drift.
+func so101ArmModels(visualizeEEFrame bool) map[string]*commonpb.Mesh {
+	models := so101Meshes()
+	if visualizeEEFrame {
+		models[so101EEFrameMeshKey] = so101EEFrameMesh()
+	}
+	return models
+}

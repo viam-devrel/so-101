@@ -419,11 +419,7 @@ func (s *simulatedSO101) Geometries(ctx context.Context, extra map[string]interf
 // Get3DModels returns the SO-101 link meshes for the 3D scene viewer, plus a colored
 // end-effector coordinate-frame marker when visualize_ee_frame is enabled.
 func (s *simulatedSO101) Get3DModels(ctx context.Context, extra map[string]interface{}) (map[string]*commonpb.Mesh, error) {
-	models := so101Meshes()
-	if s.visualizeEEFrame {
-		models[so101EEFrameMeshKey] = so101EEFrameMesh()
-	}
-	return models, nil
+	return so101ArmModels(s.visualizeEEFrame), nil
 }
 
 func (s *simulatedSO101) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
