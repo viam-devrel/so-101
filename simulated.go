@@ -56,6 +56,18 @@ type SO101SimulatedArmConfig struct {
 	// VisualizeEEFrame, when true, makes Get3DModels also serve a colored XYZ
 	// coordinate-frame marker at the end-effector. Defaults to false.
 	VisualizeEEFrame bool `json:"visualize_ee_frame,omitempty"`
+
+	// UseURDF sources kinematics + mesh collision geometry from the bundled
+	// arm/so101.urdf instead of the embedded so101.json. Requires VIAM_MODULE_ROOT
+	// (set by viam-server). Lets the simulated arm visualize/test the URDF collision
+	// model and 3D meshes without a physical robot. Default false.
+	UseURDF bool `json:"use_urdf,omitempty"`
+	// MeshDecimationRatios is the per-collision-mesh simplification ratio in [0,1],
+	// applied in URDF document order (one per arm link: base/shoulder/upper_arm/
+	// lower_arm/wrist). Only values strictly in (0,1) actually decimate. Defaults
+	// to no runtime decimation when empty; the bundled collision meshes already ship
+	// pre-decimated (see arm/gen_collision_meshes.py). Ignored unless UseURDF is set.
+	MeshDecimationRatios []float64 `json:"mesh_decimation_ratios,omitempty"`
 }
 
 // Validate ensures all parts of the config are valid and declares the motion service
@@ -63,6 +75,12 @@ type SO101SimulatedArmConfig struct {
 func (cfg *SO101SimulatedArmConfig) Validate(path string) ([]string, []string, error) {
 	if cfg.SpeedDegsPerSec < 0 {
 		return nil, nil, fmt.Errorf("speed_degs_per_sec must not be negative, got %.1f", cfg.SpeedDegsPerSec)
+	}
+
+	for i, r := range cfg.MeshDecimationRatios {
+		if math.IsNaN(r) || r < 0 || r > 1 {
+			return nil, nil, fmt.Errorf("mesh_decimation_ratios[%d] must be in [0, 1], got %f", i, r)
+		}
 	}
 
 	motionName := cfg.Motion
@@ -132,11 +150,7 @@ func newSimulatedSO101(
 		return nil, err
 	}
 
-	makeModel := makeSO101ModelFrame
-	if conf.VisualizeEEFrame {
-		makeModel = makeSO101ModelFrameWithEEMarker
-	}
-	model, err := makeModel(rawConf.Name)
+	model, err := makeSO101Model(conf.UseURDF, conf.MeshDecimationRatios, conf.VisualizeEEFrame, rawConf.Name)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create kinematic model: %w", err)
 	}
@@ -276,7 +290,7 @@ func (s *simulatedSO101) EndPosition(ctx context.Context, extra map[string]inter
 	if err != nil {
 		return nil, err
 	}
-	return referenceframe.ComputeOOBPosition(s.model, inputs)
+	return computeOOBPosition(s.model, inputs)
 }
 
 // MoveToPosition moves the arm's end effector to the target pose using the motion service.
@@ -420,6 +434,11 @@ func (s *simulatedSO101) Geometries(ctx context.Context, extra map[string]interf
 // end-effector coordinate-frame marker when visualize_ee_frame is enabled.
 func (s *simulatedSO101) Get3DModels(ctx context.Context, extra map[string]interface{}) (map[string]*commonpb.Mesh, error) {
 	return so101ArmModels(s.visualizeEEFrame), nil
+}
+
+// Status returns the current status of the resource as a map of key-value pairs.
+func (s *simulatedSO101) Status(ctx context.Context) (map[string]interface{}, error) {
+	return map[string]interface{}{}, nil
 }
 
 func (s *simulatedSO101) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {

@@ -2,7 +2,7 @@
 
 `viam-devrel/so-101` — a Viam module for the LeRobot **SO-101 / SO-ARM101** robot arm
 (TheRobotStudio open hardware: 6× Feetech STS3215 servos on one serial/USB bus @ 1 Mbaud).
-Go module `so_arm`, Go 1.25, `go.viam.com/rdk v0.102.0`. It can drive either the leader or
+Go module `so_arm`, Go 1.25, `go.viam.com/rdk v0.123.0`. It can drive either the leader or
 the follower arm, or both as separate components for mirrored teleoperation.
 
 ## Models
@@ -40,9 +40,40 @@ in `README.md` (one `## Model …` section each).
 ## Kinematics & meshes
 
 - `so101.json` — SVA kinematics, `//go:embed`-ed, shared by both arm models. Derived from
-  TheRobotStudio/SO-ARM100's URDF; its `tool` link is the end-effector (TCP) frame.
+  TheRobotStudio/SO-ARM100's URDF; its `tool` link is the end-effector (TCP) frame. This is
+  the default kinematic source for both arm models.
+- `arm/so101.urdf` — the alternate kinematic source, used when an arm model's `use_urdf`
+  config attribute is set. Vendored from TheRobotStudio/SO-ARM100 (Apache-2.0, see
+  `arm/SO-ARM100-LICENSE`), trimmed to the arm-only 5-DOF chain (servos 1-5). Each of the 5
+  arm links carries **one merged collision mesh** (`arm/meshes/<link>_collision.stl`, ~88k
+  tris / 4.2 MB total): rdk's URDF parser keeps only the *first* `<collision>` per link
+  (`referenceframe/model_urdf.go`), but the upstream links are multi-part assemblies, so
+  `arm/gen_collision_meshes.py` bakes every sub-part's `<collision>` origin into its vertices
+  and concatenates them per link into a single mesh — otherwise a lone offset sub-part would
+  survive per link (see `arm_collision_coverage_test.go`). Each mesh is generated relative to
+  so101.json's per-link box pose, with a matching `<collision><origin>` in the URDF, so the
+  geometry pose equals so101.json's — the 3D viewer places each Get3DModels GLB at the link's
+  *geometry* pose, so without this the shared GLBs scatter by the box offsets under `use_urdf`
+  (see `TestURDFGeometryPoseMatchesJSON`). Printable parts use the optimized `STL/SO101/Individual`
+  print files (scaled mm→m; same local frame as the sim meshes); the servo body comes from
+  `Simulation/SO101/assets` decimated to ~3k tris. The merged mesh is not decimated (that
+  created sliver artifacts), so `mesh_decimation_ratios` normally stays empty (rdk's runtime
+  mesh decimation is also too slow). The URDF is authored to be a true drop-in for
+  `so101.json` **in the file itself** — its links/joints use so101.json's names (`base`,
+  `shoulder`, …; joints `1`-`5`) and it ends at a `tool` leaf at so101.json's TCP (joint-5
+  output + 180° flip, via a `tool_mount`+`tool_joint` pair). This has to be baked into the file
+  rather than patched in memory because the model ships to viam-server as the raw URDF bytes
+  (see the module-boundary gotcha below); guarded by `TestURDFvsJSONFrameAlignment`,
+  `TestURDFExposesJSONFrameNames`, and `TestURDFModelSurvivesSerialization`. So `use_urdf` is a
+  true drop-in: identical kinematics/TCP **and** frame names as the JSON model — only the
+  collision geometry changes (per-link meshes vs so101.json's primitives). `makeSO101ModelURDF`
+  therefore just parses the URDF; it only re-serializes to SVA JSON for `visualize_ee_frame`
+  (to carry the tool's placeholder marker box across the wire). Assets ship under `arm/` in
+  `module.tar.gz` and are located at runtime via `VIAM_MODULE_ROOT`.
 - `meshes/so101/*.glb` — arm-link meshes (Draco GLB) + `ee_frame.glb` (the colored EE
-  coordinate-frame marker). Served via the arm's `Get3DModels`.
+  coordinate-frame marker). Served via the arm's `Get3DModels`. `visualize_ee_frame` works
+  in both JSON and URDF modes, since both end at a `tool` frame that gets the same EE-marker
+  placeholder box either way.
 - `meshes/gripper/*.ply` — gripper meshes (ASCII PLY — rdk's `spatialmath.Mesh` reads PLY
   only, not GLB). Served via the gripper's `Geometries()` as `spatialmath.Mesh`.
 - Asset generators: `meshes/gen_ee_frame.py`, `meshes/gen_gripper_meshes.py`. Meshes are
@@ -76,6 +107,27 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
 
 - A `*_arm.go` filename is treated by Go as a GOARCH=`arm`-only file — the simulated-arm
   model lives in `simulated.go` (not `simulated_arm.go`), its tests in `simulated_test.go`.
+- The `arm/` directory holds vendored URDF assets (`so101.urdf`, its per-link merged
+  collision meshes, `gen_collision_meshes.py`, the SO-ARM100 license) — not Go source,
+  despite the name.
+- rdk's URDF parser uses only the **first** `<collision>` element per link (falls back to
+  `Collision[0]` after a capsule-pattern check; see `referenceframe/model_urdf.go`). A link
+  authored as several `<collision>` sub-parts therefore keeps just one offset fragment. This
+  is why `arm/so101.urdf` gives each arm link a single merged mesh (`arm/gen_collision_meshes.py`)
+  — passing the raw upstream multi-part links renders incomplete/misaligned collision geometry.
+- **A component ships its kinematics to viam-server as `ModelConfig().OriginalFile.Bytes`**
+  (`referenceframe.KinematicModelToProtobuf`), NOT its in-memory `LinkConfig`s. So any in-memory
+  edit to a parsed model is **lost across the module gRPC boundary** — viam-server rebuilds the
+  model from the original file bytes. This is why the correct TCP/frame names are baked into
+  `arm/so101.urdf` itself rather than patched in `makeSO101ModelURDF`: an in-memory graft/rename
+  left `OriginalFile` as the raw (un-grafted) URDF, so the server used an EE ~98mm past
+  so101.json's TCP and the gripper (parented to the arm) followed it — while every in-process
+  unit test stayed green. `TestURDFModelSurvivesSerialization` guards this by round-tripping
+  through the real gRPC (de)serialization (`KinematicModelToProtobuf`/`FromProtobuf`); an
+  in-process `Transform` check would NOT have caught it. The one place we still rely on this: for
+  `visualize_ee_frame` the tool needs an in-memory placeholder box, so that path re-serializes to
+  **SVA JSON** (`spatialmath.GeometryConfig.MeshData` embeds the mesh bytes, so meshes survive) —
+  a bigger payload (~5.9 MB vs ~4.4 MB URDF), hence only when the marker is enabled.
 - The Viam `tool` frame in `so101.json` is rotated ~180° from the URDF `gripper_link`
   frame (the TCP convention). Gripper meshes are authored in `gripper_link` coords, so
   `gripper.go`'s `toolFromGripperLink` transform corrects them in `buildGripperMeshes`.

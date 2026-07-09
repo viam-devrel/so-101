@@ -25,13 +25,13 @@ update:
 test:
 	go test ./...
 
-module.tar.gz: meta.json $(MODULE_BINARY) first_run.sh build-app
+module.tar.gz: meta.json $(MODULE_BINARY) first_run.sh build-app arm/so101.urdf arm/meshes/*.stl
 ifeq ($(VIAM_TARGET_OS), windows)
 	jq '.entrypoint = "./bin/arm.exe"' meta.json > temp.json && mv temp.json meta.json
 else
 	strip $(MODULE_BINARY)
 endif
-	tar czf $@ meta.json first_run.sh $(MODULE_BINARY) setup-app/build/
+	tar czf $@ meta.json first_run.sh $(MODULE_BINARY) setup-app/build/ arm/
 ifeq ($(VIAM_TARGET_OS), windows)
 	git checkout meta.json
 endif

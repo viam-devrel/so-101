@@ -1,0 +1,49 @@
+package so_arm
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/require"
+	"go.viam.com/rdk/referenceframe"
+)
+
+func TestMakeModelFrameURDF(t *testing.T) {
+	// URDF path: VIAM_MODULE_ROOT resolves arm/so101.urdf. During `go test .` the
+	// working dir is the package dir (repo root), so "." locates the arm/ assets.
+	t.Setenv("VIAM_MODULE_ROOT", ".")
+	m, err := makeModelFrame(&SO101ArmConfig{UseURDF: true}, "so101")
+	require.NoError(t, err)
+	require.Equal(t, 5, len(m.DoF()))
+
+	// Default (JSON) path still works and is 5-DOF.
+	m2, err := makeModelFrame(&SO101ArmConfig{}, "so101")
+	require.NoError(t, err)
+	require.Equal(t, 5, len(m2.DoF()))
+
+	// VisualizeEEFrame on the JSON path still builds (uses the EE-marker variant).
+	m3, err := makeModelFrame(&SO101ArmConfig{VisualizeEEFrame: true}, "so101")
+	require.NoError(t, err)
+	require.Equal(t, 5, len(m3.DoF()))
+}
+
+// TestMakeSO101ModelURDFVisualizeEE covers the URDF-mode visualize_ee_frame branch: the
+// grafted "tool" leaf gains the placeholder box geometry so the viewer draws the EE marker,
+// exactly as on the JSON path.
+func TestMakeSO101ModelURDFVisualizeEE(t *testing.T) {
+	t.Setenv("VIAM_MODULE_ROOT", ".")
+	inputsGeoms := func(m referenceframe.Model) int {
+		g, err := m.Geometries(make([]referenceframe.Input, len(m.DoF())))
+		require.NoError(t, err)
+		return len(g.Geometries())
+	}
+
+	// URDF without the marker: 5 per-link collision meshes; the grafted tool has no geometry.
+	off, err := makeSO101Model(true, nil, false, "so101")
+	require.NoError(t, err)
+	require.Equal(t, 5, inputsGeoms(off))
+
+	// URDF with the marker: the grafted tool gains the placeholder box => 6 geometries.
+	on, err := makeSO101Model(true, nil, true, "so101")
+	require.NoError(t, err)
+	require.Equal(t, 6, inputsGeoms(on))
+}

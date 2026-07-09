@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -28,6 +30,34 @@ var (
 
 //go:embed so101.json
 var so101ModelJson []byte
+
+// computeOOBPosition takes a frame and a slice of Inputs and returns the cartesian position of
+// the frame after transforming it by the given inputs even if the inputs given would violate the
+// Limits of the frame. This is performed statelessly without changing any data.
+//
+// This replaces referenceframe.ComputeOOBPosition, which was removed upstream. Callers rely on
+// being able to compute a pose for out-of-bounds joint positions (e.g. reporting EndPosition
+// while a joint is slightly past its calibrated limit). rdk v0.123's Frame.Transform early-returns
+// at the first out-of-bounds joint, yielding a pose truncated at that joint (and everything
+// downstream), so inputs are clamped into the joint limits first to always compose the full chain.
+func computeOOBPosition(frame referenceframe.Frame, inputs []referenceframe.Input) (spatialmath.Pose, error) {
+	if inputs == nil {
+		return nil, errors.New("cannot compute position for nil joints")
+	}
+	if frame == nil {
+		return nil, errors.New("cannot compute position for nil frame")
+	}
+
+	limits := frame.DoF()
+	safe := make([]referenceframe.Input, len(inputs))
+	for i, v := range inputs {
+		if i < len(limits) {
+			v = math.Max(limits[i].Min, math.Min(limits[i].Max, v))
+		}
+		safe[i] = v
+	}
+	return frame.Transform(safe)
+}
 
 func init() {
 	resource.RegisterComponent(arm.API, SO101Model,
@@ -56,6 +86,17 @@ type SO101ArmConfig struct {
 	// VisualizeEEFrame, when true, makes Get3DModels serve a colored XYZ
 	// coordinate-frame marker at the end-effector. Defaults to false.
 	VisualizeEEFrame bool `json:"visualize_ee_frame,omitempty"`
+
+	// UseURDF sources kinematics + mesh collision geometry from the bundled
+	// arm/so101.urdf instead of the embedded so101.json. Requires VIAM_MODULE_ROOT
+	// (set by viam-server). Default false.
+	UseURDF bool `json:"use_urdf,omitempty"`
+	// MeshDecimationRatios is the per-collision-mesh simplification ratio in [0,1],
+	// applied in URDF document order (one per arm link: base/shoulder/upper_arm/
+	// lower_arm/wrist). Only values strictly in (0,1) actually decimate. Defaults
+	// to no runtime decimation when empty; the bundled collision meshes already ship
+	// pre-decimated (see arm/gen_collision_meshes.py). Ignored unless UseURDF is set.
+	MeshDecimationRatios []float64 `json:"mesh_decimation_ratios,omitempty"`
 }
 
 // Validate ensures all parts of the config are valid
@@ -73,6 +114,12 @@ func (cfg *SO101ArmConfig) Validate(path string) ([]string, []string, error) {
 	for _, id := range cfg.ServoIDs {
 		if id < 1 || id > 5 {
 			return nil, nil, fmt.Errorf("arm servo IDs must be 1-5, got %d", id)
+		}
+	}
+
+	for i, r := range cfg.MeshDecimationRatios {
+		if math.IsNaN(r) || r < 0 || r > 1 {
+			return nil, nil, fmt.Errorf("mesh_decimation_ratios[%d] must be in [0, 1], got %f", i, r)
 		}
 	}
 
@@ -136,6 +183,14 @@ func makeSO101ModelFrame(resourceName string) (referenceframe.Model, error) {
 // does not draw is dropped. Giving "tool" a geometry makes the viewer draw the link, so
 // the colored EE-frame mesh served by Get3DModels renders there. so101.json is untouched;
 // this is used only when an arm's visualize_ee_frame attribute is enabled.
+// eeMarkerGeometry returns the small placeholder box given to the "tool" link so the 3D
+// viewer draws that frame (a Get3DModels mesh keyed to a geometry-less frame is dropped).
+// The colored EE-frame mesh from Get3DModels replaces it visually. Shared by the JSON and
+// URDF model builders so the two visualize_ee_frame paths use the identical placeholder.
+func eeMarkerGeometry() *spatialmath.GeometryConfig {
+	return &spatialmath.GeometryConfig{Type: spatialmath.BoxType, X: 10, Y: 10, Z: 10}
+}
+
 func makeSO101ModelFrameWithEEMarker(resourceName string) (referenceframe.Model, error) {
 	m := &referenceframe.ModelConfigJSON{
 		OriginalFile: &referenceframe.ModelFile{
@@ -148,13 +203,88 @@ func makeSO101ModelFrameWithEEMarker(resourceName string) (referenceframe.Model,
 	}
 	for i := range m.Links {
 		if m.Links[i].ID == so101EEFrameMeshKey {
-			// A small box; the Get3DModels "tool" mesh replaces it visually.
-			m.Links[i].Geometry = &spatialmath.GeometryConfig{
-				Type: spatialmath.BoxType, X: 10, Y: 10, Z: 10,
-			}
+			m.Links[i].Geometry = eeMarkerGeometry()
 		}
 	}
 	return m.ParseConfig(resourceName)
+}
+
+// makeModelFrame builds the SO-101 kinematic model from either the embedded so101.json
+// (default) or the bundled arm/so101.urdf (when cfg.UseURDF). On the JSON path, when
+// visualize_ee_frame is set the "tool" link gets a placeholder geometry so the viewer
+// draws the EE marker (see makeSO101ModelFrameWithEEMarker). VisualizeEEFrame's placeholder
+// handling under URDF mode is deferred to a later task (frame-alignment), so it is not
+// applied here.
+func makeModelFrame(cfg *SO101ArmConfig, name string) (referenceframe.Model, error) {
+	return makeSO101Model(cfg.UseURDF, cfg.MeshDecimationRatios, cfg.VisualizeEEFrame, name)
+}
+
+// makeSO101Model builds the SO-101 kinematic model from either the embedded so101.json
+// (default) or the bundled arm/so101.urdf (when useURDF). Shared by the hardware and
+// simulated arms. See makeModelFrame for the JSON/URDF and VisualizeEEFrame semantics.
+func makeSO101Model(useURDF bool, ratios []float64, visualizeEE bool, name string) (referenceframe.Model, error) {
+	if !useURDF {
+		if visualizeEE {
+			return makeSO101ModelFrameWithEEMarker(name)
+		}
+		return makeSO101ModelFrame(name)
+	}
+	return makeSO101ModelURDF(ratios, visualizeEE, name)
+}
+
+// makeSO101ModelURDF builds the SO-101 model from arm/so101.urdf. The URDF is authored so its
+// raw form is already a drop-in for so101.json: so101.json's frame names (base, shoulder,
+// upper_arm, lower_arm, wrist; joints 1-5) and its "tool" TCP (joint-5 output + 180deg flip),
+// with only the collision geometry differing (per-link meshes vs so101.json's primitives). This
+// correctness has to live in the file itself, not in an in-memory patch, because a component
+// ships its kinematics to viam-server as ModelConfig().OriginalFile.Bytes -- this raw URDF --
+// and in-memory edits would be lost across the module gRPC boundary (see the arm/so101.urdf
+// header and TestURDFModelSurvivesSerialization). Returning the parsed URDF lets it transmit AS
+// URDF, with meshes sent separately, which is a much smaller kinematics payload than embedding
+// them in SVA JSON.
+//
+// visualize_ee_frame is the one exception: it needs a placeholder geometry on the "tool" link so
+// the 3D viewer draws that frame and Get3DModels' EE-marker mesh renders there. Baking that box
+// statically into the URDF would add a spurious collision volume for everyone, so instead it is
+// added in memory and the model re-serialized to SVA JSON -- which, unlike the URDF path, carries
+// the in-memory geometry (and the embedded meshes) across the gRPC boundary. That makes the
+// transmitted kinematics larger, so it is done only when the marker is enabled.
+func makeSO101ModelURDF(ratios []float64, visualizeEE bool, name string) (referenceframe.Model, error) {
+	root := os.Getenv("VIAM_MODULE_ROOT")
+	if root == "" {
+		return nil, errors.New("use_urdf is set but VIAM_MODULE_ROOT is empty")
+	}
+	path := filepath.Join(root, "arm", "so101.urdf")
+	// The bundled collision meshes ship pre-decimated (arm/gen_collision_meshes.py), so runtime
+	// decimation is off by default: ratios is empty unless a user explicitly opts into further
+	// decimation. (rdk's runtime decimation is unusably slow on dense meshes, which is why the
+	// meshes are decimated offline instead.)
+	model, err := referenceframe.ParseModelXMLFile(path, name, ratios)
+	if err != nil {
+		return nil, fmt.Errorf("parsing URDF %q: %w", path, err)
+	}
+	if !visualizeEE {
+		return model, nil
+	}
+
+	// visualize_ee_frame: give "tool" a placeholder box and rebuild from SVA JSON so the
+	// geometry survives the gRPC boundary (a raw-URDF transmission would drop it).
+	sm, ok := model.(*referenceframe.SimpleModel)
+	if !ok {
+		return nil, fmt.Errorf("parsing URDF %q: expected *referenceframe.SimpleModel, got %T", path, model)
+	}
+	mc := sm.ModelConfig()
+	for i := range mc.Links {
+		if mc.Links[i].ID == so101EEFrameMeshKey {
+			mc.Links[i].Geometry = eeMarkerGeometry()
+		}
+	}
+	mc.OriginalFile = nil
+	jsonBytes, err := json.Marshal(mc)
+	if err != nil {
+		return nil, fmt.Errorf("serializing URDF model %q for visualize_ee_frame: %w", path, err)
+	}
+	return referenceframe.UnmarshalModelJSON(jsonBytes, name)
 }
 
 // calculateJointLimits dynamically calculates joint limits from calibration data
@@ -256,11 +386,7 @@ func NewSO101(ctx context.Context, deps resource.Dependencies, name resource.Nam
 		return nil, fmt.Errorf("failed to get shared SO-ARM controller: %w", err)
 	}
 
-	makeModel := makeSO101ModelFrame
-	if conf.VisualizeEEFrame {
-		makeModel = makeSO101ModelFrameWithEEMarker
-	}
-	model, err := makeModel(name.Name)
+	model, err := makeModelFrame(conf, name.Name)
 	if err != nil {
 		ReleaseSharedController() // Clean up on error
 		return nil, fmt.Errorf("failed to create kinematic model: %w", err)
@@ -330,7 +456,7 @@ func (s *so101) EndPosition(ctx context.Context, extra map[string]interface{}) (
 		return nil, err
 	}
 
-	pose, err := referenceframe.ComputeOOBPosition(s.model, inputs)
+	pose, err := computeOOBPosition(s.model, inputs)
 	if err != nil {
 		return nil, fmt.Errorf("failed to compute end position: %w", err)
 	}
@@ -535,6 +661,11 @@ func (s *so101) GoToInputs(ctx context.Context, inputSteps ...[]referenceframe.I
 // enabled.
 func (s *so101) Get3DModels(ctx context.Context, extra map[string]interface{}) (map[string]*commonpb.Mesh, error) {
 	return so101ArmModels(s.cfg.VisualizeEEFrame), nil
+}
+
+// Status returns the current status of the resource as a map of key-value pairs.
+func (s *so101) Status(ctx context.Context) (map[string]interface{}, error) {
+	return map[string]interface{}{}, nil
 }
 
 func (s *so101) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
