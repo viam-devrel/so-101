@@ -63,10 +63,10 @@ type SO101SimulatedArmConfig struct {
 	// model and 3D meshes without a physical robot. Default false.
 	UseURDF bool `json:"use_urdf,omitempty"`
 	// MeshDecimationRatios is the per-collision-mesh simplification ratio in [0,1],
-	// applied in URDF document order (one per link: base/shoulder/upper_arm/lower_arm/
-	// wrist/gripper_link). Only values strictly in (0,1) actually decimate. Defaults
+	// applied in URDF document order (one per arm link: base/shoulder/upper_arm/
+	// lower_arm/wrist). Only values strictly in (0,1) actually decimate. Defaults
 	// to no runtime decimation when empty; the bundled collision meshes already ship
-	// pre-decimated (see arm/gen_decimated_meshes.py). Ignored unless UseURDF is set.
+	// pre-decimated (see arm/gen_collision_meshes.py). Ignored unless UseURDF is set.
 	MeshDecimationRatios []float64 `json:"mesh_decimation_ratios,omitempty"`
 }
 

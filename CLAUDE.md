@@ -44,14 +44,19 @@ in `README.md` (one `## Model …` section each).
   the default kinematic source for both arm models.
 - `arm/so101.urdf` — the alternate kinematic source, used when an arm model's `use_urdf`
   config attribute is set. Vendored from TheRobotStudio/SO-ARM100 (Apache-2.0, see
-  `arm/SO-ARM100-LICENSE`), trimmed to the arm-only 5-DOF chain (servos 1-5), with collision
-  meshes pre-decimated offline (`arm/gen_decimated_meshes.py` — rdk's runtime mesh
-  decimation is too slow to use routinely, hence the `mesh_decimation_ratios` config
-  attribute normally stays empty). Its `tool` frame is grafted from `so101.json` so
-  `use_urdf` is a true drop-in: identical kinematics/TCP to the JSON model, upgrading only
-  the collision geometry from `so101.json`'s primitives to accurate per-link meshes (see
-  `arm_frame_alignment_test.go`). Assets ship under `arm/` in `module.tar.gz` and are
-  located at runtime via `VIAM_MODULE_ROOT`.
+  `arm/SO-ARM100-LICENSE`), trimmed to the arm-only 5-DOF chain (servos 1-5). Each of the 5
+  arm links carries **one merged collision mesh** (`arm/meshes/<link>_collision.stl`): rdk's
+  URDF parser keeps only the *first* `<collision>` per link (`referenceframe/model_urdf.go`),
+  but the upstream links are multi-part assemblies, so `arm/gen_collision_meshes.py` bakes
+  every sub-part's `<collision>` origin into its vertices, concatenates them per link, and
+  decimates the result (~2500 tris/link) into a single mesh referenced with an identity
+  origin — otherwise a lone offset sub-part would survive per link (see
+  `arm_collision_coverage_test.go`). Decimation is offline because rdk's runtime mesh
+  decimation is too slow, hence `mesh_decimation_ratios` normally stays empty. Its `tool`
+  frame is grafted from `so101.json` so `use_urdf` is a true drop-in: identical
+  kinematics/TCP to the JSON model, upgrading only the collision geometry from `so101.json`'s
+  primitives to accurate per-link meshes (see `arm_frame_alignment_test.go`). Assets ship
+  under `arm/` in `module.tar.gz` and are located at runtime via `VIAM_MODULE_ROOT`.
 - `meshes/so101/*.glb` — arm-link meshes (Draco GLB) + `ee_frame.glb` (the colored EE
   coordinate-frame marker). Served via the arm's `Get3DModels`. `visualize_ee_frame` works
   in both JSON and URDF modes, since the grafted `tool` frame gets the same EE-marker
@@ -89,8 +94,14 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
 
 - A `*_arm.go` filename is treated by Go as a GOARCH=`arm`-only file — the simulated-arm
   model lives in `simulated.go` (not `simulated_arm.go`), its tests in `simulated_test.go`.
-- The `arm/` directory holds vendored URDF assets (`so101.urdf`, its meshes, the
-  decimation script, the SO-ARM100 license) — not Go source, despite the name.
+- The `arm/` directory holds vendored URDF assets (`so101.urdf`, its per-link merged
+  collision meshes, `gen_collision_meshes.py`, the SO-ARM100 license) — not Go source,
+  despite the name.
+- rdk's URDF parser uses only the **first** `<collision>` element per link (falls back to
+  `Collision[0]` after a capsule-pattern check; see `referenceframe/model_urdf.go`). A link
+  authored as several `<collision>` sub-parts therefore keeps just one offset fragment. This
+  is why `arm/so101.urdf` gives each arm link a single merged mesh (`arm/gen_collision_meshes.py`)
+  — passing the raw upstream multi-part links renders incomplete/misaligned collision geometry.
 - The Viam `tool` frame in `so101.json` is rotated ~180° from the URDF `gripper_link`
   frame (the TCP convention). Gripper meshes are authored in `gripper_link` coords, so
   `gripper.go`'s `toolFromGripperLink` transform corrects them in `buildGripperMeshes`.

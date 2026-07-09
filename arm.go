@@ -88,10 +88,10 @@ type SO101ArmConfig struct {
 	// (set by viam-server). Default false.
 	UseURDF bool `json:"use_urdf,omitempty"`
 	// MeshDecimationRatios is the per-collision-mesh simplification ratio in [0,1],
-	// applied in URDF document order (one per link: base/shoulder/upper_arm/lower_arm/
-	// wrist/gripper_link). Only values strictly in (0,1) actually decimate. Defaults
+	// applied in URDF document order (one per arm link: base/shoulder/upper_arm/
+	// lower_arm/wrist). Only values strictly in (0,1) actually decimate. Defaults
 	// to no runtime decimation when empty; the bundled collision meshes already ship
-	// pre-decimated (see arm/gen_decimated_meshes.py). Ignored unless UseURDF is set.
+	// pre-decimated (see arm/gen_collision_meshes.py). Ignored unless UseURDF is set.
 	MeshDecimationRatios []float64 `json:"mesh_decimation_ratios,omitempty"`
 }
 
@@ -262,7 +262,7 @@ func makeSO101ModelURDF(ratios []float64, visualizeEE bool, name string) (refere
 		return nil, errors.New("use_urdf is set but VIAM_MODULE_ROOT is empty")
 	}
 	path := filepath.Join(root, "arm", "so101.urdf")
-	// The bundled collision meshes ship pre-decimated (arm/gen_decimated_meshes.py), so
+	// The bundled collision meshes ship pre-decimated (arm/gen_collision_meshes.py), so
 	// runtime decimation is off by default: ratios is empty unless a user explicitly opts
 	// into further decimation. (rdk's runtime decimation is unusably slow on dense meshes,
 	// which is why the meshes are decimated offline instead.) ratios is passed straight
