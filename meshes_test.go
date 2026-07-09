@@ -10,8 +10,8 @@ import (
 // TestSO101ArmModels covers the shared helper backing both arms' Get3DModels, so the
 // hardware arm (whose Get3DModels can't be unit-tested without a serial controller) has
 // direct coverage of the meshes it now serves. The keys are the arm's frame names, which
-// are identical in JSON and URDF modes (the URDF model renames its frames to match, see
-// urdfToJSONFrameNames), so Get3DModels no longer varies by use_urdf.
+// are identical in JSON and URDF modes (arm/so101.urdf uses so101.json's frame names), so
+// Get3DModels no longer varies by use_urdf.
 func TestSO101ArmModels(t *testing.T) {
 	linkKeys := []string{"base", "shoulder", "upper_arm", "lower_arm", "wrist"}
 

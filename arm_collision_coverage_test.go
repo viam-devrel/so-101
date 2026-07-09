@@ -69,7 +69,7 @@ func TestURDFCollisionCoversWholeLink(t *testing.T) {
 	uExt := byLabelExtent(urdfGeoms)
 
 	// JSON label <-> URDF label per link. The URDF model renames its frames to so101.json's
-	// names (see urdfToJSONFrameNames), so the geometry labels are identical between modes.
+	// names (arm/so101.urdf uses so101.json's link names), so the geometry labels are identical between modes.
 	pairs := [][2]string{
 		{"so101:base", "so101:base"},
 		{"so101:shoulder", "so101:shoulder"},

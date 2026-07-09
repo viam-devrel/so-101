@@ -55,19 +55,22 @@ in `README.md` (one `## Model …` section each).
   print files (scaled mm→m; same local frame as the sim meshes); the servo body comes from
   `Simulation/SO101/assets` decimated to ~3k tris. The merged mesh is not decimated (that
   created sliver artifacts), so `mesh_decimation_ratios` normally stays empty (rdk's runtime
-  mesh decimation is also too slow). Its `tool`
-  frame is grafted from `so101.json`, and its link/joint frames are **renamed to so101.json's
-  names** (`base_link`→`base`, `shoulder_pan`→`1`, …; see `urdfToJSONFrameNames` in `arm.go`)
-  so `use_urdf` is a true drop-in: identical kinematics/TCP **and identical frame-system frame
-  names** as the JSON model (guarded by `TestURDFExposesJSONFrameNames`), so a gripper/camera
-  parented to an arm frame keeps resolving when `use_urdf` is toggled. Only the collision
-  geometry changes — from `so101.json`'s primitives to accurate per-link meshes (see
-  `arm_frame_alignment_test.go`). Assets ship
-  under `arm/` in `module.tar.gz` and are located at runtime via `VIAM_MODULE_ROOT`.
+  mesh decimation is also too slow). The URDF is authored to be a true drop-in for
+  `so101.json` **in the file itself** — its links/joints use so101.json's names (`base`,
+  `shoulder`, …; joints `1`-`5`) and it ends at a `tool` leaf at so101.json's TCP (joint-5
+  output + 180° flip, via a `tool_mount`+`tool_joint` pair). This has to be baked into the file
+  rather than patched in memory because the model ships to viam-server as the raw URDF bytes
+  (see the module-boundary gotcha below); guarded by `TestURDFvsJSONFrameAlignment`,
+  `TestURDFExposesJSONFrameNames`, and `TestURDFModelSurvivesSerialization`. So `use_urdf` is a
+  true drop-in: identical kinematics/TCP **and** frame names as the JSON model — only the
+  collision geometry changes (per-link meshes vs so101.json's primitives). `makeSO101ModelURDF`
+  therefore just parses the URDF; it only re-serializes to SVA JSON for `visualize_ee_frame`
+  (to carry the tool's placeholder marker box across the wire). Assets ship under `arm/` in
+  `module.tar.gz` and are located at runtime via `VIAM_MODULE_ROOT`.
 - `meshes/so101/*.glb` — arm-link meshes (Draco GLB) + `ee_frame.glb` (the colored EE
   coordinate-frame marker). Served via the arm's `Get3DModels`. `visualize_ee_frame` works
-  in both JSON and URDF modes, since the grafted `tool` frame gets the same EE-marker
-  placeholder either way.
+  in both JSON and URDF modes, since both end at a `tool` frame that gets the same EE-marker
+  placeholder box either way.
 - `meshes/gripper/*.ply` — gripper meshes (ASCII PLY — rdk's `spatialmath.Mesh` reads PLY
   only, not GLB). Served via the gripper's `Geometries()` as `spatialmath.Mesh`.
 - Asset generators: `meshes/gen_ee_frame.py`, `meshes/gen_gripper_meshes.py`. Meshes are
@@ -110,16 +113,18 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
   is why `arm/so101.urdf` gives each arm link a single merged mesh (`arm/gen_collision_meshes.py`)
   — passing the raw upstream multi-part links renders incomplete/misaligned collision geometry.
 - **A component ships its kinematics to viam-server as `ModelConfig().OriginalFile.Bytes`**
-  (`referenceframe.KinematicModelToProtobuf`), NOT its in-memory `LinkConfig`s. So in-memory
-  edits to a parsed model — the URDF tool-frame graft and the frame rename in
-  `makeSO101ModelURDF` — are **lost across the module gRPC boundary** unless `OriginalFile` is
-  updated to match. It therefore re-serializes the grafted model to **SVA JSON**
-  (`spatialmath.GeometryConfig.MeshData` embeds the mesh bytes, so meshes survive too) and sets
-  that as `OriginalFile`. Without this, viam-server rebuilds the raw (un-grafted) URDF whose EE
-  sits ~98mm past so101.json's TCP, so the motion service and any child component (e.g. a gripper
-  parented to the arm) use the wrong end effector — while every in-process unit test stays green.
-  `TestURDFModelSurvivesSerialization` guards this by round-tripping through the real gRPC
-  (de)serialization; an in-process `Transform` check would NOT have caught it.
+  (`referenceframe.KinematicModelToProtobuf`), NOT its in-memory `LinkConfig`s. So any in-memory
+  edit to a parsed model is **lost across the module gRPC boundary** — viam-server rebuilds the
+  model from the original file bytes. This is why the correct TCP/frame names are baked into
+  `arm/so101.urdf` itself rather than patched in `makeSO101ModelURDF`: an in-memory graft/rename
+  left `OriginalFile` as the raw (un-grafted) URDF, so the server used an EE ~98mm past
+  so101.json's TCP and the gripper (parented to the arm) followed it — while every in-process
+  unit test stayed green. `TestURDFModelSurvivesSerialization` guards this by round-tripping
+  through the real gRPC (de)serialization (`KinematicModelToProtobuf`/`FromProtobuf`); an
+  in-process `Transform` check would NOT have caught it. The one place we still rely on this: for
+  `visualize_ee_frame` the tool needs an in-memory placeholder box, so that path re-serializes to
+  **SVA JSON** (`spatialmath.GeometryConfig.MeshData` embeds the mesh bytes, so meshes survive) —
+  a bigger payload (~5.9 MB vs ~4.4 MB URDF), hence only when the marker is enabled.
 - The Viam `tool` frame in `so101.json` is rotated ~180° from the URDF `gripper_link`
   frame (the TCP convention). Gripper meshes are authored in `gripper_link` coords, so
   `gripper.go`'s `toolFromGripperLink` transform corrects them in `buildGripperMeshes`.

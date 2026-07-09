@@ -72,8 +72,8 @@ func worldPosesForInputs(t *testing.T, cfg *referenceframe.ModelConfigJSON, join
 // exported MoveableFrameNames() (schema order == DoF order). This is required because the
 // underlying ModelConfigJSON.Joints slice order differs between the two sources: so101.json
 // lists joints "1".."5" already base-to-tip, but arm/so101.urdf's XML document order is
-// tip-to-base (wrist_roll, wrist_flex, elbow_flex, shoulder_lift, shoulder_pan) -- relying on
-// slice order would silently pair the wrong joints across models.
+// tip-to-base (joints "5","4","3","2","1") -- relying on slice order would silently pair the
+// wrong joints across models.
 func jointRadiansByChainOrder(t *testing.T, m referenceframe.Model, values []float64) map[string]float64 {
 	t.Helper()
 	sm, ok := m.(*referenceframe.SimpleModel)
@@ -95,22 +95,12 @@ func toInputs(values []float64) []referenceframe.Input {
 	return ins
 }
 
-// TestURDFvsJSONFrameAlignment proves that so101.json's SVA kinematics and the grafted
-// arm/so101.urdf model built by makeSO101ModelURDF (arm.go) agree, per-frame, across a range
-// of joint configurations -- for every arm link AND the "tool" TCP frame. This is the guard
-// referenced by so101ArmMeshParts' doc comment (meshes.go): it is what makes it safe to key
-// the same bundled link GLBs by either kinematic source's frame names, and it is what proves
-// the graft in makeSO101ModelURDF actually lands so101.json's "tool" link on the URDF's
-// wrist-roll output, preserving the TCP convention gripper.go's toolFromGripperLink transform
-// depends on. If this test ever fails, the two kinematic sources have drifted apart and the
-// graft (or the shared-mesh keying) needs a design decision -- do NOT loosen the tolerances
-// here to force a pass; stop and report the deltas instead.
 // TestURDFExposesJSONFrameNames is the drop-in guard: use_urdf must expose the exact same
 // frame-system frame names as the default JSON arm, so any config that references an arm frame
 // by name (a gripper, camera, or obstacle parented to an arm link) keeps resolving when
-// use_urdf is toggled. Without the rename in makeSO101ModelURDF the URDF model would expose
-// base_link/shoulder_pan/... instead of base/1/..., silently detaching such children toward the
-// world origin. Covers moveable (joint) frames, link geometry labels, and the tool leaf.
+// use_urdf is toggled. arm/so101.urdf therefore uses so101.json's names directly (base/1/...,
+// not base_link/shoulder_pan/...); the upstream names would silently detach such children toward
+// the world origin. Covers moveable (joint) frames, link geometry labels, and the tool leaf.
 func TestURDFExposesJSONFrameNames(t *testing.T) {
 	t.Setenv("VIAM_MODULE_ROOT", ".")
 
@@ -137,6 +127,14 @@ func TestURDFExposesJSONFrameNames(t *testing.T) {
 		"URDF geometry frame labels must match JSON's exactly")
 }
 
+// TestURDFvsJSONFrameAlignment proves that so101.json's SVA kinematics and arm/so101.urdf agree,
+// per-frame, across a range of joint configurations -- for every arm link AND the "tool" TCP
+// frame. This is the guard referenced by so101ArmMeshParts' doc comment (meshes.go): it makes it
+// safe to key the same bundled link GLBs by the shared frame names, and it proves the URDF's
+// baked-in "tool" leaf (joint-5 output + 180deg flip) lands on so101.json's TCP, preserving the
+// convention gripper.go's toolFromGripperLink transform depends on. If this test ever fails, the
+// two kinematic sources have drifted apart -- do NOT loosen the tolerances here to force a pass;
+// stop and report the deltas instead.
 func TestURDFvsJSONFrameAlignment(t *testing.T) {
 	t.Setenv("VIAM_MODULE_ROOT", ".")
 
@@ -145,11 +143,9 @@ func TestURDFvsJSONFrameAlignment(t *testing.T) {
 	urdfModel, err := makeSO101Model(true, nil, false, "so101")
 	require.NoError(t, err)
 
-	// Both models are 5-DOF (servos 1-5: shoulder_pan, shoulder_lift, elbow_flex, wrist_flex,
-	// wrist_roll). Retains the URDF geometry-count sanity check from the superseded Task 1.1
-	// smoke test: one mesh collision geometry per link (base/shoulder/upper_arm/
-	// lower_arm/wrist) -- the grafted model's "tool" leaf has no geometry (visualizeEE=false
-	// here), and gripper_link's mesh is gone along with the rest of the grafted-out chain.
+	// Both models are 5-DOF (servos 1-5). Retains the URDF geometry-count sanity check: one mesh
+	// collision geometry per link (base/shoulder/upper_arm/lower_arm/wrist) -- the "tool" leaf has
+	// no geometry here (visualizeEE=false), and the removed gripper chain contributes none.
 	require.Equal(t, 5, len(jsonModel.DoF()))
 	require.Equal(t, 5, len(urdfModel.DoF()))
 	gif, err := urdfModel.Geometries(make([]referenceframe.Input, len(urdfModel.DoF())))
@@ -184,7 +180,7 @@ func TestURDFvsJSONFrameAlignment(t *testing.T) {
 	}
 
 	// Frame-name correspondence: the URDF model renames its frames to so101.json's names
-	// (see urdfToJSONFrameNames in arm.go), so the JSON and URDF frames pair up by identical
+	// (arm/so101.urdf uses so101.json's names), so the JSON and URDF frames pair up by identical
 	// name. "tool" is the load-bearing end-effector / TCP pair -- both models use the exact
 	// same LinkConfig for it (see makeSO101ModelURDF), so this aligns almost exactly.
 	pairs := [][2]string{

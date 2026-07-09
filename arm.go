@@ -228,151 +228,59 @@ func makeSO101Model(useURDF bool, ratios []float64, visualizeEE bool, name strin
 	return makeSO101ModelURDF(ratios, visualizeEE, name)
 }
 
-// urdfWristRollJointID is the arm/so101.urdf revolute joint (servo 5, the wrist-roll servo)
-// whose output frame so101.json's "tool" link is grafted onto -- see makeSO101ModelURDF.
-const urdfWristRollJointID = "wrist_roll"
-
-// urdfGraftedOutIDs are the arm/so101.urdf link entries between the wrist-roll joint and its
-// native end effector (gripper_frame_link) that get dropped when grafting so101.json's "tool"
-// frame onto the URDF model (see makeSO101ModelURDF). referenceframe.UnmarshalModelXML folds
-// URDF fixed joints into synthetic LinkConfig entries keyed by the joint's own name rather than
-// adding them to ModelConfigJSON.Joints, so "gripper_frame_joint" -- the fixed joint between
-// gripper_link and gripper_frame_link -- shows up here as a link entry, not a joint.
-var urdfGraftedOutIDs = map[string]bool{
-	"gripper_link":        true,
-	"gripper_frame_joint": true,
-	"gripper_frame_link":  true,
-}
-
-// urdfToJSONFrameNames renames the URDF's link and joint frames to so101.json's frame names,
-// so use_urdf is a true drop-in: an arm configured with use_urdf exposes the *same* frame-system
-// frames (base, shoulder, ..., wrist, tool; joints 1-5) as the default JSON arm. Without this,
-// toggling use_urdf would rename every arm frame (base -> base_link, joint "1" -> shoulder_pan,
-// ...), breaking anything that references them by name -- e.g. a gripper or camera whose frame is
-// parented to an arm link, which would fail to resolve and fall back toward the world origin. The
-// poses are already proven identical per frame (TestURDFvsJSONFrameAlignment); this aligns the
-// names too. The "tool" leaf is grafted from so101.json and already carries that name.
-var urdfToJSONFrameNames = map[string]string{
-	"base_link":      "base",
-	"shoulder_link":  "shoulder",
-	"upper_arm_link": "upper_arm",
-	"lower_arm_link": "lower_arm",
-	"wrist_link":     "wrist",
-	"shoulder_pan":   "1",
-	"shoulder_lift":  "2",
-	"elbow_flex":     "3",
-	"wrist_flex":     "4",
-	"wrist_roll":     "5",
-}
-
-// makeSO101ModelURDF builds the SO-101 URDF kinematic model (5 revolute joints + mesh
-// collision geometry, servos 1-5) and grafts so101.json's exact "tool" LinkConfig onto the
-// wrist-roll joint's output as its new leaf, replacing the URDF's own end effector chain
-// (gripper_link -> gripper_frame_joint -> gripper_frame_link). That native URDF end frame
-// sits ~98mm further out, at the fingertip, than so101.json's "tool" TCP; grafting makes
-// use_urdf a true drop-in with identical kinematics/TCP to the JSON model (see
-// TestURDFvsJSONFrameAlignment) -- only the collision geometry becomes meshes.
+// makeSO101ModelURDF builds the SO-101 model from arm/so101.urdf. The URDF is authored so its
+// raw form is already a drop-in for so101.json: so101.json's frame names (base, shoulder,
+// upper_arm, lower_arm, wrist; joints 1-5) and its "tool" TCP (joint-5 output + 180deg flip),
+// with only the collision geometry differing (per-link meshes vs so101.json's primitives). This
+// correctness has to live in the file itself, not in an in-memory patch, because a component
+// ships its kinematics to viam-server as ModelConfig().OriginalFile.Bytes -- this raw URDF --
+// and in-memory edits would be lost across the module gRPC boundary (see the arm/so101.urdf
+// header and TestURDFModelSurvivesSerialization). Returning the parsed URDF lets it transmit AS
+// URDF, with meshes sent separately, which is a much smaller kinematics payload than embedding
+// them in SVA JSON.
 //
-// The graft works because the URDF's wrist-roll joint frame coincides exactly with
-// so101.json's joint "5" frame (proven for all 5 arm joints/links by
-// TestURDFvsJSONFrameAlignment), so grafting a copy of so101.json's "tool" link (parented to
-// json joint "5") onto "wrist_roll" here lands it on that identical pose.
+// visualize_ee_frame is the one exception: it needs a placeholder geometry on the "tool" link so
+// the 3D viewer draws that frame and Get3DModels' EE-marker mesh renders there. Baking that box
+// statically into the URDF would add a spurious collision volume for everyone, so instead it is
+// added in memory and the model re-serialized to SVA JSON -- which, unlike the URDF path, carries
+// the in-memory geometry (and the embedded meshes) across the gRPC boundary. That makes the
+// transmitted kinematics larger, so it is done only when the marker is enabled.
 func makeSO101ModelURDF(ratios []float64, visualizeEE bool, name string) (referenceframe.Model, error) {
 	root := os.Getenv("VIAM_MODULE_ROOT")
 	if root == "" {
 		return nil, errors.New("use_urdf is set but VIAM_MODULE_ROOT is empty")
 	}
 	path := filepath.Join(root, "arm", "so101.urdf")
-	// The bundled collision meshes ship pre-decimated (arm/gen_collision_meshes.py), so
-	// runtime decimation is off by default: ratios is empty unless a user explicitly opts
-	// into further decimation. (rdk's runtime decimation is unusably slow on dense meshes,
-	// which is why the meshes are decimated offline instead.) ratios is passed straight
-	// through to ParseModelXMLFile; the graft below doesn't touch it.
-	urdfModel, err := referenceframe.ParseModelXMLFile(path, name, ratios)
+	// The bundled collision meshes ship pre-decimated (arm/gen_collision_meshes.py), so runtime
+	// decimation is off by default: ratios is empty unless a user explicitly opts into further
+	// decimation. (rdk's runtime decimation is unusably slow on dense meshes, which is why the
+	// meshes are decimated offline instead.)
+	model, err := referenceframe.ParseModelXMLFile(path, name, ratios)
 	if err != nil {
 		return nil, fmt.Errorf("parsing URDF %q: %w", path, err)
 	}
-	urdfSM, ok := urdfModel.(*referenceframe.SimpleModel)
+	if !visualizeEE {
+		return model, nil
+	}
+
+	// visualize_ee_frame: give "tool" a placeholder box and rebuild from SVA JSON so the
+	// geometry survives the gRPC boundary (a raw-URDF transmission would drop it).
+	sm, ok := model.(*referenceframe.SimpleModel)
 	if !ok {
-		return nil, fmt.Errorf("parsing URDF %q: expected *referenceframe.SimpleModel, got %T", path, urdfModel)
+		return nil, fmt.Errorf("parsing URDF %q: expected *referenceframe.SimpleModel, got %T", path, model)
 	}
-	mcURDF := urdfSM.ModelConfig()
-
-	toolLink, err := so101JSONToolLink()
-	if err != nil {
-		return nil, err
-	}
-	toolLink.Parent = urdfWristRollJointID
-	if visualizeEE {
-		// Same placeholder box makeSO101ModelFrameWithEEMarker gives "tool" on the JSON
-		// path, so the viewer draws the link and Get3DModels' EE-frame mesh renders there.
-		toolLink.Geometry = eeMarkerGeometry()
-	}
-
-	graftedLinks := make([]referenceframe.LinkConfig, 0, len(mcURDF.Links)+1)
-	for _, l := range mcURDF.Links {
-		if urdfGraftedOutIDs[l.ID] {
-			continue
-		}
-		graftedLinks = append(graftedLinks, l)
-	}
-	mcURDF.Links = append(graftedLinks, toolLink)
-
-	// Rename URDF link/joint frames to so101.json's names so use_urdf is a true drop-in
-	// (see urdfToJSONFrameNames). Applied after the graft so toolLink.Parent ("wrist_roll")
-	// is remapped to "5" along with everything else; unmapped names ("world", "tool") pass
-	// through.
-	rename := func(id string) string {
-		if n, ok := urdfToJSONFrameNames[id]; ok {
-			return n
-		}
-		return id
-	}
-	for i := range mcURDF.Links {
-		mcURDF.Links[i].ID = rename(mcURDF.Links[i].ID)
-		mcURDF.Links[i].Parent = rename(mcURDF.Links[i].Parent)
-	}
-	for i := range mcURDF.Joints {
-		mcURDF.Joints[i].ID = rename(mcURDF.Joints[i].ID)
-		mcURDF.Joints[i].Parent = rename(mcURDF.Joints[i].Parent)
-	}
-
-	// Persist the grafted + renamed config as SVA JSON and rebuild the model from it, so the
-	// graft/rename survive the module gRPC boundary. A component ships its kinematics to
-	// viam-server as ModelConfig().OriginalFile.Bytes (referenceframe.KinematicModelToProtobuf);
-	// the raw URDF here would transmit the UN-grafted model (native gripper_frame_link EE ~98mm
-	// past so101.json's TCP), so the server -- and thus the motion service, the frame system,
-	// and any child component like the gripper -- would use the wrong end effector even though
-	// this in-process model is correct. Re-serializing to SVA JSON embeds the mesh geometry
-	// (spatialmath.GeometryConfig.MeshData), the grafted "tool" TCP, the renamed frames, and the
-	// visualize_ee_frame marker, so what crosses the wire matches this model. See
-	// TestURDFModelSurvivesSerialization.
-	mcURDF.OriginalFile = nil
-	jsonBytes, err := json.Marshal(mcURDF)
-	if err != nil {
-		return nil, fmt.Errorf("serializing grafted URDF model %q: %w", path, err)
-	}
-	model, err := referenceframe.UnmarshalModelJSON(jsonBytes, name)
-	if err != nil {
-		return nil, fmt.Errorf("rebuilding grafted URDF model %q from SVA JSON: %w", path, err)
-	}
-	return model, nil
-}
-
-// so101JSONToolLink returns a copy of so101.json's "tool" LinkConfig (its Parent still set to
-// so101.json's own joint "5" ID; callers that graft it elsewhere must overwrite Parent). Used
-// by makeSO101ModelURDF to give the URDF model the same TCP frame as the JSON model.
-func so101JSONToolLink() (referenceframe.LinkConfig, error) {
-	m := &referenceframe.ModelConfigJSON{}
-	if err := json.Unmarshal(so101ModelJson, m); err != nil {
-		return referenceframe.LinkConfig{}, errors.Wrap(err, "failed to unmarshal json file")
-	}
-	for _, l := range m.Links {
-		if l.ID == so101EEFrameMeshKey {
-			return l, nil
+	mc := sm.ModelConfig()
+	for i := range mc.Links {
+		if mc.Links[i].ID == so101EEFrameMeshKey {
+			mc.Links[i].Geometry = eeMarkerGeometry()
 		}
 	}
-	return referenceframe.LinkConfig{}, fmt.Errorf("so101.json has no %q link", so101EEFrameMeshKey)
+	mc.OriginalFile = nil
+	jsonBytes, err := json.Marshal(mc)
+	if err != nil {
+		return nil, fmt.Errorf("serializing URDF model %q for visualize_ee_frame: %w", path, err)
+	}
+	return referenceframe.UnmarshalModelJSON(jsonBytes, name)
 }
 
 // calculateJointLimits dynamically calculates joint limits from calibration data
