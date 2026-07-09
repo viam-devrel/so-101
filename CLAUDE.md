@@ -49,7 +49,7 @@ in `README.md` (one `## Model …` section each).
   URDF parser keeps only the *first* `<collision>` per link (`referenceframe/model_urdf.go`),
   but the upstream links are multi-part assemblies, so `arm/gen_collision_meshes.py` bakes
   every sub-part's `<collision>` origin into its vertices, concatenates them per link, and
-  decimates the result (~2500 tris/link) into a single mesh referenced with an identity
+  decimates the result (~800 tris/link) into a single mesh referenced with an identity
   origin — otherwise a lone offset sub-part would survive per link (see
   `arm_collision_coverage_test.go`). Decimation is offline because rdk's runtime mesh
   decimation is too slow, hence `mesh_decimation_ratios` normally stays empty. Its `tool`

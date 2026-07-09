@@ -51,7 +51,7 @@ RAW = f"https://raw.githubusercontent.com/{UPSTREAM_REPO}/{UPSTREAM_COMMIT}/{UPS
 # The 5 arm links (servos 1-5), tip-excluded gripper. Order is cosmetic.
 ARM_LINKS = ["base_link", "shoulder_link", "upper_arm_link", "lower_arm_link", "wrist_link"]
 
-TARGET_TRIANGLES = 2500
+TARGET_TRIANGLES = 800
 
 
 def rpy_to_matrix(roll, pitch, yaw):
