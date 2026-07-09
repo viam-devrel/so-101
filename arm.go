@@ -8,7 +8,6 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -36,9 +35,11 @@ var so101ModelJson []byte
 // the frame after transforming it by the given inputs even if the inputs given would violate the
 // Limits of the frame. This is performed statelessly without changing any data.
 //
-// This replaces referenceframe.ComputeOOBPosition, which was removed upstream; the behavior is
-// preserved here since callers rely on being able to compute a pose for out-of-bounds joint
-// positions (e.g. reporting EndPosition while a joint is slightly past its calibrated limit).
+// This replaces referenceframe.ComputeOOBPosition, which was removed upstream. Callers rely on
+// being able to compute a pose for out-of-bounds joint positions (e.g. reporting EndPosition
+// while a joint is slightly past its calibrated limit). rdk v0.123's Frame.Transform early-returns
+// at the first out-of-bounds joint, yielding a pose truncated at that joint (and everything
+// downstream), so inputs are clamped into the joint limits first to always compose the full chain.
 func computeOOBPosition(frame referenceframe.Frame, inputs []referenceframe.Input) (spatialmath.Pose, error) {
 	if inputs == nil {
 		return nil, errors.New("cannot compute position for nil joints")
@@ -47,12 +48,15 @@ func computeOOBPosition(frame referenceframe.Frame, inputs []referenceframe.Inpu
 		return nil, errors.New("cannot compute position for nil frame")
 	}
 
-	pose, err := frame.Transform(inputs)
-	if err != nil && !strings.Contains(err.Error(), referenceframe.OOBErrString) {
-		return nil, err
+	limits := frame.DoF()
+	safe := make([]referenceframe.Input, len(inputs))
+	for i, v := range inputs {
+		if i < len(limits) {
+			v = math.Max(limits[i].Min, math.Min(limits[i].Max, v))
+		}
+		safe[i] = v
 	}
-
-	return pose, nil
+	return frame.Transform(safe)
 }
 
 func init() {
