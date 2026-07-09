@@ -337,9 +337,24 @@ func makeSO101ModelURDF(ratios []float64, visualizeEE bool, name string) (refere
 		mcURDF.Joints[i].Parent = rename(mcURDF.Joints[i].Parent)
 	}
 
-	model, err := mcURDF.ParseConfig(name)
+	// Persist the grafted + renamed config as SVA JSON and rebuild the model from it, so the
+	// graft/rename survive the module gRPC boundary. A component ships its kinematics to
+	// viam-server as ModelConfig().OriginalFile.Bytes (referenceframe.KinematicModelToProtobuf);
+	// the raw URDF here would transmit the UN-grafted model (native gripper_frame_link EE ~98mm
+	// past so101.json's TCP), so the server -- and thus the motion service, the frame system,
+	// and any child component like the gripper -- would use the wrong end effector even though
+	// this in-process model is correct. Re-serializing to SVA JSON embeds the mesh geometry
+	// (spatialmath.GeometryConfig.MeshData), the grafted "tool" TCP, the renamed frames, and the
+	// visualize_ee_frame marker, so what crosses the wire matches this model. See
+	// TestURDFModelSurvivesSerialization.
+	mcURDF.OriginalFile = nil
+	jsonBytes, err := json.Marshal(mcURDF)
 	if err != nil {
-		return nil, fmt.Errorf("parsing grafted URDF model %q: %w", path, err)
+		return nil, fmt.Errorf("serializing grafted URDF model %q: %w", path, err)
+	}
+	model, err := referenceframe.UnmarshalModelJSON(jsonBytes, name)
+	if err != nil {
+		return nil, fmt.Errorf("rebuilding grafted URDF model %q from SVA JSON: %w", path, err)
 	}
 	return model, nil
 }

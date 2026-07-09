@@ -109,6 +109,17 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
   authored as several `<collision>` sub-parts therefore keeps just one offset fragment. This
   is why `arm/so101.urdf` gives each arm link a single merged mesh (`arm/gen_collision_meshes.py`)
   — passing the raw upstream multi-part links renders incomplete/misaligned collision geometry.
+- **A component ships its kinematics to viam-server as `ModelConfig().OriginalFile.Bytes`**
+  (`referenceframe.KinematicModelToProtobuf`), NOT its in-memory `LinkConfig`s. So in-memory
+  edits to a parsed model — the URDF tool-frame graft and the frame rename in
+  `makeSO101ModelURDF` — are **lost across the module gRPC boundary** unless `OriginalFile` is
+  updated to match. It therefore re-serializes the grafted model to **SVA JSON**
+  (`spatialmath.GeometryConfig.MeshData` embeds the mesh bytes, so meshes survive too) and sets
+  that as `OriginalFile`. Without this, viam-server rebuilds the raw (un-grafted) URDF whose EE
+  sits ~98mm past so101.json's TCP, so the motion service and any child component (e.g. a gripper
+  parented to the arm) use the wrong end effector — while every in-process unit test stays green.
+  `TestURDFModelSurvivesSerialization` guards this by round-tripping through the real gRPC
+  (de)serialization; an in-process `Transform` check would NOT have caught it.
 - The Viam `tool` frame in `so101.json` is rotated ~180° from the URDF `gripper_link`
   frame (the TCP convention). Gripper meshes are authored in `gripper_link` coords, so
   `gripper.go`'s `toolFromGripperLink` transform corrects them in `buildGripperMeshes`.
