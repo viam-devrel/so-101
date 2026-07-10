@@ -168,13 +168,13 @@ func (tp *so101Teleop) syncOnce(ctx context.Context) error {
 	var gripperPct float64
 	haveGripper := tp.leaderGripper != nil && tp.followerGripper != nil
 	if haveGripper {
-		resp, err := tp.leaderGripper.DoCommand(ctx, map[string]interface{}{"get": true})
+		resp, err := tp.leaderGripper.DoCommand(ctx, map[string]interface{}{"command": "get_position"})
 		if err != nil {
 			return fmt.Errorf("read leader gripper: %w", err)
 		}
-		pct, ok := resp["position"].(float64)
+		pct, ok := resp["position_percentage"].(float64)
 		if !ok {
-			return fmt.Errorf("leader gripper get missing position")
+			return fmt.Errorf("leader gripper get_position missing position_percentage")
 		}
 		gripperPct = pct
 	}
@@ -185,7 +185,8 @@ func (tp *so101Teleop) syncOnce(ctx context.Context) error {
 
 	if haveGripper {
 		if _, err := tp.followerGripper.DoCommand(ctx, map[string]interface{}{
-			"set": gripperPct,
+			"command":    "set_position",
+			"percentage": gripperPct,
 		}); err != nil {
 			return fmt.Errorf("write follower gripper: %w", err)
 		}
