@@ -325,6 +325,21 @@ func (g *so101Gripper) Status(ctx context.Context) (map[string]interface{}, erro
 	return map[string]interface{}{}, nil
 }
 
+// gripperSetPositionPercent resolves a set_position target percentage from either
+// "percentage" (the key documented in the README and used by the simulated gripper
+// and the teleop service) or "position_percentage" (the key get_position returns,
+// kept so a single-key get/set round-trip — e.g. arm-recorder — still works).
+// "percentage" takes precedence when both are supplied.
+func gripperSetPositionPercent(cmd map[string]interface{}) (float64, bool) {
+	if pct, ok := cmd["percentage"].(float64); ok {
+		return pct, true
+	}
+	if pct, ok := cmd["position_percentage"].(float64); ok {
+		return pct, true
+	}
+	return 0, false
+}
+
 func (g *so101Gripper) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
 	if cmd["get"] == true {
 		positions, err := g.controller.GetJointPositionsForServos(ctx, []int{g.servoID})
@@ -383,7 +398,7 @@ func (g *so101Gripper) DoCommand(ctx context.Context, cmd map[string]interface{}
 	case "set_position":
 		var targetPercent float64
 
-		if percentPos, ok := cmd["position_percentage"].(float64); ok {
+		if percentPos, ok := gripperSetPositionPercent(cmd); ok {
 			targetPercent = percentPos
 		} else if servoPos, ok := cmd["servo_position"].(float64); ok {
 			cal := g.controller.getCalibrationForServo(g.servoID)
@@ -394,7 +409,7 @@ func (g *so101Gripper) DoCommand(ctx context.Context, cmd map[string]interface{}
 				targetPercent = (servoPos / 4095.0) * 100.0
 			}
 		} else {
-			return nil, fmt.Errorf("set_position command requires 'percentage' or 'servo_position' parameter")
+			return nil, fmt.Errorf("set_position command requires 'percentage', 'position_percentage', or 'servo_position' parameter")
 		}
 
 		if targetPercent < 0 {

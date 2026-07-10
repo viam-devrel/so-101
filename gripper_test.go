@@ -22,6 +22,32 @@ func TestSO101GripperConfigValidate(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestGripperSetPositionPercent(t *testing.T) {
+	// "percentage" is the documented key (README + set_position error message);
+	// "position_percentage" is the key get_position returns, kept for round-trip
+	// compatibility (e.g. arm-recorder mirrors a single get/set key).
+	for _, tc := range []struct {
+		name string
+		cmd  map[string]interface{}
+		want float64
+		ok   bool
+	}{
+		{"documented percentage key", map[string]interface{}{"percentage": 42.0}, 42, true},
+		{"position_percentage round-trip key", map[string]interface{}{"position_percentage": 73.0}, 73, true},
+		{"percentage wins when both present", map[string]interface{}{"percentage": 10.0, "position_percentage": 90.0}, 10, true},
+		{"neither present", map[string]interface{}{"servo_position": 2048.0}, 0, false},
+		{"non-numeric ignored", map[string]interface{}{"percentage": "nope"}, 0, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := gripperSetPositionPercent(tc.cmd)
+			assert.Equal(t, tc.ok, ok)
+			if tc.ok {
+				assert.Equal(t, tc.want, got)
+			}
+		})
+	}
+}
+
 func TestBuildGripperMeshes(t *testing.T) {
 	// Exercises the pose math and confirms each embedded PLY parses into a mesh.
 	for _, tc := range []struct {
