@@ -93,9 +93,9 @@ type SO101ArmConfig struct {
 	UseURDF bool `json:"use_urdf,omitempty"`
 	// MeshDecimationRatios is the per-collision-mesh simplification ratio in [0,1],
 	// applied in URDF document order (one per arm link: base/shoulder/upper_arm/
-	// lower_arm/wrist). Only values strictly in (0,1) actually decimate. Defaults
-	// to no runtime decimation when empty; the bundled collision meshes already ship
-	// pre-decimated (see arm/gen_collision_meshes.py). Ignored unless UseURDF is set.
+	// lower_arm/wrist). Only values strictly in (0,1) actually decimate; lower = more
+	// aggressive. Defaults to 0.9 for each of the 5 meshes when empty. Ignored unless
+	// UseURDF is set.
 	MeshDecimationRatios []float64 `json:"mesh_decimation_ratios,omitempty"`
 }
 
@@ -232,6 +232,16 @@ func makeSO101Model(useURDF bool, ratios []float64, visualizeEE bool, name strin
 	return makeSO101ModelURDF(ratios, visualizeEE, name)
 }
 
+// so101.urdf carries one merged collision mesh per arm link (base/shoulder/upper_arm/lower_arm/
+// wrist, 5 total, in document order). The RDK URDF parser assigns mesh_decimation_ratios per mesh
+// in that order, so the default fills one ratio per mesh. 0.9 is a light default (keep ~90% of
+// triangles) that trims the dense merged meshes without the sliver artifacts more aggressive
+// ratios produced (see arm/gen_collision_meshes.py).
+const (
+	numSO101CollisionMeshes = 5
+	defaultMeshDecimation   = 0.9
+)
+
 // makeSO101ModelURDF builds the SO-101 model from arm/so101.urdf. The URDF is authored so its
 // raw form is already a drop-in for so101.json: so101.json's frame names (base, shoulder,
 // upper_arm, lower_arm, wrist; joints 1-5) and its "tool" TCP (joint-5 output + 180deg flip),
@@ -255,10 +265,15 @@ func makeSO101ModelURDF(ratios []float64, visualizeEE bool, name string) (refere
 		return nil, errors.New("use_urdf is set but VIAM_MODULE_ROOT is empty")
 	}
 	path := filepath.Join(root, "arm", "so101.urdf")
-	// The bundled collision meshes ship pre-decimated (arm/gen_collision_meshes.py), so runtime
-	// decimation is off by default: ratios is empty unless a user explicitly opts into further
-	// decimation. (rdk's runtime decimation is unusably slow on dense meshes, which is why the
-	// meshes are decimated offline instead.)
+	// The RDK URDF parser assigns mesh_decimation_ratios per collision mesh in document order
+	// (base/shoulder/upper_arm/lower_arm/wrist), so an empty or short slice would leave trailing
+	// meshes undecimated. When the user supplies none, default every mesh to defaultMeshDecimation.
+	if len(ratios) == 0 {
+		ratios = make([]float64, numSO101CollisionMeshes)
+		for i := range ratios {
+			ratios[i] = defaultMeshDecimation
+		}
+	}
 	model, err := referenceframe.ParseModelXMLFile(path, name, ratios)
 	if err != nil {
 		return nil, fmt.Errorf("parsing URDF %q: %w", path, err)

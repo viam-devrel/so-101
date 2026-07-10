@@ -56,9 +56,11 @@ in `README.md` (one `## Model …` section each).
   *geometry* pose, so without this the shared GLBs scatter by the box offsets under `use_urdf`
   (see `TestURDFGeometryPoseMatchesJSON`). Printable parts use the optimized `STL/SO101/Individual`
   print files (scaled mm→m; same local frame as the sim meshes); the servo body comes from
-  `Simulation/SO101/assets` decimated to ~3k tris. The merged mesh is not decimated (that
-  created sliver artifacts), so `mesh_decimation_ratios` normally stays empty (rdk's runtime
-  mesh decimation is also too slow). The URDF is authored to be a true drop-in for
+  `Simulation/SO101/assets` decimated to ~3k tris. The merged mesh is not decimated offline (that
+  created sliver artifacts); instead `mesh_decimation_ratios` defaults to `0.9` per link (a light
+  keep-~90% trim) when empty — `makeSO101ModelURDF` fills `numSO101CollisionMeshes` (5) copies of
+  `defaultMeshDecimation` so no trailing mesh is left at full resolution (aggressive ratios reintroduced
+  the slivers, hence 0.9). The URDF is authored to be a true drop-in for
   `so101.json` **in the file itself** — its links/joints use so101.json's names (`base`,
   `shoulder`, …; joints `1`-`5`) and it ends at a `tool` leaf at so101.json's TCP (joint-5
   output + 180° flip, via a `tool_mount`+`tool_joint` pair). This has to be baked into the file
