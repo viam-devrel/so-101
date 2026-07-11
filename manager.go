@@ -349,7 +349,7 @@ func configsEqual(a, b *SoArm101Config) bool {
 	if a == nil || b == nil {
 		return false
 	}
-	return a.Port == b.Port &&
+	return canonicalPortKey(a.Port) == canonicalPortKey(b.Port) &&
 		a.Baudrate == b.Baudrate &&
 		a.Timeout == b.Timeout
 }

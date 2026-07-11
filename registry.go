@@ -3,6 +3,7 @@ package so_arm
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -11,6 +12,24 @@ import (
 
 	"github.com/hipsterbrown/feetech-servo/feetech"
 )
+
+// canonicalPortKey resolves a serial-port path to a stable device identity so
+// that two spellings of the same physical port — e.g. "/dev/ttyUSB0" and a
+// "/dev/serial/by-id/usb-..." symlink pointing at it — map to a single shared
+// controller instead of two feetech buses contending for one UART.
+//
+// It is best-effort: filepath.EvalSymlinks resolves symlinks and cleans the
+// path, but if the path can't be resolved (device not present yet, or a
+// platform without symlink semantics) the original string is returned so the
+// caller still gets a usable key. The result is used as the registry map key
+// and for port-equality comparisons; the bus is still opened with the caller's
+// original config.Port, so an unresolved fallback preserves today's behavior.
+func canonicalPortKey(port string) string {
+	if resolved, err := filepath.EvalSymlinks(port); err == nil {
+		return resolved
+	}
+	return port
+}
 
 type ControllerEntry struct {
 	controller  *SafeSoArmController
@@ -38,6 +57,13 @@ func NewControllerRegistry() *ControllerRegistry {
 }
 
 func (r *ControllerRegistry) GetController(portPath string, config *SoArm101Config, calibration SO101FullCalibration, fromFile bool) (*SafeSoArmController, error) {
+	// Collapse different spellings of the same device (e.g. /dev/ttyUSB0 and a
+	// /dev/serial/by-id symlink) to one registry key so both consumers share a
+	// single bus instead of contending. Only the key is normalized -- the caller's
+	// config is left untouched (it may be read concurrently via GetControllerStatus),
+	// so configsEqual and trackCaller canonicalize port strings at comparison time.
+	portPath = canonicalPortKey(portPath)
+
 	r.mu.RLock()
 	entry, exists := r.entries[portPath]
 	r.mu.RUnlock()
@@ -93,7 +119,9 @@ func (r *ControllerRegistry) getExistingController(entry *ControllerEntry, confi
 	}
 
 	atomic.AddInt64(&entry.refCount, 1)
-	r.trackCaller(entry.config.Port)
+	// Track against the canonical key so releaseFromCaller can find the entry
+	// even when this consumer spelled the port differently than the creator.
+	r.trackCaller(canonicalPortKey(entry.config.Port))
 
 	return &SafeSoArmController{
 		bus:              entry.controller.bus,
@@ -316,6 +344,8 @@ func (r *ControllerRegistry) GetControllerStatus(portPath string) (int64, bool, 
 }
 
 func (r *ControllerRegistry) GetCurrentCalibration(portPath string) SO101FullCalibration {
+	portPath = canonicalPortKey(portPath)
+
 	r.mu.RLock()
 	entry, exists := r.entries[portPath]
 	r.mu.RUnlock()
