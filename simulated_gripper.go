@@ -41,6 +41,10 @@ type SO101SimulatedGripperConfig struct {
 	// GripperType selects which meshes are served: "follower" (moving jaw, the
 	// default) or "leader" (thumb-loop handle + trigger).
 	GripperType string `json:"gripper_type,omitempty"`
+
+	// MeshDetail selects the gripper mesh resolution: "low" (decimated, the
+	// default) or "high" (full resolution).
+	MeshDetail string `json:"mesh_detail,omitempty"`
 }
 
 // Validate ensures the config is valid.
@@ -48,6 +52,10 @@ func (cfg *SO101SimulatedGripperConfig) Validate(path string) ([]string, []strin
 	if cfg.GripperType != "" && cfg.GripperType != leaderGripper && cfg.GripperType != followerGripper {
 		return nil, nil, fmt.Errorf("gripper_type must be %q or %q, got %q",
 			leaderGripper, followerGripper, cfg.GripperType)
+	}
+	if cfg.MeshDetail != "" && cfg.MeshDetail != highDetail && cfg.MeshDetail != lowDetail {
+		return nil, nil, fmt.Errorf("mesh_detail must be %q or %q, got %q",
+			highDetail, lowDetail, cfg.MeshDetail)
 	}
 	return nil, nil, nil
 }
@@ -60,6 +68,7 @@ type simulatedSO101Gripper struct {
 
 	name        resource.Name
 	gripperType string
+	meshDetail  string
 
 	// lifetime management
 	closed     atomic.Bool
@@ -87,10 +96,16 @@ func newSimulatedSO101Gripper(
 		gripperType = followerGripper
 	}
 
+	meshDetail := conf.MeshDetail
+	if meshDetail == "" {
+		meshDetail = lowDetail
+	}
+
 	cancelCtx, cancelFunc := context.WithCancel(context.Background())
 	g := &simulatedSO101Gripper{
 		name:        rawConf.ResourceName(),
 		gripperType: gripperType,
+		meshDetail:  meshDetail,
 		cancelCtx:   cancelCtx,
 		cancelFunc:  cancelFunc,
 		lastUpdated: time.Now(),
@@ -209,7 +224,7 @@ func (g *simulatedSO101Gripper) Geometries(
 	pct := g.currentPct / 100.0
 	g.mu.Unlock()
 	jawAngle := gripperJointMin + pct*(gripperJointMax-gripperJointMin)
-	return buildGripperMeshes(g.gripperType, jawAngle)
+	return buildGripperMeshes(g.gripperType, g.meshDetail, jawAngle)
 }
 
 // Status returns the current status of the resource as a map of key-value pairs.

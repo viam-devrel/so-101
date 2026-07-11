@@ -13,13 +13,13 @@ import (
 	"go.viam.com/rdk/spatialmath"
 )
 
-func newTestSimGripper(t *testing.T, gripperType string) gripper.Gripper {
+func newTestSimGripper(t *testing.T, gripperType, meshDetail string) gripper.Gripper {
 	t.Helper()
 	conf := resource.Config{
 		Name:                "testGripper",
 		API:                 gripper.API,
 		Model:               SO101SimulatedGripperModel,
-		ConvertedAttributes: &SO101SimulatedGripperConfig{GripperType: gripperType},
+		ConvertedAttributes: &SO101SimulatedGripperConfig{GripperType: gripperType, MeshDetail: meshDetail},
 	}
 	g, err := newSimulatedSO101Gripper(context.Background(), nil, conf, logging.NewTestLogger(t))
 	require.NoError(t, err)
@@ -27,7 +27,7 @@ func newTestSimGripper(t *testing.T, gripperType string) gripper.Gripper {
 }
 
 func TestSimulatedGripperConfigValidate(t *testing.T) {
-	// An unset gripper_type is accepted (defaults to follower).
+	// An unset gripper_type / mesh_detail is accepted (defaults applied).
 	_, _, err := (&SO101SimulatedGripperConfig{}).Validate("")
 	require.NoError(t, err)
 
@@ -35,8 +35,14 @@ func TestSimulatedGripperConfigValidate(t *testing.T) {
 		_, _, err := (&SO101SimulatedGripperConfig{GripperType: gt}).Validate("")
 		require.NoError(t, err, "gripper_type %q should be valid", gt)
 	}
+	for _, md := range []string{highDetail, lowDetail} {
+		_, _, err := (&SO101SimulatedGripperConfig{MeshDetail: md}).Validate("")
+		require.NoError(t, err, "mesh_detail %q should be valid", md)
+	}
 
 	_, _, err = (&SO101SimulatedGripperConfig{GripperType: "bogus"}).Validate("")
+	require.Error(t, err)
+	_, _, err = (&SO101SimulatedGripperConfig{MeshDetail: "bogus"}).Validate("")
 	require.Error(t, err)
 }
 
@@ -49,7 +55,7 @@ func TestSimulatedGripperGeometries(t *testing.T) {
 		{followerGripper, 2}, // body + jaw
 		{leaderGripper, 3},   // wrist-roll + handle + trigger
 	} {
-		g := newTestSimGripper(t, tc.gripperType)
+		g := newTestSimGripper(t, tc.gripperType, "")
 		geoms, err := g.Geometries(ctx, nil)
 		require.NoError(t, err, "gripper_type %q", tc.gripperType)
 		require.Len(t, geoms, tc.meshes)
@@ -61,11 +67,30 @@ func TestSimulatedGripperGeometries(t *testing.T) {
 	}
 }
 
+// TestSimulatedGripperMeshDetail confirms the mesh_detail attribute selects denser
+// meshes for "high" than for "low".
+func TestSimulatedGripperMeshDetail(t *testing.T) {
+	ctx := context.Background()
+	triangles := func(detail string) int {
+		g := newTestSimGripper(t, followerGripper, detail)
+		defer func() { require.NoError(t, g.Close(ctx)) }()
+		geoms, err := g.Geometries(ctx, nil)
+		require.NoError(t, err)
+		n := 0
+		for _, geom := range geoms {
+			n += len(geom.(*spatialmath.Mesh).Triangles())
+		}
+		return n
+	}
+	assert.Greater(t, triangles(highDetail), triangles(lowDetail),
+		"high mesh_detail should serve denser meshes than low")
+}
+
 // TestSimulatedGripperArticulates checks that Open interpolates over time -- the gripper
 // reports moving mid-travel -- and that the moving mesh ends up posed differently.
 func TestSimulatedGripperArticulates(t *testing.T) {
 	ctx := context.Background()
-	g := newTestSimGripper(t, followerGripper)
+	g := newTestSimGripper(t, followerGripper, "")
 	defer func() { require.NoError(t, g.Close(ctx)) }()
 
 	closedGeoms, err := g.Geometries(ctx, nil)

@@ -1,7 +1,7 @@
 package so_arm
 
 import (
-	_ "embed"
+	"embed"
 
 	commonpb "go.viam.com/api/common/v1"
 )
@@ -34,22 +34,18 @@ var so101EEFrameGLB []byte
 
 // SO-101 gripper meshes (ASCII PLY, see meshes/gen_gripper_meshes.py). The gripper
 // component serves these via Geometries() as spatialmath.Mesh geometries: a static
-// body and a moving part (jaw for the follower, trigger for the leader).
+// body and a moving part (jaw for the follower, trigger for the leader). Each mesh
+// is embedded at two detail levels -- meshes/gripper/{high,low}/ -- chosen by the
+// gripper's mesh_detail attribute.
+//
+//go:embed meshes/gripper
+var gripperMeshFS embed.FS
 
-//go:embed meshes/gripper/follower_body.ply
-var so101FollowerBodyPLY []byte
-
-//go:embed meshes/gripper/follower_jaw.ply
-var so101FollowerJawPLY []byte
-
-//go:embed meshes/gripper/leader_wrist_roll.ply
-var so101LeaderWristRollPLY []byte
-
-//go:embed meshes/gripper/leader_body.ply
-var so101LeaderBodyPLY []byte
-
-//go:embed meshes/gripper/leader_trigger.ply
-var so101LeaderTriggerPLY []byte
+// gripperMeshPLY returns the embedded PLY bytes for a gripper mesh ("follower_body",
+// "leader_trigger", ...) at the given detail level ("high" or "low").
+func gripperMeshPLY(detail, name string) ([]byte, error) {
+	return gripperMeshFS.ReadFile("meshes/gripper/" + detail + "/" + name + ".ply")
+}
 
 const gltfBinary = "model/gltf-binary"
 

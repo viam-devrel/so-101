@@ -28,6 +28,14 @@ const (
 	followerGripper = "follower"
 )
 
+// Mesh detail levels selectable via the mesh_detail config attribute. The gripper
+// mesh is also the motion-planning collision geometry, so "low" (heavily decimated)
+// is the responsive default; "high" is full resolution, for visual comparison.
+const (
+	highDetail = "high"
+	lowDetail  = "low"
+)
+
 type SO101GripperConfig struct {
 	Port     string `json:"port,omitempty"`
 	Baudrate int    `json:"baudrate,omitempty"`
@@ -43,6 +51,11 @@ type SO101GripperConfig struct {
 	// GripperType selects which meshes Geometries() serves: "follower" (moving
 	// jaw, the default) or "leader" (thumb-loop handle + trigger).
 	GripperType string `json:"gripper_type,omitempty"`
+
+	// MeshDetail selects the gripper mesh resolution Geometries() serves:
+	// "low" (decimated, the default -- keeps motion planning fast) or "high"
+	// (full resolution).
+	MeshDetail string `json:"mesh_detail,omitempty"`
 }
 
 // Validate ensures all parts of the config are valid
@@ -68,6 +81,11 @@ func (cfg *SO101GripperConfig) Validate(path string) ([]string, []string, error)
 			leaderGripper, followerGripper, cfg.GripperType)
 	}
 
+	if cfg.MeshDetail != "" && cfg.MeshDetail != highDetail && cfg.MeshDetail != lowDetail {
+		return nil, nil, fmt.Errorf("mesh_detail must be %q or %q, got %q",
+			highDetail, lowDetail, cfg.MeshDetail)
+	}
+
 	return nil, nil, nil
 }
 
@@ -78,6 +96,7 @@ type so101Gripper struct {
 	logger      logging.Logger
 	controller  *SafeSoArmController
 	gripperType string
+	meshDetail  string
 	servoID     int
 
 	mu       sync.Mutex
@@ -144,11 +163,17 @@ func newSO101Gripper(ctx context.Context, deps resource.Dependencies, conf resou
 		gripperType = followerGripper
 	}
 
+	meshDetail := cfg.MeshDetail
+	if meshDetail == "" {
+		meshDetail = lowDetail
+	}
+
 	g := &so101Gripper{
 		name:           conf.ResourceName(),
 		logger:         logger,
 		controller:     controller,
 		gripperType:    gripperType,
+		meshDetail:     meshDetail,
 		servoID:        cfg.ServoID,
 		speed:          30,
 		acceleration:   50,
@@ -263,22 +288,26 @@ const (
 
 // buildGripperMeshes returns the gripper's static body mesh plus the moving part
 // (jaw for the follower, trigger for the leader) posed at jawAngle radians about
-// the gripper joint. It is split out from Geometries so it can be tested without
-// a hardware controller.
-func buildGripperMeshes(gripperType string, jawAngle float64) ([]spatialmath.Geometry, error) {
-	// Static meshes (all posed at the gripper body pose) plus the moving-part mesh.
-	// The follower's body is one piece; the leader's is the wrist-roll part (which
-	// connects to the arm) plus the handle attached to it.
-	staticPLYs := [][]byte{so101FollowerBodyPLY}
-	movingPLY := so101FollowerJawPLY
+// the gripper joint, at the requested mesh detail level ("high" or "low"). It is
+// split out from Geometries so it can be tested without a hardware controller.
+func buildGripperMeshes(gripperType, meshDetail string, jawAngle float64) ([]spatialmath.Geometry, error) {
+	// Mesh names for this gripper variant: the static body part(s) plus the moving
+	// part. The follower's body is one piece; the leader's is the wrist-roll part
+	// (which connects to the arm) plus the handle attached to it.
+	staticNames := []string{"follower_body"}
+	movingName := "follower_jaw"
 	if gripperType == leaderGripper {
-		staticPLYs = [][]byte{so101LeaderWristRollPLY, so101LeaderBodyPLY}
-		movingPLY = so101LeaderTriggerPLY
+		staticNames = []string{"leader_wrist_roll", "leader_body"}
+		movingName = "leader_trigger"
 	}
 
 	bodyPose := spatialmath.Compose(toolFromGripperLink, gripperBodyPose)
-	geoms := make([]spatialmath.Geometry, 0, len(staticPLYs)+1)
-	for i, ply := range staticPLYs {
+	geoms := make([]spatialmath.Geometry, 0, len(staticNames)+1)
+	for i, name := range staticNames {
+		ply, err := gripperMeshPLY(meshDetail, name)
+		if err != nil {
+			return nil, err
+		}
 		m, err := spatialmath.NewMeshFromProto(bodyPose,
 			&commonpb.Mesh{ContentType: "ply", Mesh: ply}, fmt.Sprintf("gripper_body_%d", i))
 		if err != nil {
@@ -294,6 +323,10 @@ func buildGripperMeshes(gripperType string, jawAngle float64) ([]spatialmath.Geo
 			spatialmath.NewPose(r3.Vector{}, &spatialmath.EulerAngles{Yaw: jawAngle})),
 		gripperMovingVisualPose,
 	))
+	movingPLY, err := gripperMeshPLY(meshDetail, movingName)
+	if err != nil {
+		return nil, err
+	}
 	moving, err := spatialmath.NewMeshFromProto(movingPose,
 		&commonpb.Mesh{ContentType: "ply", Mesh: movingPLY}, "gripper_moving")
 	if err != nil {
@@ -317,7 +350,7 @@ func (g *so101Gripper) jawAngle(ctx context.Context) float64 {
 // Geometries serves the gripper as meshes: a static body and a moving part posed by
 // the live gripper opening, so the jaw/trigger articulates in the 3D viewer.
 func (g *so101Gripper) Geometries(ctx context.Context, extra map[string]interface{}) ([]spatialmath.Geometry, error) {
-	return buildGripperMeshes(g.gripperType, g.jawAngle(ctx))
+	return buildGripperMeshes(g.gripperType, g.meshDetail, g.jawAngle(ctx))
 }
 
 // Status returns the current status of the resource as a map of key-value pairs.

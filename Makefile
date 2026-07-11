@@ -9,7 +9,7 @@ ifeq ($(VIAM_TARGET_OS), windows)
 	MODULE_BINARY = bin/arm.exe
 endif
 
-$(MODULE_BINARY): Makefile go.mod *.go cmd/module/*.go so101.json meshes/so101/*.glb meshes/gripper/*.ply
+$(MODULE_BINARY): Makefile go.mod *.go cmd/module/*.go so101.json meshes/so101/*.glb meshes/gripper/*/*.ply
 	GOOS=$(VIAM_BUILD_OS) GOARCH=$(VIAM_BUILD_ARCH) $(GO_BUILD_ENV) go build $(GO_BUILD_FLAGS) -o $(MODULE_BINARY) cmd/module/main.go
 
 lint:

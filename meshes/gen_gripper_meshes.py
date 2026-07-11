@@ -7,6 +7,11 @@ come from the printable STLs. Each binary STL is welded + grid-decimated and
 written as ASCII PLY -- rdk's spatialmath.NewMeshFromProto accepts ASCII PLY only,
 and the gripper component serves these via Geometries() as spatialmath.Mesh.
 
+Each mesh is written at two detail levels -- meshes/gripper/high/ and
+meshes/gripper/low/ -- chosen at runtime by the gripper's mesh_detail attribute.
+The gripper mesh doubles as the motion-planning collision geometry, so "low" is
+the responsive default and "high" is for visual comparison.
+
 PLY vertices are kept in METERS (rdk's PLY reader scales x1000 to millimeters).
 
 Run from the repo root:  python3 meshes/gen_gripper_meshes.py
@@ -19,16 +24,19 @@ import numpy as np
 
 BASE = "https://raw.githubusercontent.com/TheRobotStudio/SO-ARM100/main"
 
-# name -> (source URL, grid cell size in meters, source-unit-to-meters scale).
-# The follower simulation assets are authored in meters; the leader printable
-# STLs are in millimeters, so they need a 0.001 scale.
+# name -> (source URL, source-unit-to-meters scale). The follower simulation
+# assets are authored in meters; the leader printable STLs are in millimeters.
 MESHES = {
-    "follower_body": (f"{BASE}/Simulation/SO101/assets/wrist_roll_follower_so101_v1.stl", 0.01, 1.0),
-    "follower_jaw": (f"{BASE}/Simulation/SO101/assets/moving_jaw_so101_v1.stl", 0.01, 1.0),
-    "leader_wrist_roll": (f"{BASE}/STL/SO101/Individual/Wrist_Roll_SO101.stl", 0.01, 0.001),
-    "leader_body": (f"{BASE}/STL/SO101/Individual/Handle_SO101.stl", 0.01, 0.001),
-    "leader_trigger": (f"{BASE}/STL/SO101/Individual/Trigger_SO101.stl", 0.01, 0.001),
+    "follower_body": (f"{BASE}/Simulation/SO101/assets/wrist_roll_follower_so101_v1.stl", 1.0),
+    "follower_jaw": (f"{BASE}/Simulation/SO101/assets/moving_jaw_so101_v1.stl", 1.0),
+    "leader_wrist_roll": (f"{BASE}/STL/SO101/Individual/Wrist_Roll_SO101.stl", 0.001),
+    "leader_body": (f"{BASE}/STL/SO101/Individual/Handle_SO101.stl", 0.001),
+    "leader_trigger": (f"{BASE}/STL/SO101/Individual/Trigger_SO101.stl", 0.001),
 }
+
+# detail level -> weld grid cell size in meters. A coarser grid welds more
+# vertices together, yielding far fewer faces (and far cheaper collision checks).
+GRIDS = {"high": 0.0015, "low": 0.01}
 
 
 def load_binary_stl(data):
@@ -75,20 +83,19 @@ def write_ascii_ply(path, verts, faces):
 
 
 def main():
-    out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gripper")
-    os.makedirs(out_dir, exist_ok=True)
-    for name, (url, grid, scale) in MESHES.items():
+    base_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gripper")
+    for name, (url, scale) in MESHES.items():
         with urllib.request.urlopen(url) as resp:
             stl = resp.read()
         verts = load_binary_stl(stl) * scale
-        reps, faces = weld(verts, grid)
-        path = os.path.join(out_dir, f"{name}.ply")
-        write_ascii_ply(path, reps, faces)
-        bb = verts.reshape(-1, 3)
-        dims = bb.max(0) - bb.min(0)
-        print(f"{name:16s} {len(verts):6d} tris -> {len(faces):6d} faces, "
-              f"{len(reps):6d} verts, {os.path.getsize(path) / 1024:7.1f} KB  "
-              f"bbox(m) {dims[0]:.3f} x {dims[1]:.3f} x {dims[2]:.3f}")
+        for detail, grid in GRIDS.items():
+            out_dir = os.path.join(base_dir, detail)
+            os.makedirs(out_dir, exist_ok=True)
+            reps, faces = weld(verts, grid)
+            path = os.path.join(out_dir, f"{name}.ply")
+            write_ascii_ply(path, reps, faces)
+            print(f"{detail:4s} {name:18s} {len(faces):6d} faces, "
+                  f"{os.path.getsize(path) / 1024:7.1f} KB")
 
 
 if __name__ == "__main__":

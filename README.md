@@ -368,6 +368,7 @@ Follow the [arm setup steps](#first-time-arm-setup) to learn how to set up the a
 | `servo_id`         | int      | Optional  | The servo ID for the gripper. Default is `6`.                 |
 | `timeout`          | duration | Optional  | Communication timeout. Default is system default.             |
 | `gripper_type`     | string   | Optional  | Which gripper meshes `Geometries()` serves for the 3D viewer: `follower` (moving jaw, default) or `leader` (thumb-loop handle + trigger). The moving part articulates with the live gripper opening. |
+| `mesh_detail`      | string   | Optional  | Gripper mesh resolution: `low` (decimated, the default) or `high` (full resolution). `Geometries()` is also the motion-planning collision geometry, so `low` keeps planning fast; `high` is mainly for visual comparison. |
 
 ### Communication
 
@@ -457,6 +458,7 @@ All attributes are optional, so the simulated gripper works with an empty config
 | Name           | Type   | Inclusion | Description                                                                                                |
 | -------------- | ------ | --------- | ---------------------------------------------------------------------------------------------------------- |
 | `gripper_type` | string | Optional  | Which gripper meshes to serve: `follower` (moving jaw, the default) or `leader` (thumb-loop handle + trigger). |
+| `mesh_detail`  | string | Optional  | Gripper mesh resolution: `low` (decimated, the default) or `high` (full resolution). The mesh is also the motion-planning collision geometry, so `low` keeps planning fast; set `high` on a second gripper for a visual side-by-side. |
 
 ### DoCommand
 
