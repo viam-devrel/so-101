@@ -530,6 +530,10 @@ func (s *so101) EndPosition(ctx context.Context, extra map[string]interface{}) (
 // and accepts whatever orientation falls out. Callers who want different planner behavior may
 // override any key by passing their own value via extra.
 func (s *so101) MoveToPosition(ctx context.Context, pose spatialmath.Pose, extra map[string]interface{}) error {
+	s.mu.Lock()
+	s.exitManualLocked("motion command received")
+	s.mu.Unlock()
+
 	planExtra := map[string]interface{}{"goal_metric_type": "position_only"}
 	for k, v := range extra {
 		planExtra[k] = v
@@ -623,6 +627,10 @@ func parseWaitExtra(extra map[string]interface{}) bool {
 }
 
 func (s *so101) MoveToJointPositions(ctx context.Context, positions []referenceframe.Input, extra map[string]interface{}) error {
+	s.mu.Lock()
+	s.exitManualLocked("motion command received")
+	s.mu.Unlock()
+
 	s.moveLock.Lock()
 	defer s.moveLock.Unlock()
 
@@ -642,6 +650,10 @@ func (s *so101) MoveToJointPositions(ctx context.Context, positions []referencef
 }
 
 func (s *so101) MoveThroughJointPositions(ctx context.Context, positions [][]referenceframe.Input, options *arm.MoveOptions, extra map[string]interface{}) error {
+	s.mu.Lock()
+	s.exitManualLocked("motion command received")
+	s.mu.Unlock()
+
 	s.moveLock.Lock()
 	defer s.moveLock.Unlock()
 
@@ -944,6 +956,10 @@ func (s *so101) Geometries(ctx context.Context, extra map[string]interface{}) ([
 }
 
 func (s *so101) Close(context.Context) error {
+	s.mu.Lock()
+	s.exitManualLocked("arm closing")
+	s.mu.Unlock()
+
 	s.cancelFunc()
 	ReleaseSharedController()
 	return nil
