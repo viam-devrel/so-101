@@ -144,7 +144,7 @@ While manual mode is active, it also reports live per-joint telemetry (`actual_d
 }
 ```
 
-**Tuning diagnostics:** a few DoCommands help characterize an arm before dialing in `manual_mode` values — `sample_manual_signals` samples per-joint `present_load`/position stats over a short window (manual mode off); `read_servo_registers` reads back `p_gain`/`torque_limit`/`max_torque`/`torque_enable` per servo; `set_torque_limit` directly writes `torque_limit` with a readback for a quick before/after check (also requires manual mode off).
+**Tuning diagnostic:** the `set_torque_limit` DoCommand directly writes the `torque_limit` register on every arm servo (with a readback in the response) so you can find the lowest value that still holds the arm before dialing it into `manual_mode`. It takes a `value` (0–1000), requires manual mode to be off, and does not auto-restore — set it back to `1000` (or reinitialize) when done.
 
 ### Communication
 

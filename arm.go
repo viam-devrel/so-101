@@ -769,29 +769,6 @@ func regDecodeLE(data []byte) int {
 	return v
 }
 
-// readServoRegisters is a read-only diagnostic that reports the stiffness/torque-related
-// registers for each arm servo, so you can verify what manual mode (or set_torque_limit)
-// actually wrote. Safe to call at any time, including while manual mode is active — that's
-// how you confirm the applied torque_limit changed. Values are raw register units
-// (torque_limit / max_torque ~0-1000; p_gain 0-255; torque_enable 0/1).
-func (s *so101) readServoRegisters(ctx context.Context) (map[string]interface{}, error) {
-	names := []string{"p_gain", "torque_limit", "max_torque", "torque_enable"}
-	joints := make([]interface{}, 0, len(s.armServoIDs))
-	for _, id := range s.armServoIDs {
-		row := map[string]interface{}{"servo": id}
-		for _, name := range names {
-			data, err := s.controller.ReadServoRegister(ctx, id, name)
-			if err != nil {
-				row[name] = fmt.Sprintf("error: %v", err)
-				continue
-			}
-			row[name] = regDecodeLE(data)
-		}
-		joints = append(joints, row)
-	}
-	return map[string]interface{}{"joints": joints}, nil
-}
-
 // setTorqueLimitDiag is a diagnostic that writes the torque_limit register directly on every
 // arm servo, in isolation from manual mode, so you can confirm the register actually governs
 // holding torque on this firmware (e.g. value 10 should make the arm droop; 1000 restores full
@@ -831,114 +808,6 @@ func (s *so101) setTorqueLimitDiag(ctx context.Context, cmd map[string]interface
 		"set_torque_limit": iv,
 		"servos":           results,
 		"note":             "diagnostic: restore full torque with value 1000 (or reinitialize) when done",
-	}, nil
-}
-
-// sampleManualSignals is a read-only diagnostic for tuning manual mode. With the
-// servos holding position (it writes no goals and does not change torque), it samples
-// each arm joint's present load and calibrated position over a short window and returns
-// per-joint aggregates. Use it to characterize the present_load signal — its sign and
-// magnitude at rest (gravity hold) versus under a gentle hand push — and joint position;
-// manual mode's admittance law is driven by position deviation, not load, so this reading
-// is telemetry/diagnostic (e.g. as a touch + gravity-torque indicator), not a control input.
-// Refuses to run while manual mode is active (the loop would move the arm and contaminate
-// the reading).
-func (s *so101) sampleManualSignals(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
-	s.mu.RLock()
-	active := s.manual != nil && s.manual.running()
-	s.mu.RUnlock()
-	if active {
-		return nil, fmt.Errorf("exit manual mode before sampling (the loop would move the arm and contaminate the reading)")
-	}
-
-	durMs := 1500.0
-	if v, ok := cmd["duration_ms"].(float64); ok && v > 0 {
-		durMs = v
-	}
-	hz := 50.0
-	if v, ok := cmd["hz"].(float64); ok && v > 0 && v <= 200 {
-		hz = v
-	}
-	n := int(durMs / 1000.0 * hz)
-	if n < 1 {
-		n = 1
-	}
-	interval := time.Duration(float64(time.Second) / hz)
-
-	type agg struct {
-		loadMin, loadMax, loadSum, loadLast int
-		posMin, posMax, posSum, posLast     float64
-		count                               int
-	}
-	stats := map[int]*agg{}
-
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for i := 0; i < n; i++ {
-		if i > 0 {
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-ticker.C:
-			}
-		}
-		loads, err := s.controller.LoadForServos(ctx, s.armServoIDs)
-		if err != nil {
-			return nil, fmt.Errorf("load read failed: %w", err)
-		}
-		posRad, err := s.controller.GetJointPositionsForServos(ctx, s.armServoIDs)
-		if err != nil {
-			return nil, fmt.Errorf("position read failed: %w", err)
-		}
-		for idx, id := range s.armServoIDs {
-			l := loads[id]
-			p := posRad[idx] * 180.0 / math.Pi
-			a := stats[id]
-			if a == nil {
-				a = &agg{loadMin: l, loadMax: l, posMin: p, posMax: p}
-				stats[id] = a
-			}
-			if l < a.loadMin {
-				a.loadMin = l
-			}
-			if l > a.loadMax {
-				a.loadMax = l
-			}
-			if p < a.posMin {
-				a.posMin = p
-			}
-			if p > a.posMax {
-				a.posMax = p
-			}
-			a.loadSum += l
-			a.posSum += p
-			a.loadLast = l
-			a.posLast = p
-			a.count++
-		}
-	}
-
-	joints := make([]interface{}, 0, len(s.armServoIDs))
-	for _, id := range s.armServoIDs {
-		a := stats[id]
-		if a == nil || a.count == 0 {
-			continue
-		}
-		joints = append(joints, map[string]interface{}{
-			"servo":        id,
-			"load_min":     a.loadMin,
-			"load_max":     a.loadMax,
-			"load_mean":    float64(a.loadSum) / float64(a.count),
-			"load_last":    a.loadLast,
-			"pos_deg_min":  a.posMin,
-			"pos_deg_max":  a.posMax,
-			"pos_deg_last": a.posLast,
-		})
-	}
-	return map[string]interface{}{
-		"samples": n,
-		"hz":      hz,
-		"joints":  joints,
 	}, nil
 }
 
@@ -1084,12 +953,6 @@ func (s *so101) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[
 		defer s.mu.Unlock()
 		s.exitManualLocked("exit_manual_mode command")
 		return map[string]interface{}{"mode": "auto"}, nil
-
-	case "sample_manual_signals":
-		return s.sampleManualSignals(ctx, cmd)
-
-	case "read_servo_registers":
-		return s.readServoRegisters(ctx)
 
 	case "set_torque_limit":
 		return s.setTorqueLimitDiag(ctx, cmd)
