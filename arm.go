@@ -709,6 +709,10 @@ func (s *so101) JointPositions(ctx context.Context, extra map[string]interface{}
 }
 
 func (s *so101) Stop(ctx context.Context, extra map[string]interface{}) error {
+	s.mu.Lock()
+	s.exitManualLocked("stop command received")
+	s.mu.Unlock()
+
 	s.isMoving.Store(false)
 	return s.controller.Stop(ctx)
 }
