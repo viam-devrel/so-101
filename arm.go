@@ -759,6 +759,81 @@ func (s *so101) Status(ctx context.Context) (map[string]interface{}, error) {
 	return map[string]interface{}{"mode": "auto"}, nil
 }
 
+// regDecodeLE decodes a little-endian unsigned register value from its raw bytes
+// (STS3215 registers are little-endian; low byte first).
+func regDecodeLE(data []byte) int {
+	v := 0
+	for i, b := range data {
+		v |= int(b) << (8 * i)
+	}
+	return v
+}
+
+// readServoRegisters is a read-only diagnostic that reports the stiffness/torque-related
+// registers for each arm servo, so you can verify what manual mode (or set_torque_limit)
+// actually wrote. Safe to call at any time, including while manual mode is active — that's
+// how you confirm the applied torque_limit changed. Values are raw register units
+// (torque_limit / max_torque ~0-1000; p_gain 0-255; torque_enable 0/1).
+func (s *so101) readServoRegisters(ctx context.Context) (map[string]interface{}, error) {
+	names := []string{"p_gain", "torque_limit", "max_torque", "torque_enable"}
+	joints := make([]interface{}, 0, len(s.armServoIDs))
+	for _, id := range s.armServoIDs {
+		row := map[string]interface{}{"servo": id}
+		for _, name := range names {
+			data, err := s.controller.ReadServoRegister(ctx, id, name)
+			if err != nil {
+				row[name] = fmt.Sprintf("error: %v", err)
+				continue
+			}
+			row[name] = regDecodeLE(data)
+		}
+		joints = append(joints, row)
+	}
+	return map[string]interface{}{"joints": joints}, nil
+}
+
+// setTorqueLimitDiag is a diagnostic that writes the torque_limit register directly on every
+// arm servo, in isolation from manual mode, so you can confirm the register actually governs
+// holding torque on this firmware (e.g. value 10 should make the arm droop; 1000 restores full
+// torque). Requires a "value" (0-1000). Run with manual mode OFF; it does not auto-restore —
+// set it back to 1000 (or reinitialize) when done. Refuses while manual mode is active so it
+// can't fight the control loop.
+func (s *so101) setTorqueLimitDiag(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
+	s.mu.RLock()
+	active := s.manual != nil && s.manual.running()
+	s.mu.RUnlock()
+	if active {
+		return nil, fmt.Errorf("exit manual mode before set_torque_limit (it would fight the control loop)")
+	}
+	v, ok := cmd["value"].(float64)
+	if !ok {
+		return nil, fmt.Errorf("set_torque_limit requires a 'value' number (0-1000)")
+	}
+	iv := int(v)
+	if iv < 0 || iv > 1000 {
+		return nil, fmt.Errorf("value must be in [0,1000], got %d", iv)
+	}
+	data := []byte{byte(iv & 0xFF), byte((iv >> 8) & 0xFF)}
+	results := make([]interface{}, 0, len(s.armServoIDs))
+	for _, id := range s.armServoIDs {
+		err := s.controller.WriteServoRegister(ctx, id, "torque_limit", data)
+		row := map[string]interface{}{"servo": id, "ok": err == nil}
+		if err != nil {
+			row["error"] = err.Error()
+		}
+		// Read back to confirm the write stuck.
+		if rb, rerr := s.controller.ReadServoRegister(ctx, id, "torque_limit"); rerr == nil {
+			row["readback"] = regDecodeLE(rb)
+		}
+		results = append(results, row)
+	}
+	return map[string]interface{}{
+		"set_torque_limit": iv,
+		"servos":           results,
+		"note":             "diagnostic: restore full torque with value 1000 (or reinitialize) when done",
+	}, nil
+}
+
 // sampleManualSignals is a read-only diagnostic for tuning manual mode. With the
 // servos holding position (it writes no goals and does not change torque), it samples
 // each arm joint's present load and calibrated position over a short window and returns
@@ -1007,6 +1082,12 @@ func (s *so101) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[
 
 	case "sample_manual_signals":
 		return s.sampleManualSignals(ctx, cmd)
+
+	case "read_servo_registers":
+		return s.readServoRegisters(ctx)
+
+	case "set_torque_limit":
+		return s.setTorqueLimitDiag(ctx, cmd)
 
 	default:
 		// Check for speed and acceleration setting
