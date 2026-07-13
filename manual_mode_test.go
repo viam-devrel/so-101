@@ -68,6 +68,15 @@ func TestManualStep_ClampLower(t *testing.T) {
 	}
 }
 
+func TestManualStep_ClampSaturationNotMoved(t *testing.T) {
+	p := manualParams{posDeadband: 0.05, dt: 0.02}
+	// goal already at the upper limit, hand pushes further into the wall
+	ng, moved := manualStep(1.0, 1.5, [2]float64{-1, 1}, p)
+	if moved || !approx(ng, 1.0) {
+		t.Fatalf("goal saturated at limit must not move: ng=%v moved=%v", ng, moved)
+	}
+}
+
 // fakeIO records writes and lets a test drive loads and a persistent "held" position
 // that simulates an operator backdriving a joint (writeGoals cannot erase it).
 type fakeIO struct {

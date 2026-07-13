@@ -353,10 +353,10 @@ func resolveManualParams(cfg *ManualModeConfig, overrides map[string]interface{}
 			torqueLimit = cfg.TorqueLimit
 		}
 	}
-	if v, ok := overrides["pos_deadband_deg"].(float64); ok && v > 0 {
+	if v, ok := overrides["pos_deadband_deg"].(float64); ok && v > 0 && v <= 45 {
 		p.posDeadband = v * math.Pi / 180.0
 	}
-	if v, ok := overrides["loop_hz"].(float64); ok && v > 0 {
+	if v, ok := overrides["loop_hz"].(float64); ok && v > 0 && v <= 200 {
 		p.dt = 1.0 / v
 	}
 	if v, ok := overrides["p_gain"].(float64); ok && v >= 0 && v <= 255 {

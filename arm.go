@@ -837,10 +837,12 @@ func (s *so101) setTorqueLimitDiag(ctx context.Context, cmd map[string]interface
 // sampleManualSignals is a read-only diagnostic for tuning manual mode. With the
 // servos holding position (it writes no goals and does not change torque), it samples
 // each arm joint's present load and calibrated position over a short window and returns
-// per-joint aggregates. Use it to characterize the load signal — its sign and magnitude
-// at rest (gravity hold) versus under a gentle hand push — which manual mode's admittance
-// law depends on. Refuses to run while manual mode is active (the loop would move the arm
-// and contaminate the reading).
+// per-joint aggregates. Use it to characterize the present_load signal — its sign and
+// magnitude at rest (gravity hold) versus under a gentle hand push — and joint position;
+// manual mode's admittance law is driven by position deviation, not load, so this reading
+// is telemetry/diagnostic (e.g. as a touch + gravity-torque indicator), not a control input.
+// Refuses to run while manual mode is active (the loop would move the arm and contaminate
+// the reading).
 func (s *so101) sampleManualSignals(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
 	s.mu.RLock()
 	active := s.manual != nil && s.manual.running()
@@ -942,8 +944,11 @@ func (s *so101) sampleManualSignals(ctx context.Context, cmd map[string]interfac
 
 // enterManualLocked starts a manual-mode session. Caller holds s.mu.
 func (s *so101) enterManualLocked(overrides map[string]interface{}) map[string]interface{} {
+	// If already active, tear down first so the new parameters take effect (live re-tuning).
+	// exitManualLocked restores the prior compliance registers before the fresh session
+	// re-applies with the new values.
 	if s.manual != nil && s.manual.running() {
-		return map[string]interface{}{"mode": "manual", "servos": s.armServoIDs}
+		s.exitManualLocked("re-enter with new parameters")
 	}
 	var mm *ManualModeConfig
 	if s.cfg != nil {
