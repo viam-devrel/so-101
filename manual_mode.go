@@ -1,6 +1,13 @@
 package so_arm
 
-import "math"
+import (
+	"context"
+	"math"
+	"sync"
+	"time"
+
+	"go.viam.com/rdk/logging"
+)
 
 // manualParams are the loop tuning constants (already resolved from config+defaults).
 type manualParams struct {
@@ -38,4 +45,151 @@ func manualStep(st jointState, load float64, limit [2]float64, p manualParams) s
 	newGoal = math.Max(limit[0], math.Min(limit[1], newGoal))
 	moved := newGoal != st.goal
 	return stepResult{bias: st.bias, goal: newGoal, moved: moved}
+}
+
+// manualIO is the seam between the manual-mode loop and the hardware controller.
+type manualIO interface {
+	servoIDs() []int
+	positions(ctx context.Context) (map[int]float64, error) // radians
+	loadsFor(ctx context.Context) (map[int]int, error)      // signed load
+	limitsFor() map[int][2]float64                          // radians, by servo id
+	writeGoals(ctx context.Context, goals map[int]float64) error
+	reducePGain(ctx context.Context, v int) error // no-op if v == 0
+	restorePGain(ctx context.Context) error
+}
+
+const maxConsecutiveLoopErrors = 10
+
+type manualSession struct {
+	io     manualIO
+	params manualParams
+	pgain  int
+	logger logging.Logger
+
+	ctx    context.Context
+	cancel context.CancelFunc
+	done   chan struct{}
+
+	mu    sync.Mutex
+	state map[int]jointState
+	run   bool
+}
+
+func newManualSession(parent context.Context, io manualIO, p manualParams, pgain int, logger logging.Logger) *manualSession {
+	ctx, cancel := context.WithCancel(parent)
+	return &manualSession{
+		io: io, params: p, pgain: pgain, logger: logger,
+		ctx: ctx, cancel: cancel, done: make(chan struct{}),
+		state: map[int]jointState{},
+	}
+}
+
+func (m *manualSession) running() bool { m.mu.Lock(); defer m.mu.Unlock(); return m.run }
+
+// start seeds goals at the current pose, reduces stiffness, and launches the loop.
+func (m *manualSession) start() {
+	// Freeze goals at current measured positions so entry causes no motion.
+	pos, err := m.io.positions(m.ctx)
+	if err != nil {
+		m.logger.Warnf("manual mode: failed to read start positions: %v", err)
+		pos = map[int]float64{}
+	}
+	m.mu.Lock()
+	for _, id := range m.io.servoIDs() {
+		m.state[id] = jointState{bias: 0, goal: pos[id]}
+	}
+	m.run = true
+	m.mu.Unlock()
+
+	if m.pgain > 0 {
+		if err := m.io.reducePGain(m.ctx, m.pgain); err != nil {
+			m.logger.Warnf("manual mode: failed to reduce p_gain: %v", err)
+		}
+	}
+	go m.loop()
+}
+
+// stop cancels the loop, waits for it to exit, and restores stiffness.
+func (m *manualSession) stop() {
+	m.cancel()
+	<-m.done
+	if err := m.io.restorePGain(context.Background()); err != nil {
+		m.logger.Warnf("manual mode: failed to restore p_gain: %v", err)
+	}
+	m.mu.Lock()
+	m.run = false
+	m.mu.Unlock()
+}
+
+func (m *manualSession) loop() {
+	defer close(m.done)
+	interval := time.Duration(m.params.dt * float64(time.Second))
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	errCount := 0
+	for {
+		select {
+		case <-m.ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		if err := m.tick(); err != nil {
+			errCount++
+			m.logger.Warnf("manual mode tick error (%d): %v", errCount, err)
+			if errCount >= maxConsecutiveLoopErrors {
+				m.logger.Errorf("manual mode: too many consecutive errors, exiting loop")
+				return
+			}
+			continue
+		}
+		errCount = 0
+	}
+}
+
+func (m *manualSession) tick() error {
+	loads, err := m.io.loadsFor(m.ctx)
+	if err != nil {
+		return err
+	}
+	limits := m.io.limitsFor()
+
+	goals := map[int]float64{}
+	m.mu.Lock()
+	for id, st := range m.state {
+		lim, ok := limits[id]
+		if !ok {
+			lim = [2]float64{-3.14159265, 3.14159265}
+		}
+		res := manualStep(st, float64(loads[id]), lim, m.params)
+		m.state[id] = jointState{bias: res.bias, goal: res.goal}
+		if res.moved {
+			goals[id] = res.goal
+		}
+	}
+	m.mu.Unlock()
+
+	if len(goals) > 0 {
+		return m.io.writeGoals(m.ctx, goals)
+	}
+	return nil
+}
+
+// manualJointStatus is one joint's live telemetry for Status().
+type manualJointStatus struct {
+	Servo int     `json:"servo"`
+	Load  int     `json:"load"`
+	Bias  float64 `json:"bias"`
+	Goal  float64 `json:"goal"`
+}
+
+func (m *manualSession) statusJoints() []manualJointStatus {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]manualJointStatus, 0, len(m.state))
+	for _, id := range m.io.servoIDs() {
+		st := m.state[id]
+		out = append(out, manualJointStatus{Servo: id, Bias: st.bias, Goal: st.goal})
+	}
+	return out
 }

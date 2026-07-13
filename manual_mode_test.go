@@ -1,8 +1,13 @@
 package so_arm
 
 import (
+	"context"
 	"math"
+	"sync"
 	"testing"
+	"time"
+
+	"go.viam.com/rdk/logging"
 )
 
 func approx(a, b float64) bool { return math.Abs(a-b) < 1e-9 }
@@ -112,5 +117,129 @@ func TestManualStep_ExactlyAtDeadband(t *testing.T) {
 	}
 	if !approx(out.bias, 40) {
 		t.Fatalf("bias must be frozen (not tracked) in the push branch, got %v", out.bias)
+	}
+}
+
+// fakeIO records writes and lets a test drive loads.
+type fakeIO struct {
+	mu        sync.Mutex
+	ids       []int
+	pos       map[int]float64
+	loads     map[int]int
+	limits    map[int][2]float64
+	pgainSet  map[int]int
+	pgainRest bool
+	writes    int
+}
+
+func (f *fakeIO) servoIDs() []int { return f.ids }
+func (f *fakeIO) positions(ctx context.Context) (map[int]float64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	cp := map[int]float64{}
+	for k, v := range f.pos {
+		cp[k] = v
+	}
+	return cp, nil
+}
+func (f *fakeIO) loadsFor(ctx context.Context) (map[int]int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	cp := map[int]int{}
+	for k, v := range f.loads {
+		cp[k] = v
+	}
+	return cp, nil
+}
+func (f *fakeIO) limitsFor() map[int][2]float64 { return f.limits }
+func (f *fakeIO) writeGoals(ctx context.Context, goals map[int]float64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.writes++
+	for k, v := range goals {
+		f.pos[k] = v // simulate the servo reaching goal
+	}
+	return nil
+}
+func (f *fakeIO) reducePGain(ctx context.Context, v int) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.pgainSet = map[int]int{}
+	for _, id := range f.ids {
+		f.pgainSet[id] = v
+	}
+	return nil
+}
+func (f *fakeIO) restorePGain(ctx context.Context) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.pgainRest = true
+	return nil
+}
+
+func newFakeIO() *fakeIO {
+	return &fakeIO{
+		ids:    []int{1, 2},
+		pos:    map[int]float64{1: 0, 2: 0},
+		loads:  map[int]int{1: 0, 2: 0},
+		limits: map[int][2]float64{1: {-3, 3}, 2: {-3, 3}},
+	}
+}
+
+// Enter starts the loop; exit tears it down and restores pgain.
+func TestManualSession_EnterExit(t *testing.T) {
+	io := newFakeIO()
+	p := manualParams{deadband: 5, gain: 1, biasAlpha: 0.1, dt: 0.02}
+	sess := newManualSession(context.Background(), io, p, 12, logging.NewTestLogger(t))
+	sess.start()
+	if !sess.running() {
+		t.Fatal("session should be running")
+	}
+	sess.stop() // blocks until loop exits
+	if sess.running() {
+		t.Fatal("session should be stopped")
+	}
+	io.mu.Lock()
+	defer io.mu.Unlock()
+	if io.pgainSet[1] != 12 {
+		t.Fatalf("pgain should have been reduced to 12, got %v", io.pgainSet[1])
+	}
+	if !io.pgainRest {
+		t.Fatal("pgain should have been restored on stop")
+	}
+}
+
+// A sustained push should drive the goal (and thus written position) in that direction.
+func TestManualSession_PushDrivesGoal(t *testing.T) {
+	io := newFakeIO()
+	io.mu.Lock()
+	io.loads[1] = 100 // steady hard push on joint 1
+	io.mu.Unlock()
+	p := manualParams{deadband: 5, gain: 1, biasAlpha: 0.02, dt: 0.02}
+	sess := newManualSession(context.Background(), io, p, 0, logging.NewTestLogger(t))
+	sess.start()
+	time.Sleep(150 * time.Millisecond)
+	sess.stop()
+	io.mu.Lock()
+	defer io.mu.Unlock()
+	if io.pos[1] <= 0 {
+		t.Fatalf("joint 1 goal should have advanced under push, got %v", io.pos[1])
+	}
+	if io.pos[2] != 0 {
+		t.Fatalf("joint 2 (no push) should not move, got %v", io.pos[2])
+	}
+}
+
+// status() returns per-joint telemetry while running.
+func TestManualSession_Status(t *testing.T) {
+	io := newFakeIO()
+	p := manualParams{deadband: 5, gain: 1, biasAlpha: 0.1, dt: 0.02}
+	sess := newManualSession(context.Background(), io, p, 0, logging.NewTestLogger(t))
+	sess.start()
+	time.Sleep(50 * time.Millisecond)
+	joints := sess.statusJoints()
+	sess.stop()
+	if len(joints) != 2 {
+		t.Fatalf("expected 2 joint status entries, got %d", len(joints))
 	}
 }
