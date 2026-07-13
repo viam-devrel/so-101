@@ -96,9 +96,18 @@ func (m *manualSession) start() {
 		m.logger.Warnf("manual mode: failed to read start positions: %v", err)
 		pos = map[int]float64{}
 	}
+	loads, lerr := m.io.loadsFor(m.ctx)
+	if lerr != nil {
+		m.logger.Warnf("manual mode: failed to read start loads: %v", lerr)
+		loads = map[int]int{}
+	}
 	m.mu.Lock()
 	for _, id := range m.io.servoIDs() {
-		m.state[id] = jointState{bias: 0, goal: pos[id]}
+		l := float64(loads[id])
+		// Seed bias to the current (gravity) holding load so entry reads as "at rest"
+		// (excess ~ 0) rather than a push — otherwise a gravity-loaded joint would
+		// immediately drive its own goal.
+		m.state[id] = jointState{bias: l, goal: pos[id], load: l}
 	}
 	m.run = true
 	m.mu.Unlock()

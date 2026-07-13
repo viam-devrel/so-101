@@ -136,7 +136,7 @@ The arm's `GetStatus`/`Status` reports the current mode. Normally:
 { "mode": "auto" }
 ```
 
-While manual mode is active, it also reports live per-joint telemetry (`bias` and `goal`), which is useful for tuning `deadband`/`gain`:
+While manual mode is active, it also reports live per-joint telemetry (`load`, `bias`, and `goal`), which is useful for tuning `deadband`/`gain`:
 
 ```json
 {

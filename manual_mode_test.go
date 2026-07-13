@@ -211,13 +211,13 @@ func TestManualSession_EnterExit(t *testing.T) {
 
 // A sustained push should drive the goal (and thus written position) in that direction.
 func TestManualSession_PushDrivesGoal(t *testing.T) {
-	io := newFakeIO()
-	io.mu.Lock()
-	io.loads[1] = 100 // steady hard push on joint 1
-	io.mu.Unlock()
+	io := newFakeIO() // loads start at 0 -> bias seeds to 0
 	p := manualParams{deadband: 5, gain: 1, biasAlpha: 0.02, dt: 0.02}
 	sess := newManualSession(context.Background(), io, p, 0, logging.NewTestLogger(t))
 	sess.start()
+	io.mu.Lock()
+	io.loads[1] = 100 // operator now pushes joint 1
+	io.mu.Unlock()
 	time.Sleep(150 * time.Millisecond)
 	sess.stop()
 	io.mu.Lock()
@@ -227,6 +227,26 @@ func TestManualSession_PushDrivesGoal(t *testing.T) {
 	}
 	if io.pos[2] != 0 {
 		t.Fatalf("joint 2 (no push) should not move, got %v", io.pos[2])
+	}
+}
+
+// A joint under steady gravity-holding load already present at entry must not drift:
+// bias should seed to that load so excess ~ 0 (rest branch), not drive the goal.
+func TestManualSession_EnterWhileLoadedHolds(t *testing.T) {
+	io := newFakeIO()
+	io.mu.Lock()
+	io.loads[1] = 100 // gravity-holding load present at entry, >> deadband
+	io.pos[1] = 0.5   // some starting pose
+	io.mu.Unlock()
+	p := manualParams{deadband: 40, gain: 1, biasAlpha: 0.05, dt: 0.02}
+	sess := newManualSession(context.Background(), io, p, 0, logging.NewTestLogger(t))
+	sess.start()
+	time.Sleep(120 * time.Millisecond)
+	sess.stop()
+	io.mu.Lock()
+	defer io.mu.Unlock()
+	if io.pos[1] != 0.5 {
+		t.Fatalf("gravity-loaded joint must not drift on entry, moved to %v", io.pos[1])
 	}
 }
 
