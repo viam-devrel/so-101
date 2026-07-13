@@ -3,9 +3,39 @@ package so_arm
 import (
 	"context"
 	"testing"
+	"time"
 
 	"go.viam.com/rdk/logging"
+	"google.golang.org/protobuf/types/known/structpb"
 )
+
+// TestStatusIsProtoSerializableInManualMode guards against regressing the wire format:
+// the robot's GetStatus path serializes the arm's Status() via structpb.NewStruct, which
+// rejects any slice that isn't []interface{} (e.g. a []manualJointStatus). Status() must
+// therefore emit only structpb-native types.
+func TestStatusIsProtoSerializableInManualMode(t *testing.T) {
+	io := newFakeIO()
+	s := &so101{logger: logging.NewTestLogger(t)}
+	s.manual = newManualSession(context.Background(), io, manualDefaults(), 0, s.logger)
+	s.manual.start()
+	defer func() {
+		s.mu.Lock()
+		s.exitManualLocked("test cleanup")
+		s.mu.Unlock()
+	}()
+	time.Sleep(40 * time.Millisecond)
+
+	out, err := s.Status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out["mode"] != "manual" {
+		t.Fatalf("expected manual, got %v", out["mode"])
+	}
+	if _, err := structpb.NewStruct(out); err != nil {
+		t.Fatalf("Status output must be structpb-serializable, got: %v", err)
+	}
+}
 
 func TestStatusReportsAutoWhenNotManual(t *testing.T) {
 	s := &so101{}

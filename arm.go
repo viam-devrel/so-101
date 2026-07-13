@@ -741,9 +741,22 @@ func (s *so101) Status(ctx context.Context) (map[string]interface{}, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if s.manual != nil && s.manual.running() {
+		// GetStatus serializes this via structpb.NewStruct, which only accepts
+		// structpb-native types — a typed []manualJointStatus slice fails. Emit the
+		// joints as []interface{} of map[string]interface{} so the wire format holds.
+		js := s.manual.statusJoints()
+		joints := make([]interface{}, 0, len(js))
+		for _, j := range js {
+			joints = append(joints, map[string]interface{}{
+				"servo": j.Servo,
+				"load":  j.Load,
+				"bias":  j.Bias,
+				"goal":  j.Goal,
+			})
+		}
 		return map[string]interface{}{
 			"mode":        "manual",
-			"manual_mode": map[string]interface{}{"joints": s.manual.statusJoints()},
+			"manual_mode": map[string]interface{}{"joints": joints},
 		}, nil
 	}
 	return map[string]interface{}{"mode": "auto"}, nil
