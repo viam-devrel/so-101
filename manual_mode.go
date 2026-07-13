@@ -199,3 +199,121 @@ func (m *manualSession) statusJoints() []manualJointStatus {
 	}
 	return out
 }
+
+// controllerManualIO adapts SafeSoArmController to manualIO for a set of arm servos.
+type controllerManualIO struct {
+	controller *SafeSoArmController
+	ids        []int
+	limits     map[int][2]float64
+	origPGain  map[int]int // captured lazily on reducePGain for restore
+}
+
+func newControllerManualIO(c *SafeSoArmController, ids []int, limits [][2]float64) *controllerManualIO {
+	lm := map[int][2]float64{}
+	for i, id := range ids {
+		if i < len(limits) {
+			lm[id] = limits[i]
+		}
+	}
+	return &controllerManualIO{controller: c, ids: ids, limits: lm, origPGain: map[int]int{}}
+}
+
+func (a *controllerManualIO) servoIDs() []int { return a.ids }
+
+func (a *controllerManualIO) positions(ctx context.Context) (map[int]float64, error) {
+	vals, err := a.controller.GetJointPositionsForServos(ctx, a.ids)
+	if err != nil {
+		return nil, err
+	}
+	out := map[int]float64{}
+	for i, id := range a.ids {
+		if i < len(vals) {
+			out[id] = vals[i]
+		}
+	}
+	return out, nil
+}
+
+func (a *controllerManualIO) loadsFor(ctx context.Context) (map[int]int, error) {
+	return a.controller.LoadForServos(ctx, a.ids)
+}
+
+func (a *controllerManualIO) limitsFor() map[int][2]float64 { return a.limits }
+
+func (a *controllerManualIO) writeGoals(ctx context.Context, goals map[int]float64) error {
+	ids := make([]int, 0, len(goals))
+	rads := make([]float64, 0, len(goals))
+	for id, g := range goals {
+		ids = append(ids, id)
+		rads = append(rads, g)
+	}
+	// speed=0, acc=0 => plain goal write at default speed (small per-tick deltas).
+	return a.controller.MoveServosToPositions(ctx, ids, rads, 0, 0)
+}
+
+func (a *controllerManualIO) reducePGain(ctx context.Context, v int) error {
+	for _, id := range a.ids {
+		cur, err := a.controller.ReadServoRegister(ctx, id, "p_gain")
+		if err == nil && len(cur) == 1 {
+			a.origPGain[id] = int(cur[0])
+		}
+		if err := a.controller.WriteServoRegister(ctx, id, "p_gain", []byte{byte(v)}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (a *controllerManualIO) restorePGain(ctx context.Context) error {
+	for id, v := range a.origPGain {
+		if err := a.controller.WriteServoRegister(ctx, id, "p_gain", []byte{byte(v)}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// manualDefaults returns the built-in tuning; conservative for a stable first bring-up.
+func manualDefaults() manualParams {
+	return manualParams{deadband: 40, gain: 0.4, biasAlpha: 0.05, dt: 1.0 / 50.0}
+}
+
+// resolveManualParams merges config + inline overrides over defaults.
+// Guarantees dt > 0 (LoopHz override only applies when > 0; default is 1/50).
+func resolveManualParams(cfg *ManualModeConfig, overrides map[string]interface{}) (manualParams, int) {
+	p := manualDefaults()
+	pgain := 0
+	if cfg != nil {
+		if cfg.Deadband > 0 {
+			p.deadband = cfg.Deadband
+		}
+		if cfg.Gain > 0 {
+			p.gain = cfg.Gain
+		}
+		if cfg.BiasAlpha > 0 {
+			p.biasAlpha = cfg.BiasAlpha
+		}
+		if cfg.LoopHz > 0 {
+			p.dt = 1.0 / cfg.LoopHz
+		}
+		if cfg.PGain > 0 {
+			pgain = cfg.PGain
+		}
+	}
+	if v, ok := overrides["deadband"].(float64); ok && v >= 0 {
+		p.deadband = v
+	}
+	if v, ok := overrides["gain"].(float64); ok && v >= 0 {
+		p.gain = v
+	}
+	if v, ok := overrides["bias_alpha"].(float64); ok && v >= 0 && v <= 1 {
+		p.biasAlpha = v
+	}
+	if v, ok := overrides["loop_hz"].(float64); ok && v > 0 {
+		p.dt = 1.0 / v
+	}
+	if v, ok := overrides["p_gain"].(float64); ok && v >= 0 {
+		pgain = int(v)
+	}
+	return p, pgain
+}

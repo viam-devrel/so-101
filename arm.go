@@ -184,6 +184,7 @@ type so101 struct {
 	cfg        *SO101ArmConfig
 	opMgr      *operation.SingleOperationManager
 	controller *SafeSoArmController
+	manual     *manualSession
 
 	mu       sync.RWMutex
 	moveLock sync.Mutex
@@ -721,7 +722,38 @@ func (s *so101) Get3DModels(ctx context.Context, extra map[string]interface{}) (
 
 // Status returns the current status of the resource as a map of key-value pairs.
 func (s *so101) Status(ctx context.Context) (map[string]interface{}, error) {
-	return map[string]interface{}{}, nil
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.manual != nil && s.manual.running() {
+		return map[string]interface{}{
+			"mode":        "manual",
+			"manual_mode": map[string]interface{}{"joints": s.manual.statusJoints()},
+		}, nil
+	}
+	return map[string]interface{}{"mode": "auto"}, nil
+}
+
+// enterManualLocked starts a manual-mode session. Caller holds s.mu.
+func (s *so101) enterManualLocked(overrides map[string]interface{}) map[string]interface{} {
+	if s.manual != nil && s.manual.running() {
+		return map[string]interface{}{"mode": "manual", "servos": s.armServoIDs}
+	}
+	params, pgain := resolveManualParams(s.cfg.ManualMode, overrides)
+	io := newControllerManualIO(s.controller, s.armServoIDs, s.calculateJointLimits())
+	s.manual = newManualSession(s.cancelCtx, io, params, pgain, s.logger)
+	s.manual.start()
+	return map[string]interface{}{"mode": "manual", "servos": s.armServoIDs}
+}
+
+// exitManualLocked tears down manual mode if active and holds the current pose.
+// Caller holds s.mu. Safe to call when not active.
+func (s *so101) exitManualLocked(reason string) {
+	if s.manual == nil || !s.manual.running() {
+		return
+	}
+	s.logger.Infof("manual mode exiting: %s", reason)
+	s.manual.stop()
+	s.manual = nil
 }
 
 func (s *so101) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
@@ -825,6 +857,17 @@ func (s *so101) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[
 			"success":     true,
 			"calibration": calibration,
 		}, nil
+
+	case "enter_manual_mode":
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.enterManualLocked(cmd), nil
+
+	case "exit_manual_mode":
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.exitManualLocked("exit_manual_mode command")
+		return map[string]interface{}{"mode": "auto"}, nil
 
 	default:
 		// Check for speed and acceleration setting

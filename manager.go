@@ -313,6 +313,19 @@ func (s *SafeSoArmController) WriteServoRegister(ctx context.Context, servoID in
 	return servo.WriteRegister(ctx, registerName, data)
 }
 
+// ReadServoRegister reads a named register from a specific servo.
+func (s *SafeSoArmController) ReadServoRegister(ctx context.Context, servoID int, registerName string) ([]byte, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	servo := s.group.ServoByID(servoID)
+	if servo == nil {
+		return nil, fmt.Errorf("servo %d not available", servoID)
+	}
+
+	return servo.ReadRegister(ctx, registerName)
+}
+
 func (s *SafeSoArmController) SetCalibration(calibration SO101FullCalibration) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
