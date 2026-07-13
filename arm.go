@@ -762,6 +762,112 @@ func (s *so101) Status(ctx context.Context) (map[string]interface{}, error) {
 	return map[string]interface{}{"mode": "auto"}, nil
 }
 
+// sampleManualSignals is a read-only diagnostic for tuning manual mode. With the
+// servos holding position (it writes no goals and does not change torque), it samples
+// each arm joint's present load and calibrated position over a short window and returns
+// per-joint aggregates. Use it to characterize the load signal — its sign and magnitude
+// at rest (gravity hold) versus under a gentle hand push — which manual mode's admittance
+// law depends on. Refuses to run while manual mode is active (the loop would move the arm
+// and contaminate the reading).
+func (s *so101) sampleManualSignals(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
+	s.mu.RLock()
+	active := s.manual != nil && s.manual.running()
+	s.mu.RUnlock()
+	if active {
+		return nil, fmt.Errorf("exit manual mode before sampling (the loop would move the arm and contaminate the reading)")
+	}
+
+	durMs := 1500.0
+	if v, ok := cmd["duration_ms"].(float64); ok && v > 0 {
+		durMs = v
+	}
+	hz := 50.0
+	if v, ok := cmd["hz"].(float64); ok && v > 0 && v <= 200 {
+		hz = v
+	}
+	n := int(durMs / 1000.0 * hz)
+	if n < 1 {
+		n = 1
+	}
+	interval := time.Duration(float64(time.Second) / hz)
+
+	type agg struct {
+		loadMin, loadMax, loadSum, loadLast int
+		posMin, posMax, posSum, posLast     float64
+		count                               int
+	}
+	stats := map[int]*agg{}
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for i := 0; i < n; i++ {
+		if i > 0 {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-ticker.C:
+			}
+		}
+		loads, err := s.controller.LoadForServos(ctx, s.armServoIDs)
+		if err != nil {
+			return nil, fmt.Errorf("load read failed: %w", err)
+		}
+		posRad, err := s.controller.GetJointPositionsForServos(ctx, s.armServoIDs)
+		if err != nil {
+			return nil, fmt.Errorf("position read failed: %w", err)
+		}
+		for idx, id := range s.armServoIDs {
+			l := loads[id]
+			p := posRad[idx] * 180.0 / math.Pi
+			a := stats[id]
+			if a == nil {
+				a = &agg{loadMin: l, loadMax: l, posMin: p, posMax: p}
+				stats[id] = a
+			}
+			if l < a.loadMin {
+				a.loadMin = l
+			}
+			if l > a.loadMax {
+				a.loadMax = l
+			}
+			if p < a.posMin {
+				a.posMin = p
+			}
+			if p > a.posMax {
+				a.posMax = p
+			}
+			a.loadSum += l
+			a.posSum += p
+			a.loadLast = l
+			a.posLast = p
+			a.count++
+		}
+	}
+
+	joints := make([]interface{}, 0, len(s.armServoIDs))
+	for _, id := range s.armServoIDs {
+		a := stats[id]
+		if a == nil || a.count == 0 {
+			continue
+		}
+		joints = append(joints, map[string]interface{}{
+			"servo":        id,
+			"load_min":     a.loadMin,
+			"load_max":     a.loadMax,
+			"load_mean":    float64(a.loadSum) / float64(a.count),
+			"load_last":    a.loadLast,
+			"pos_deg_min":  a.posMin,
+			"pos_deg_max":  a.posMax,
+			"pos_deg_last": a.posLast,
+		})
+	}
+	return map[string]interface{}{
+		"samples": n,
+		"hz":      hz,
+		"joints":  joints,
+	}, nil
+}
+
 // enterManualLocked starts a manual-mode session. Caller holds s.mu.
 func (s *so101) enterManualLocked(overrides map[string]interface{}) map[string]interface{} {
 	if s.manual != nil && s.manual.running() {
@@ -901,6 +1007,9 @@ func (s *so101) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[
 		defer s.mu.Unlock()
 		s.exitManualLocked("exit_manual_mode command")
 		return map[string]interface{}{"mode": "auto"}, nil
+
+	case "sample_manual_signals":
+		return s.sampleManualSignals(ctx, cmd)
 
 	default:
 		// Check for speed and acceleration setting
