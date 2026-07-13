@@ -2,6 +2,7 @@ package so_arm
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"sync"
 	"time"
@@ -252,11 +253,22 @@ func (a *controllerManualIO) writeGoals(ctx context.Context, goals map[int]float
 }
 
 func (a *controllerManualIO) reducePGain(ctx context.Context, v int) error {
+	// Capture every servo's original p_gain BEFORE changing anything, so a later
+	// restore always covers every servo we touch. If any read fails, change nothing
+	// (manual mode then runs at full stiffness — safe: the arm still holds).
+	orig := make(map[int]int, len(a.ids))
 	for _, id := range a.ids {
 		cur, err := a.controller.ReadServoRegister(ctx, id, "p_gain")
-		if err == nil && len(cur) == 1 {
-			a.origPGain[id] = int(cur[0])
+		if err != nil {
+			return fmt.Errorf("failed to read p_gain for servo %d: %w", id, err)
 		}
+		if len(cur) != 1 {
+			return fmt.Errorf("unexpected p_gain width %d for servo %d", len(cur), id)
+		}
+		orig[id] = int(cur[0])
+	}
+	a.origPGain = orig
+	for _, id := range a.ids {
 		if err := a.controller.WriteServoRegister(ctx, id, "p_gain", []byte{byte(v)}); err != nil {
 			return err
 		}
@@ -312,7 +324,7 @@ func resolveManualParams(cfg *ManualModeConfig, overrides map[string]interface{}
 	if v, ok := overrides["loop_hz"].(float64); ok && v > 0 {
 		p.dt = 1.0 / v
 	}
-	if v, ok := overrides["p_gain"].(float64); ok && v >= 0 {
+	if v, ok := overrides["p_gain"].(float64); ok && v >= 0 && v <= 255 {
 		pgain = int(v)
 	}
 	return p, pgain

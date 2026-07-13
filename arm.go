@@ -738,7 +738,11 @@ func (s *so101) enterManualLocked(overrides map[string]interface{}) map[string]i
 	if s.manual != nil && s.manual.running() {
 		return map[string]interface{}{"mode": "manual", "servos": s.armServoIDs}
 	}
-	params, pgain := resolveManualParams(s.cfg.ManualMode, overrides)
+	var mm *ManualModeConfig
+	if s.cfg != nil {
+		mm = s.cfg.ManualMode
+	}
+	params, pgain := resolveManualParams(mm, overrides)
 	io := newControllerManualIO(s.controller, s.armServoIDs, s.calculateJointLimits())
 	s.manual = newManualSession(s.cancelCtx, io, params, pgain, s.logger)
 	s.manual.start()
