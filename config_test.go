@@ -86,10 +86,16 @@ func TestManualModeConfigValidate(t *testing.T) {
 
 	// Valid scalar config passes.
 	ok := &SO101ArmConfig{Port: "/dev/null", ManualMode: &ManualModeConfig{
-		PosDeadbandDeg: 2, LoopHz: 50, PGain: 16,
+		PosDeadbandDeg: 2, LoopHz: 50, PGain: 16, TorqueLimit: 300,
 	}}
 	if _, _, err := ok.Validate(""); err != nil {
 		t.Fatalf("expected valid config, got %v", err)
+	}
+
+	// Out-of-range torque_limit is rejected.
+	badTorque := &SO101ArmConfig{Port: "/dev/null", ManualMode: &ManualModeConfig{TorqueLimit: 2000}}
+	if _, _, err := badTorque.Validate(""); err == nil {
+		t.Fatal("expected error for out-of-range torque_limit, got nil")
 	}
 
 	// Nil manual_mode is valid.

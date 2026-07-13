@@ -112,6 +112,7 @@ Manual mode is entered and exited with the `enter_manual_mode` / `exit_manual_mo
 | `pos_deadband_deg` | float   | Optional  | Degrees a joint must be backdriven from its goal before the goal follows your hand. Higher = stiffer/less sensitive. Valid range 0-45. Default `2`. |
 | `loop_hz`          | float   | Optional  | Control loop rate, in Hz. Valid range 0-200 (`0` uses the default). Default `50`.                                                                               |
 | `p_gain`           | int     | Optional  | Reduced servo position P-gain applied during manual mode. `0` leaves the servo's configured stiffness unchanged (the default); valid range 0-255. Lower = easier to backdrive/lighter feel, but must stay high enough to hold gravity. |
+| `torque_limit`     | int     | Optional  | Servo torque cap (STS3215 `torque_limit` register) applied during manual mode. `0` leaves the servo's configured torque limit unchanged (the default); valid range 0-1000. Lower = easier to backdrive, but it **must stay above the gravity-hold load or the joint will sag** — and a sagging joint drifting past `pos_deadband_deg` re-triggers following, so watch that `dev_deg` at rest stays close to `0`. `p_gain` alone softens the position loop but doesn't cap applied force; `torque_limit` is what actually makes the servo compliant to a hand. Start around 300-400 and lower gradually for a lighter feel while confirming the arm still holds its pose. |
 
 All fields are optional; a zero/omitted value falls back to the built-in default.
 
@@ -277,7 +278,7 @@ Retrieve current calibration data:
 
 #### Enter Manual Mode
 
-Enter [manual (hand-guided) mode](#manual-mode). Accepts the same tuning keys as the `manual_mode` config object (`pos_deadband_deg`, `loop_hz`, `p_gain`) inline as optional overrides, which layer on top of the configured `manual_mode` values. Calling this while already in manual mode is a no-op that returns the current status.
+Enter [manual (hand-guided) mode](#manual-mode). Accepts the same tuning keys as the `manual_mode` config object (`pos_deadband_deg`, `loop_hz`, `p_gain`, `torque_limit`) inline as optional overrides, which layer on top of the configured `manual_mode` values. Calling this while already in manual mode is a no-op that returns the current status.
 
 ```json
 { "command": "enter_manual_mode", "pos_deadband_deg": 3 }

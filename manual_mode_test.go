@@ -71,15 +71,16 @@ func TestManualStep_ClampLower(t *testing.T) {
 // fakeIO records writes and lets a test drive loads and a persistent "held" position
 // that simulates an operator backdriving a joint (writeGoals cannot erase it).
 type fakeIO struct {
-	mu        sync.Mutex
-	ids       []int
-	pos       map[int]float64
-	held      map[int]float64
-	loads     map[int]int
-	limits    map[int][2]float64
-	pgainSet  map[int]int
-	pgainRest bool
-	writes    int
+	mu                 sync.Mutex
+	ids                []int
+	pos                map[int]float64
+	held               map[int]float64
+	loads              map[int]int
+	limits             map[int][2]float64
+	pGainApplied       int
+	torqueApplied      int
+	complianceRestored bool
+	writes             int
 }
 
 func (f *fakeIO) servoIDs() []int { return f.ids }
@@ -115,19 +116,17 @@ func (f *fakeIO) writeGoals(ctx context.Context, goals map[int]float64) error {
 	}
 	return nil
 }
-func (f *fakeIO) reducePGain(ctx context.Context, v int) error {
+func (f *fakeIO) applyCompliance(ctx context.Context, pGain, torqueLimit int) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.pgainSet = map[int]int{}
-	for _, id := range f.ids {
-		f.pgainSet[id] = v
-	}
+	f.pGainApplied = pGain
+	f.torqueApplied = torqueLimit
 	return nil
 }
-func (f *fakeIO) restorePGain(ctx context.Context) error {
+func (f *fakeIO) restoreCompliance(ctx context.Context) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.pgainRest = true
+	f.complianceRestored = true
 	return nil
 }
 
@@ -141,11 +140,11 @@ func newFakeIO() *fakeIO {
 	}
 }
 
-// Enter starts the loop; exit tears it down and restores pgain.
+// Enter starts the loop; exit tears it down and restores compliance.
 func TestManualSession_EnterExit(t *testing.T) {
 	io := newFakeIO()
 	p := manualParams{posDeadband: 0.05, dt: 0.02}
-	sess := newManualSession(context.Background(), io, p, 12, logging.NewTestLogger(t))
+	sess := newManualSession(context.Background(), io, p, 12, 300, logging.NewTestLogger(t))
 	sess.start()
 	if !sess.running() {
 		t.Fatal("session should be running")
@@ -156,11 +155,14 @@ func TestManualSession_EnterExit(t *testing.T) {
 	}
 	io.mu.Lock()
 	defer io.mu.Unlock()
-	if io.pgainSet[1] != 12 {
-		t.Fatalf("pgain should have been reduced to 12, got %v", io.pgainSet[1])
+	if io.pGainApplied != 12 {
+		t.Fatalf("p_gain should have been applied as 12, got %v", io.pGainApplied)
 	}
-	if !io.pgainRest {
-		t.Fatal("pgain should have been restored on stop")
+	if io.torqueApplied != 300 {
+		t.Fatalf("torque_limit should have been applied as 300, got %v", io.torqueApplied)
+	}
+	if !io.complianceRestored {
+		t.Fatal("compliance should have been restored on stop")
 	}
 }
 
@@ -169,7 +171,7 @@ func TestManualSession_EnterExit(t *testing.T) {
 func TestManualSession_BackdriveFollowsGoal(t *testing.T) {
 	io := newFakeIO()
 	p := manualParams{posDeadband: 0.05, dt: 0.02}
-	sess := newManualSession(context.Background(), io, p, 0, logging.NewTestLogger(t))
+	sess := newManualSession(context.Background(), io, p, 0, 0, logging.NewTestLogger(t))
 	sess.start() // goals seeded to pos = 0
 	io.mu.Lock()
 	io.held[1] = 0.5 // operator backdrives joint 1 to 0.5 and holds it there
@@ -195,7 +197,7 @@ func TestManualSession_EnterHoldsWithoutBackdrive(t *testing.T) {
 	io.pos[1] = 0.5
 	io.mu.Unlock()
 	p := manualParams{posDeadband: 0.05, dt: 0.02}
-	sess := newManualSession(context.Background(), io, p, 0, logging.NewTestLogger(t))
+	sess := newManualSession(context.Background(), io, p, 0, 0, logging.NewTestLogger(t))
 	sess.start()
 	time.Sleep(120 * time.Millisecond)
 	sess.stop()
@@ -210,7 +212,7 @@ func TestManualSession_EnterHoldsWithoutBackdrive(t *testing.T) {
 func TestManualSession_Status(t *testing.T) {
 	io := newFakeIO()
 	p := manualParams{posDeadband: 0.05, dt: 0.02}
-	sess := newManualSession(context.Background(), io, p, 0, logging.NewTestLogger(t))
+	sess := newManualSession(context.Background(), io, p, 0, 0, logging.NewTestLogger(t))
 	sess.start()
 	time.Sleep(50 * time.Millisecond)
 	joints := sess.statusJoints()
@@ -228,7 +230,7 @@ func TestManualSession_StatusReportsLoad(t *testing.T) {
 	io.loads[1] = 30 // present load, but no position backdrive
 	io.mu.Unlock()
 	p := manualParams{posDeadband: 0.05, dt: 0.02}
-	sess := newManualSession(context.Background(), io, p, 0, logging.NewTestLogger(t))
+	sess := newManualSession(context.Background(), io, p, 0, 0, logging.NewTestLogger(t))
 	sess.start()
 	time.Sleep(60 * time.Millisecond)
 	joints := sess.statusJoints()

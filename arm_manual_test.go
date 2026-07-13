@@ -16,7 +16,7 @@ import (
 func TestStatusIsProtoSerializableInManualMode(t *testing.T) {
 	io := newFakeIO()
 	s := &so101{logger: logging.NewTestLogger(t)}
-	s.manual = newManualSession(context.Background(), io, manualDefaults(), 0, s.logger)
+	s.manual = newManualSession(context.Background(), io, manualDefaults(), 0, 0, s.logger)
 	s.manual.start()
 	defer func() {
 		s.mu.Lock()
@@ -54,7 +54,7 @@ func TestStatusReportsAutoWhenNotManual(t *testing.T) {
 func TestExitManualLockedTearsDown(t *testing.T) {
 	io := newFakeIO()
 	s := &so101{logger: logging.NewTestLogger(t)}
-	s.manual = newManualSession(context.Background(), io, manualDefaults(), 0, s.logger)
+	s.manual = newManualSession(context.Background(), io, manualDefaults(), 0, 0, s.logger)
 	s.manual.start()
 	s.mu.Lock()
 	s.exitManualLocked("test")
@@ -64,7 +64,7 @@ func TestExitManualLockedTearsDown(t *testing.T) {
 	}
 	io.mu.Lock()
 	defer io.mu.Unlock()
-	if !io.pgainRest {
+	if !io.complianceRestored {
 		t.Fatal("p_gain should be restored on teardown")
 	}
 }

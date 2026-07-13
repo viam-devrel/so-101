@@ -109,6 +109,7 @@ type ManualModeConfig struct {
 	PosDeadbandDeg float64 `json:"pos_deadband_deg,omitempty"` // backdrive distance (deg) before the goal follows the hand
 	LoopHz         float64 `json:"loop_hz,omitempty"`          // control loop rate (Hz)
 	PGain          int     `json:"p_gain,omitempty"`           // optional reduced servo P-gain during manual mode (0 = unchanged)
+	TorqueLimit    int     `json:"torque_limit,omitempty"`     // optional servo torque cap during manual mode for backdrive compliance (0 = unchanged; ~0-1000; lower = easier to move but must stay above gravity-hold load)
 }
 
 // Validate ensures the manual mode config's fields are within acceptable ranges.
@@ -124,6 +125,9 @@ func (m *ManualModeConfig) Validate() error {
 	}
 	if m.PGain < 0 || m.PGain > 255 {
 		return fmt.Errorf("manual_mode.p_gain must be in [0,255], got %v", m.PGain)
+	}
+	if m.TorqueLimit < 0 || m.TorqueLimit > 1000 {
+		return fmt.Errorf("manual_mode.torque_limit must be in [0,1000], got %v", m.TorqueLimit)
 	}
 	return nil
 }
@@ -870,9 +874,9 @@ func (s *so101) enterManualLocked(overrides map[string]interface{}) map[string]i
 	if s.cfg != nil {
 		mm = s.cfg.ManualMode
 	}
-	params, pgain := resolveManualParams(mm, overrides)
+	params, pGain, torqueLimit := resolveManualParams(mm, overrides)
 	io := newControllerManualIO(s.controller, s.armServoIDs, s.calculateJointLimits())
-	s.manual = newManualSession(s.cancelCtx, io, params, pgain, s.logger)
+	s.manual = newManualSession(s.cancelCtx, io, params, pGain, torqueLimit, s.logger)
 	s.manual.start()
 	return map[string]interface{}{"mode": "manual", "servos": s.armServoIDs}
 }

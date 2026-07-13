@@ -51,17 +51,18 @@ type manualIO interface {
 	loadsFor(ctx context.Context) (map[int]int, error)      // signed load
 	limitsFor() map[int][2]float64                          // radians, by servo id
 	writeGoals(ctx context.Context, goals map[int]float64) error
-	reducePGain(ctx context.Context, v int) error // no-op if v == 0
-	restorePGain(ctx context.Context) error
+	applyCompliance(ctx context.Context, pGain, torqueLimit int) error // each arg 0 = leave that register unchanged
+	restoreCompliance(ctx context.Context) error
 }
 
 const maxConsecutiveLoopErrors = 10
 
 type manualSession struct {
-	io     manualIO
-	params manualParams
-	pgain  int
-	logger logging.Logger
+	io          manualIO
+	params      manualParams
+	pGain       int
+	torqueLimit int
+	logger      logging.Logger
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -72,10 +73,10 @@ type manualSession struct {
 	run   bool
 }
 
-func newManualSession(parent context.Context, io manualIO, p manualParams, pgain int, logger logging.Logger) *manualSession {
+func newManualSession(parent context.Context, io manualIO, p manualParams, pGain, torqueLimit int, logger logging.Logger) *manualSession {
 	ctx, cancel := context.WithCancel(parent)
 	return &manualSession{
-		io: io, params: p, pgain: pgain, logger: logger,
+		io: io, params: p, pGain: pGain, torqueLimit: torqueLimit, logger: logger,
 		ctx: ctx, cancel: cancel, done: make(chan struct{}),
 		state: map[int]jointState{},
 	}
@@ -99,9 +100,9 @@ func (m *manualSession) start() {
 	m.run = true
 	m.mu.Unlock()
 
-	if m.pgain > 0 {
-		if err := m.io.reducePGain(m.ctx, m.pgain); err != nil {
-			m.logger.Warnf("manual mode: failed to reduce p_gain: %v", err)
+	if m.pGain > 0 || m.torqueLimit > 0 {
+		if err := m.io.applyCompliance(m.ctx, m.pGain, m.torqueLimit); err != nil {
+			m.logger.Warnf("manual mode: failed to apply compliance: %v", err)
 		}
 	}
 	go m.loop()
@@ -116,8 +117,8 @@ func (m *manualSession) stop() {
 
 func (m *manualSession) loop() {
 	defer func() {
-		if err := m.io.restorePGain(context.Background()); err != nil {
-			m.logger.Warnf("manual mode: failed to restore p_gain: %v", err)
+		if err := m.io.restoreCompliance(context.Background()); err != nil {
+			m.logger.Warnf("manual mode: failed to restore compliance: %v", err)
 		}
 		m.mu.Lock()
 		m.run = false
@@ -218,7 +219,8 @@ type controllerManualIO struct {
 	controller *SafeSoArmController
 	ids        []int
 	limits     map[int][2]float64
-	origPGain  map[int]int // captured lazily on reducePGain for restore
+	origPGain  map[int]int // captured lazily on applyCompliance for restore
+	origTorque map[int]int // captured lazily on applyCompliance for restore
 }
 
 func newControllerManualIO(c *SafeSoArmController, ids []int, limits [][2]float64) *controllerManualIO {
@@ -228,7 +230,7 @@ func newControllerManualIO(c *SafeSoArmController, ids []int, limits [][2]float6
 			lm[id] = limits[i]
 		}
 	}
-	return &controllerManualIO{controller: c, ids: ids, limits: lm, origPGain: map[int]int{}}
+	return &controllerManualIO{controller: c, ids: ids, limits: lm, origPGain: map[int]int{}, origTorque: map[int]int{}}
 }
 
 func (a *controllerManualIO) servoIDs() []int { return a.ids }
@@ -264,37 +266,66 @@ func (a *controllerManualIO) writeGoals(ctx context.Context, goals map[int]float
 	return a.controller.MoveServosToPositions(ctx, ids, rads, 0, 0)
 }
 
-func (a *controllerManualIO) reducePGain(ctx context.Context, v int) error {
-	// Capture every servo's original p_gain BEFORE changing anything, so a later
-	// restore always covers every servo we touch. If any read fails, change nothing
-	// (manual mode then runs at full stiffness — safe: the arm still holds).
-	orig := make(map[int]int, len(a.ids))
+func (a *controllerManualIO) applyCompliance(ctx context.Context, pGain, torqueLimit int) error {
+	// Capture originals for every register we intend to change BEFORE writing anything, so a
+	// later restore always covers every servo we touch (fail-safe: on any read error, change
+	// nothing and let manual mode run at full stiffness — the arm still holds).
+	pg := map[int]int{}
+	tq := map[int]int{}
 	for _, id := range a.ids {
-		cur, err := a.controller.ReadServoRegister(ctx, id, "p_gain")
-		if err != nil {
-			return fmt.Errorf("failed to read p_gain for servo %d: %w", id, err)
+		if pGain > 0 {
+			cur, err := a.controller.ReadServoRegister(ctx, id, "p_gain")
+			if err != nil {
+				return fmt.Errorf("read p_gain servo %d: %w", id, err)
+			}
+			if len(cur) != 1 {
+				return fmt.Errorf("unexpected p_gain width %d for servo %d", len(cur), id)
+			}
+			pg[id] = int(cur[0])
 		}
-		if len(cur) != 1 {
-			return fmt.Errorf("unexpected p_gain width %d for servo %d", len(cur), id)
+		if torqueLimit > 0 {
+			cur, err := a.controller.ReadServoRegister(ctx, id, "torque_limit")
+			if err != nil {
+				return fmt.Errorf("read torque_limit servo %d: %w", id, err)
+			}
+			if len(cur) != 2 {
+				return fmt.Errorf("unexpected torque_limit width %d for servo %d", len(cur), id)
+			}
+			tq[id] = int(cur[0]) | int(cur[1])<<8 // STS3215 is little-endian
 		}
-		orig[id] = int(cur[0])
 	}
-	a.origPGain = orig
+	a.origPGain = pg
+	a.origTorque = tq
 	for _, id := range a.ids {
-		if err := a.controller.WriteServoRegister(ctx, id, "p_gain", []byte{byte(v)}); err != nil {
-			return err
+		if pGain > 0 {
+			if err := a.controller.WriteServoRegister(ctx, id, "p_gain", []byte{byte(pGain)}); err != nil {
+				return err
+			}
+		}
+		if torqueLimit > 0 {
+			if err := a.controller.WriteServoRegister(ctx, id, "torque_limit",
+				[]byte{byte(torqueLimit & 0xFF), byte((torqueLimit >> 8) & 0xFF)}); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
 }
 
-func (a *controllerManualIO) restorePGain(ctx context.Context) error {
+func (a *controllerManualIO) restoreCompliance(ctx context.Context) error {
+	var firstErr error
 	for id, v := range a.origPGain {
-		if err := a.controller.WriteServoRegister(ctx, id, "p_gain", []byte{byte(v)}); err != nil {
-			return err
+		if err := a.controller.WriteServoRegister(ctx, id, "p_gain", []byte{byte(v)}); err != nil && firstErr == nil {
+			firstErr = err
 		}
 	}
-	return nil
+	for id, v := range a.origTorque {
+		if err := a.controller.WriteServoRegister(ctx, id, "torque_limit",
+			[]byte{byte(v & 0xFF), byte((v >> 8) & 0xFF)}); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }
 
 // manualDefaults returns the built-in tuning; conservative for a stable first bring-up.
@@ -304,9 +335,10 @@ func manualDefaults() manualParams {
 
 // resolveManualParams merges config + inline overrides over defaults.
 // Guarantees dt > 0 (LoopHz override only applies when > 0; default is 1/50).
-func resolveManualParams(cfg *ManualModeConfig, overrides map[string]interface{}) (manualParams, int) {
+func resolveManualParams(cfg *ManualModeConfig, overrides map[string]interface{}) (manualParams, int, int) {
 	p := manualDefaults()
-	pgain := 0
+	pGain := 0
+	torqueLimit := 0
 	if cfg != nil {
 		if cfg.PosDeadbandDeg > 0 {
 			p.posDeadband = cfg.PosDeadbandDeg * math.Pi / 180.0
@@ -315,7 +347,10 @@ func resolveManualParams(cfg *ManualModeConfig, overrides map[string]interface{}
 			p.dt = 1.0 / cfg.LoopHz
 		}
 		if cfg.PGain > 0 {
-			pgain = cfg.PGain
+			pGain = cfg.PGain
+		}
+		if cfg.TorqueLimit > 0 {
+			torqueLimit = cfg.TorqueLimit
 		}
 	}
 	if v, ok := overrides["pos_deadband_deg"].(float64); ok && v > 0 {
@@ -325,7 +360,10 @@ func resolveManualParams(cfg *ManualModeConfig, overrides map[string]interface{}
 		p.dt = 1.0 / v
 	}
 	if v, ok := overrides["p_gain"].(float64); ok && v >= 0 && v <= 255 {
-		pgain = int(v)
+		pGain = int(v)
 	}
-	return p, pgain
+	if v, ok := overrides["torque_limit"].(float64); ok && v >= 0 && v <= 1000 {
+		torqueLimit = int(v)
+	}
+	return p, pGain, torqueLimit
 }
