@@ -77,6 +77,28 @@ func TestSO101ArmConfigValidateMeshRatios(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestManualModeConfigValidate(t *testing.T) {
+	// Out-of-range gain is rejected.
+	bad := &SO101ArmConfig{Port: "/dev/null", ManualMode: &ManualModeConfig{Gain: -1}}
+	if _, _, err := bad.Validate(""); err == nil {
+		t.Fatal("expected error for negative gain, got nil")
+	}
+
+	// Valid scalar config passes.
+	ok := &SO101ArmConfig{Port: "/dev/null", ManualMode: &ManualModeConfig{
+		Deadband: 30, Gain: 0.5, BiasAlpha: 0.05, LoopHz: 50, PGain: 16,
+	}}
+	if _, _, err := ok.Validate(""); err != nil {
+		t.Fatalf("expected valid config, got %v", err)
+	}
+
+	// Nil manual_mode is valid (feature off / all defaults).
+	none := &SO101ArmConfig{Port: "/dev/null"}
+	if _, _, err := none.Validate(""); err != nil {
+		t.Fatalf("expected nil manual_mode to be valid, got %v", err)
+	}
+}
+
 func TestGetNormModeForServo(t *testing.T) {
 	tests := []struct {
 		servoID  int

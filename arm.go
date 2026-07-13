@@ -97,6 +97,43 @@ type SO101ArmConfig struct {
 	// aggressive. Defaults to 0.9 for each of the 5 meshes when empty. Ignored unless
 	// UseURDF is set.
 	MeshDecimationRatios []float64 `json:"mesh_decimation_ratios,omitempty"`
+
+	// ManualMode tunes hand-guided ("manual") mode. Optional; nil disables
+	// the feature / uses built-in defaults throughout.
+	ManualMode *ManualModeConfig `json:"manual_mode,omitempty"`
+}
+
+// ManualModeConfig tunes hand-guided ("manual") mode. All fields optional;
+// zero means "use the built-in default". See manualDefaults().
+type ManualModeConfig struct {
+	Deadband  float64 `json:"deadband,omitempty"`   // load units; push must exceed this to move a joint
+	Gain      float64 `json:"gain,omitempty"`       // admittance: radians per (load-unit * second)
+	BiasAlpha float64 `json:"bias_alpha,omitempty"` // 0..1 low-pass factor for the at-rest load bias
+	LoopHz    float64 `json:"loop_hz,omitempty"`    // control loop rate
+	PGain     int     `json:"p_gain,omitempty"`     // optional reduced position P gain during manual mode (0 = leave unchanged)
+}
+
+// Validate ensures the manual mode config's fields are within acceptable ranges.
+func (m *ManualModeConfig) Validate() error {
+	if m == nil {
+		return nil
+	}
+	if m.Deadband < 0 {
+		return fmt.Errorf("manual_mode.deadband must be >= 0, got %v", m.Deadband)
+	}
+	if m.Gain < 0 {
+		return fmt.Errorf("manual_mode.gain must be >= 0, got %v", m.Gain)
+	}
+	if m.BiasAlpha < 0 || m.BiasAlpha > 1 {
+		return fmt.Errorf("manual_mode.bias_alpha must be in [0,1], got %v", m.BiasAlpha)
+	}
+	if m.LoopHz < 0 || m.LoopHz > 200 {
+		return fmt.Errorf("manual_mode.loop_hz must be in [0,200], got %v", m.LoopHz)
+	}
+	if m.PGain < 0 || m.PGain > 255 {
+		return fmt.Errorf("manual_mode.p_gain must be in [0,255], got %v", m.PGain)
+	}
+	return nil
 }
 
 // Validate ensures all parts of the config are valid
@@ -121,6 +158,10 @@ func (cfg *SO101ArmConfig) Validate(path string) ([]string, []string, error) {
 		if math.IsNaN(r) || r < 0 || r > 1 {
 			return nil, nil, fmt.Errorf("mesh_decimation_ratios[%d] must be in [0, 1], got %f", i, r)
 		}
+	}
+
+	if err := cfg.ManualMode.Validate(); err != nil {
+		return nil, nil, err
 	}
 
 	deps := []string{}
