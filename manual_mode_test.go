@@ -70,7 +70,47 @@ func TestManualStep_ClampsToLimit(t *testing.T) {
 	p := manualParams{deadband: 10, gain: 50, biasAlpha: 0.5, dt: 0.02}
 	st := jointState{bias: 40, goal: 0.95}
 	out := manualStep(st, 200 /*big push up*/, [2]float64{-1, 1}, p)
-	if out.goal > 1.0+1e-9 {
+	if !approx(out.goal, 1.0) {
 		t.Fatalf("goal must be clamped to 1.0, got %v", out.goal)
+	}
+}
+
+// A large negative push against a joint near its lower limit clamps to the lower limit.
+func TestManualStep_LowerBoundClamp(t *testing.T) {
+	p := manualParams{deadband: 10, gain: 50, biasAlpha: 0.5, dt: 0.02}
+	st := jointState{bias: 40, goal: -0.95}
+	out := manualStep(st, -160 /*big push down, excess=-200*/, [2]float64{-1, 1}, p)
+	if !approx(out.goal, -1.0) {
+		t.Fatalf("goal must be clamped to -1.0, got %v", out.goal)
+	}
+}
+
+// Goal already at the limit, push further into the wall: no movement, so the caller skips the write.
+func TestManualStep_ClampSaturationNotMoved(t *testing.T) {
+	p := manualParams{deadband: 10, gain: 50, biasAlpha: 0.5, dt: 0.02}
+	st := jointState{bias: 40, goal: 1.0}
+	out := manualStep(st, 200 /*big push up into the wall*/, [2]float64{-1, 1}, p)
+	if out.moved {
+		t.Fatal("moved must be false when already saturated at the limit")
+	}
+	if !approx(out.goal, 1.0) {
+		t.Fatalf("goal must stay at 1.0, got %v", out.goal)
+	}
+}
+
+// Exactly at the deadband edge: takes the push branch (rest guard is strict <), drive==0,
+// so goal does not move, moved is false, and bias is frozen (NOT low-pass tracked).
+func TestManualStep_ExactlyAtDeadband(t *testing.T) {
+	p := manualParams{deadband: 10, gain: 0.5, biasAlpha: 0.5, dt: 0.02}
+	st := jointState{bias: 40, goal: 0.3}
+	out := manualStep(st, 50 /*excess exactly +10 == deadband*/, [2]float64{-3, 3}, p)
+	if out.moved {
+		t.Fatal("moved must be false when drive is exactly zero at the deadband edge")
+	}
+	if !approx(out.goal, 0.3) {
+		t.Fatalf("goal must not move at the deadband edge, got %v", out.goal)
+	}
+	if !approx(out.bias, 40) {
+		t.Fatalf("bias must be frozen (not tracked) in the push branch, got %v", out.bias)
 	}
 }
