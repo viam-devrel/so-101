@@ -243,3 +243,30 @@ func TestManualSession_Status(t *testing.T) {
 		t.Fatalf("expected 2 joint status entries, got %d", len(joints))
 	}
 }
+
+// statusJoints() reports the last-observed present load per joint, even when the
+// joint stays at rest (deadband high enough that it never moves).
+func TestManualSession_StatusReportsLoad(t *testing.T) {
+	io := newFakeIO()
+	io.mu.Lock()
+	io.loads[1] = 30
+	io.mu.Unlock()
+	p := manualParams{deadband: 1000, gain: 1, biasAlpha: 0.1, dt: 0.02} // huge deadband: joint stays at rest, no motion
+	sess := newManualSession(context.Background(), io, p, 0, logging.NewTestLogger(t))
+	sess.start()
+	time.Sleep(60 * time.Millisecond)
+	joints := sess.statusJoints()
+	sess.stop()
+	var found bool
+	for _, j := range joints {
+		if j.Servo == 1 {
+			found = true
+			if j.Load != 30 {
+				t.Fatalf("expected load 30 for servo 1, got %d", j.Load)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("servo 1 not in status")
+	}
+}

@@ -22,6 +22,7 @@ type manualParams struct {
 type jointState struct {
 	bias float64 // filtered steady holding load at rest
 	goal float64 // commanded position, radians
+	load float64 // last-observed present load (for status telemetry only)
 }
 
 // stepResult is the outcome of one control step for one joint.
@@ -169,7 +170,7 @@ func (m *manualSession) tick() error {
 			lim = [2]float64{-3.14159265, 3.14159265}
 		}
 		res := manualStep(st, float64(loads[id]), lim, m.params)
-		m.state[id] = jointState{bias: res.bias, goal: res.goal}
+		m.state[id] = jointState{bias: res.bias, goal: res.goal, load: float64(loads[id])}
 		if res.moved {
 			goals[id] = res.goal
 		}
@@ -196,7 +197,7 @@ func (m *manualSession) statusJoints() []manualJointStatus {
 	out := make([]manualJointStatus, 0, len(m.state))
 	for _, id := range m.io.servoIDs() {
 		st := m.state[id]
-		out = append(out, manualJointStatus{Servo: id, Bias: st.bias, Goal: st.goal})
+		out = append(out, manualJointStatus{Servo: id, Load: int(st.load), Bias: st.bias, Goal: st.goal})
 	}
 	return out
 }
