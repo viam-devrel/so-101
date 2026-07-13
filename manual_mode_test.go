@@ -12,119 +12,69 @@ import (
 
 func approx(a, b float64) bool { return math.Abs(a-b) < 1e-9 }
 
-// At rest (load == bias), goal must not move and bias must not drift.
-func TestManualStep_AtRestHolds(t *testing.T) {
-	p := manualParams{deadband: 10, gain: 0.5, biasAlpha: 0.1, dt: 0.02}
-	st := jointState{bias: 40, goal: 0.3}
-	out := manualStep(st, 40 /*load*/, [2]float64{-3, 3}, p)
-	if !approx(out.goal, 0.3) {
-		t.Fatalf("goal moved at rest: %v", out.goal)
-	}
-	if !approx(out.bias, 40) {
-		t.Fatalf("bias drifted at rest: %v", out.bias)
-	}
-	if out.moved {
-		t.Fatal("moved should be false at rest")
+func TestManualStep_AtGoalHolds(t *testing.T) {
+	p := manualParams{posDeadband: 0.05, dt: 0.02}
+	ng, moved := manualStep(0.3, 0.3, [2]float64{-3, 3}, p)
+	if moved || !approx(ng, 0.3) {
+		t.Fatalf("at goal must hold: ng=%v moved=%v", ng, moved)
 	}
 }
 
-// Load within deadband of bias: no motion, but bias tracks toward load.
-func TestManualStep_WithinDeadbandTracksBias(t *testing.T) {
-	p := manualParams{deadband: 10, gain: 0.5, biasAlpha: 0.5, dt: 0.02}
-	st := jointState{bias: 40, goal: 0.3}
-	out := manualStep(st, 45 /*load, excess=5 < 10*/, [2]float64{-3, 3}, p)
-	if out.moved {
-		t.Fatal("should not move within deadband")
-	}
-	// bias += 0.5*(45-40) = 42.5
-	if !approx(out.bias, 42.5) {
-		t.Fatalf("bias should track to 42.5, got %v", out.bias)
+func TestManualStep_WithinDeadbandHolds(t *testing.T) {
+	p := manualParams{posDeadband: 0.05, dt: 0.02}
+	ng, moved := manualStep(0.3, 0.33, [2]float64{-3, 3}, p) // dev 0.03 < 0.05
+	if moved || !approx(ng, 0.3) {
+		t.Fatalf("within deadband must hold: ng=%v moved=%v", ng, moved)
 	}
 }
 
-// Push beyond deadband moves goal in push direction; bias is frozen while moving.
-func TestManualStep_PushMovesGoalAndFreezesBias(t *testing.T) {
-	p := manualParams{deadband: 10, gain: 0.5, biasAlpha: 0.5, dt: 0.02}
-	st := jointState{bias: 40, goal: 0.3}
-	out := manualStep(st, 60 /*load, excess=20*/, [2]float64{-3, 3}, p)
-	// goal += gain * (excess - deadband) * dt = 0.5 * (20-10) * 0.02 = 0.1
-	if !approx(out.goal, 0.4) {
-		t.Fatalf("goal should move to 0.4, got %v", out.goal)
-	}
-	if !approx(out.bias, 40) {
-		t.Fatalf("bias must be frozen while pushing, got %v", out.bias)
-	}
-	if !out.moved {
-		t.Fatal("moved should be true")
+func TestManualStep_PushPositiveFollows(t *testing.T) {
+	p := manualParams{posDeadband: 0.05, dt: 0.02}
+	ng, moved := manualStep(0.3, 0.5, [2]float64{-3, 3}, p) // dev 0.2 > 0.05
+	if !moved || !approx(ng, 0.45) {                        // 0.5 - 0.05
+		t.Fatalf("positive push must follow to 0.45: ng=%v moved=%v", ng, moved)
 	}
 }
 
-// Negative push moves goal negative.
-func TestManualStep_NegativePush(t *testing.T) {
-	p := manualParams{deadband: 10, gain: 0.5, biasAlpha: 0.5, dt: 0.02}
-	st := jointState{bias: 40, goal: 0.3}
-	out := manualStep(st, 20 /*excess=-20*/, [2]float64{-3, 3}, p)
-	// goal += 0.5 * (-20 - (-10)) * 0.02 = -0.1
-	if !approx(out.goal, 0.2) {
-		t.Fatalf("goal should move to 0.2, got %v", out.goal)
+func TestManualStep_PushNegativeFollows(t *testing.T) {
+	p := manualParams{posDeadband: 0.05, dt: 0.02}
+	ng, moved := manualStep(0.3, 0.1, [2]float64{-3, 3}, p) // dev -0.2
+	if !moved || !approx(ng, 0.15) {                        // 0.1 + 0.05
+		t.Fatalf("negative push must follow to 0.15: ng=%v moved=%v", ng, moved)
 	}
 }
 
-// Goal is clamped to joint limits (soft wall).
-func TestManualStep_ClampsToLimit(t *testing.T) {
-	p := manualParams{deadband: 10, gain: 50, biasAlpha: 0.5, dt: 0.02}
-	st := jointState{bias: 40, goal: 0.95}
-	out := manualStep(st, 200 /*big push up*/, [2]float64{-1, 1}, p)
-	if !approx(out.goal, 1.0) {
-		t.Fatalf("goal must be clamped to 1.0, got %v", out.goal)
+func TestManualStep_ExactlyAtDeadbandHolds(t *testing.T) {
+	p := manualParams{posDeadband: 0.05, dt: 0.02}
+	ng, moved := manualStep(0.3, 0.35, [2]float64{-3, 3}, p) // dev exactly 0.05, strict > => hold
+	if moved || !approx(ng, 0.3) {
+		t.Fatalf("exactly at deadband must hold: ng=%v moved=%v", ng, moved)
 	}
 }
 
-// A large negative push against a joint near its lower limit clamps to the lower limit.
-func TestManualStep_LowerBoundClamp(t *testing.T) {
-	p := manualParams{deadband: 10, gain: 50, biasAlpha: 0.5, dt: 0.02}
-	st := jointState{bias: 40, goal: -0.95}
-	out := manualStep(st, -160 /*big push down, excess=-200*/, [2]float64{-1, 1}, p)
-	if !approx(out.goal, -1.0) {
-		t.Fatalf("goal must be clamped to -1.0, got %v", out.goal)
+func TestManualStep_ClampUpper(t *testing.T) {
+	p := manualParams{posDeadband: 0.05, dt: 0.02}
+	ng, moved := manualStep(0.95, 1.5, [2]float64{-1, 1}, p) // would follow to 1.45, clamp to 1.0
+	if !moved || !approx(ng, 1.0) {
+		t.Fatalf("must clamp to upper limit 1.0: ng=%v moved=%v", ng, moved)
 	}
 }
 
-// Goal already at the limit, push further into the wall: no movement, so the caller skips the write.
-func TestManualStep_ClampSaturationNotMoved(t *testing.T) {
-	p := manualParams{deadband: 10, gain: 50, biasAlpha: 0.5, dt: 0.02}
-	st := jointState{bias: 40, goal: 1.0}
-	out := manualStep(st, 200 /*big push up into the wall*/, [2]float64{-1, 1}, p)
-	if out.moved {
-		t.Fatal("moved must be false when already saturated at the limit")
-	}
-	if !approx(out.goal, 1.0) {
-		t.Fatalf("goal must stay at 1.0, got %v", out.goal)
+func TestManualStep_ClampLower(t *testing.T) {
+	p := manualParams{posDeadband: 0.05, dt: 0.02}
+	ng, moved := manualStep(-0.95, -1.5, [2]float64{-1, 1}, p) // would follow to -1.45, clamp to -1.0
+	if !moved || !approx(ng, -1.0) {
+		t.Fatalf("must clamp to lower limit -1.0: ng=%v moved=%v", ng, moved)
 	}
 }
 
-// Exactly at the deadband edge: takes the push branch (rest guard is strict <), drive==0,
-// so goal does not move, moved is false, and bias is frozen (NOT low-pass tracked).
-func TestManualStep_ExactlyAtDeadband(t *testing.T) {
-	p := manualParams{deadband: 10, gain: 0.5, biasAlpha: 0.5, dt: 0.02}
-	st := jointState{bias: 40, goal: 0.3}
-	out := manualStep(st, 50 /*excess exactly +10 == deadband*/, [2]float64{-3, 3}, p)
-	if out.moved {
-		t.Fatal("moved must be false when drive is exactly zero at the deadband edge")
-	}
-	if !approx(out.goal, 0.3) {
-		t.Fatalf("goal must not move at the deadband edge, got %v", out.goal)
-	}
-	if !approx(out.bias, 40) {
-		t.Fatalf("bias must be frozen (not tracked) in the push branch, got %v", out.bias)
-	}
-}
-
-// fakeIO records writes and lets a test drive loads.
+// fakeIO records writes and lets a test drive loads and a persistent "held" position
+// that simulates an operator backdriving a joint (writeGoals cannot erase it).
 type fakeIO struct {
 	mu        sync.Mutex
 	ids       []int
 	pos       map[int]float64
+	held      map[int]float64
 	loads     map[int]int
 	limits    map[int][2]float64
 	pgainSet  map[int]int
@@ -137,8 +87,12 @@ func (f *fakeIO) positions(ctx context.Context) (map[int]float64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	cp := map[int]float64{}
-	for k, v := range f.pos {
-		cp[k] = v
+	for _, id := range f.ids {
+		if h, ok := f.held[id]; ok {
+			cp[id] = h
+		} else {
+			cp[id] = f.pos[id]
+		}
 	}
 	return cp, nil
 }
@@ -181,6 +135,7 @@ func newFakeIO() *fakeIO {
 	return &fakeIO{
 		ids:    []int{1, 2},
 		pos:    map[int]float64{1: 0, 2: 0},
+		held:   map[int]float64{},
 		loads:  map[int]int{1: 0, 2: 0},
 		limits: map[int][2]float64{1: {-3, 3}, 2: {-3, 3}},
 	}
@@ -189,7 +144,7 @@ func newFakeIO() *fakeIO {
 // Enter starts the loop; exit tears it down and restores pgain.
 func TestManualSession_EnterExit(t *testing.T) {
 	io := newFakeIO()
-	p := manualParams{deadband: 5, gain: 1, biasAlpha: 0.1, dt: 0.02}
+	p := manualParams{posDeadband: 0.05, dt: 0.02}
 	sess := newManualSession(context.Background(), io, p, 12, logging.NewTestLogger(t))
 	sess.start()
 	if !sess.running() {
@@ -209,36 +164,37 @@ func TestManualSession_EnterExit(t *testing.T) {
 	}
 }
 
-// A sustained push should drive the goal (and thus written position) in that direction.
-func TestManualSession_PushDrivesGoal(t *testing.T) {
-	io := newFakeIO() // loads start at 0 -> bias seeds to 0
-	p := manualParams{deadband: 5, gain: 1, biasAlpha: 0.02, dt: 0.02}
+// A sustained backdrive should pull the goal (and thus written position) toward the hand,
+// trailing by the deadband.
+func TestManualSession_BackdriveFollowsGoal(t *testing.T) {
+	io := newFakeIO()
+	p := manualParams{posDeadband: 0.05, dt: 0.02}
 	sess := newManualSession(context.Background(), io, p, 0, logging.NewTestLogger(t))
-	sess.start()
+	sess.start() // goals seeded to pos = 0
 	io.mu.Lock()
-	io.loads[1] = 100 // operator now pushes joint 1
+	io.held[1] = 0.5 // operator backdrives joint 1 to 0.5 and holds it there
 	io.mu.Unlock()
 	time.Sleep(150 * time.Millisecond)
 	sess.stop()
 	io.mu.Lock()
 	defer io.mu.Unlock()
-	if io.pos[1] <= 0 {
-		t.Fatalf("joint 1 goal should have advanced under push, got %v", io.pos[1])
+	if io.pos[1] <= 0.4 { // goal should have followed toward held - deadband (0.45)
+		t.Fatalf("joint 1 goal should follow the backdrive, got %v", io.pos[1])
 	}
-	if io.pos[2] != 0 {
-		t.Fatalf("joint 2 (no push) should not move, got %v", io.pos[2])
+	if io.pos[2] != 0 { // untouched joint holds
+		t.Fatalf("joint 2 should not move, got %v", io.pos[2])
 	}
 }
 
-// A joint under steady gravity-holding load already present at entry must not drift:
-// bias should seed to that load so excess ~ 0 (rest branch), not drive the goal.
-func TestManualSession_EnterWhileLoadedHolds(t *testing.T) {
+// A load present at entry with no position backdrive must not cause any motion (load is
+// telemetry only, not part of the control law).
+func TestManualSession_EnterHoldsWithoutBackdrive(t *testing.T) {
 	io := newFakeIO()
 	io.mu.Lock()
-	io.loads[1] = 100 // gravity-holding load present at entry, >> deadband
-	io.pos[1] = 0.5   // some starting pose
+	io.loads[1] = 100 // gravity-holding load present at entry
+	io.pos[1] = 0.5
 	io.mu.Unlock()
-	p := manualParams{deadband: 40, gain: 1, biasAlpha: 0.05, dt: 0.02}
+	p := manualParams{posDeadband: 0.05, dt: 0.02}
 	sess := newManualSession(context.Background(), io, p, 0, logging.NewTestLogger(t))
 	sess.start()
 	time.Sleep(120 * time.Millisecond)
@@ -246,14 +202,14 @@ func TestManualSession_EnterWhileLoadedHolds(t *testing.T) {
 	io.mu.Lock()
 	defer io.mu.Unlock()
 	if io.pos[1] != 0.5 {
-		t.Fatalf("gravity-loaded joint must not drift on entry, moved to %v", io.pos[1])
+		t.Fatalf("joint must not move without a position backdrive, got %v", io.pos[1])
 	}
 }
 
 // status() returns per-joint telemetry while running.
 func TestManualSession_Status(t *testing.T) {
 	io := newFakeIO()
-	p := manualParams{deadband: 5, gain: 1, biasAlpha: 0.1, dt: 0.02}
+	p := manualParams{posDeadband: 0.05, dt: 0.02}
 	sess := newManualSession(context.Background(), io, p, 0, logging.NewTestLogger(t))
 	sess.start()
 	time.Sleep(50 * time.Millisecond)
@@ -264,14 +220,14 @@ func TestManualSession_Status(t *testing.T) {
 	}
 }
 
-// statusJoints() reports the last-observed present load per joint, even when the
-// joint stays at rest (deadband high enough that it never moves).
+// statusJoints() reports the last-observed present load per joint (telemetry only), even
+// when the joint stays put because it was never backdriven.
 func TestManualSession_StatusReportsLoad(t *testing.T) {
 	io := newFakeIO()
 	io.mu.Lock()
-	io.loads[1] = 30
+	io.loads[1] = 30 // present load, but no position backdrive
 	io.mu.Unlock()
-	p := manualParams{deadband: 1000, gain: 1, biasAlpha: 0.1, dt: 0.02} // huge deadband: joint stays at rest, no motion
+	p := manualParams{posDeadband: 0.05, dt: 0.02}
 	sess := newManualSession(context.Background(), io, p, 0, logging.NewTestLogger(t))
 	sess.start()
 	time.Sleep(60 * time.Millisecond)
@@ -288,5 +244,10 @@ func TestManualSession_StatusReportsLoad(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("servo 1 not in status")
+	}
+	io.mu.Lock()
+	defer io.mu.Unlock()
+	if io.pos[1] != 0 {
+		t.Fatalf("joint with load but no backdrive must not move, got %v", io.pos[1])
 	}
 }

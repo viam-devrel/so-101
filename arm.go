@@ -106,11 +106,9 @@ type SO101ArmConfig struct {
 // ManualModeConfig tunes hand-guided ("manual") mode. All fields optional;
 // zero means "use the built-in default". See manualDefaults().
 type ManualModeConfig struct {
-	Deadband  float64 `json:"deadband,omitempty"`   // load units; push must exceed this to move a joint
-	Gain      float64 `json:"gain,omitempty"`       // admittance: radians per (load-unit * second)
-	BiasAlpha float64 `json:"bias_alpha,omitempty"` // 0..1 low-pass factor for the at-rest load bias
-	LoopHz    float64 `json:"loop_hz,omitempty"`    // control loop rate
-	PGain     int     `json:"p_gain,omitempty"`     // optional reduced position P gain during manual mode (0 = leave unchanged)
+	PosDeadbandDeg float64 `json:"pos_deadband_deg,omitempty"` // backdrive distance (deg) before the goal follows the hand
+	LoopHz         float64 `json:"loop_hz,omitempty"`          // control loop rate (Hz)
+	PGain          int     `json:"p_gain,omitempty"`           // optional reduced servo P-gain during manual mode (0 = unchanged)
 }
 
 // Validate ensures the manual mode config's fields are within acceptable ranges.
@@ -118,14 +116,8 @@ func (m *ManualModeConfig) Validate() error {
 	if m == nil {
 		return nil
 	}
-	if m.Deadband < 0 {
-		return fmt.Errorf("manual_mode.deadband must be >= 0, got %v", m.Deadband)
-	}
-	if m.Gain < 0 {
-		return fmt.Errorf("manual_mode.gain must be >= 0, got %v", m.Gain)
-	}
-	if m.BiasAlpha < 0 || m.BiasAlpha > 1 {
-		return fmt.Errorf("manual_mode.bias_alpha must be in [0,1], got %v", m.BiasAlpha)
+	if m.PosDeadbandDeg < 0 || m.PosDeadbandDeg > 45 {
+		return fmt.Errorf("manual_mode.pos_deadband_deg must be in [0,45], got %v", m.PosDeadbandDeg)
 	}
 	if m.LoopHz < 0 || m.LoopHz > 200 {
 		return fmt.Errorf("manual_mode.loop_hz must be in [0,200], got %v", m.LoopHz)
@@ -748,10 +740,11 @@ func (s *so101) Status(ctx context.Context) (map[string]interface{}, error) {
 		joints := make([]interface{}, 0, len(js))
 		for _, j := range js {
 			joints = append(joints, map[string]interface{}{
-				"servo": j.Servo,
-				"load":  j.Load,
-				"bias":  j.Bias,
-				"goal":  j.Goal,
+				"servo":      j.Servo,
+				"actual_deg": j.ActualDeg,
+				"goal_deg":   j.GoalDeg,
+				"dev_deg":    j.DevDeg,
+				"load":       j.Load,
 			})
 		}
 		return map[string]interface{}{

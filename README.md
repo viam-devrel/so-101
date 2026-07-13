@@ -103,26 +103,22 @@ The hardware arm enforces a real per-joint speed cap on the Feetech servos: each
 
 ### Manual Mode
 
-Manual mode is a live jog-by-hand mode. While active, a background admittance-control loop keeps the arm servos in position mode — so the arm holds against gravity and never goes limp — but lets a joint follow the operator's hand once they push past a small per-joint load deadband; when released, the joint holds its new pose. Torque is never fully disabled.
+Manual mode is a live jog-by-hand mode using position-deviation admittance. While active, a background control loop keeps each arm servo in position mode holding a goal — so the arm holds against gravity and never goes limp. When you backdrive a joint past a small angular deadband, the goal follows your hand, trailing by the deadband (which leaves a small restoring force so the joint still holds against gravity); when released, the joint holds its new pose. Torque is never fully disabled. The servo's `present_load` register is not used for control — it saturates on the gentlest push and doesn't encode push direction — and is reported only as telemetry.
 
 Manual mode is entered and exited with the `enter_manual_mode` / `exit_manual_mode` DoCommands (see below) and is tuned with the optional `manual_mode` config object:
 
-| Name         | Type    | Inclusion | Description                                                                                                                                                   |
-| ------------ | ------- | --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `deadband`   | float   | Optional  | Load excess (above the tracked gravity-hold bias) a joint must feel before it follows the hand. Higher = stiffer/less sensitive, and also raises the noise floor. Default `40`. |
-| `gain`       | float   | Optional  | Admittance gain — how fast a joint follows a push, in radians per load-unit·second. Higher = moves more eagerly. Default `0.4`.                                |
-| `bias_alpha` | float   | Optional  | Low-pass factor (`0`-`1`) for tracking each joint's steady gravity-holding load while at rest. Default `0.05`.                                                  |
-| `loop_hz`    | float   | Optional  | Control loop rate, in Hz. Valid range 0-200 (`0` uses the default). Default `50`.                                                                               |
-| `p_gain`     | int     | Optional  | Reduced servo position P-gain applied during manual mode. `0` leaves the servo's configured stiffness unchanged (the default); valid range 0-255. Lower = lighter in-deadband resistance but a softer gravity hold. |
+| Name               | Type    | Inclusion | Description                                                                                                                                                   |
+| ------------------ | ------- | --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pos_deadband_deg` | float   | Optional  | Degrees a joint must be backdriven from its goal before the goal follows your hand. Higher = stiffer/less sensitive. Valid range 0-45. Default `2`. |
+| `loop_hz`          | float   | Optional  | Control loop rate, in Hz. Valid range 0-200 (`0` uses the default). Default `50`.                                                                               |
+| `p_gain`           | int     | Optional  | Reduced servo position P-gain applied during manual mode. `0` leaves the servo's configured stiffness unchanged (the default); valid range 0-255. Lower = easier to backdrive/lighter feel, but must stay high enough to hold gravity. |
 
 All fields are optional; a zero/omitted value falls back to the built-in default.
 
 ```json
 {
   "manual_mode": {
-    "deadband": 40,
-    "gain": 0.4,
-    "bias_alpha": 0.05,
+    "pos_deadband_deg": 2,
     "loop_hz": 50
   }
 }
@@ -136,13 +132,13 @@ The arm's `GetStatus`/`Status` reports the current mode. Normally:
 { "mode": "auto" }
 ```
 
-While manual mode is active, it also reports live per-joint telemetry (`load`, `bias`, and `goal`), which is useful for tuning `deadband`/`gain`:
+While manual mode is active, it also reports live per-joint telemetry (`actual_deg`, `goal_deg`, `dev_deg`, and `load`), which is useful for tuning `pos_deadband_deg`. `load` is telemetry only and is not used for control:
 
 ```json
 {
   "mode": "manual",
   "manual_mode": {
-    "joints": [{ "servo": 1, "load": 0, "bias": 38.2, "goal": 0.12 }]
+    "joints": [{ "servo": 1, "actual_deg": 12.3, "goal_deg": 10.3, "dev_deg": 2.0, "load": 0 }]
   }
 }
 ```
@@ -281,10 +277,10 @@ Retrieve current calibration data:
 
 #### Enter Manual Mode
 
-Enter [manual (hand-guided) mode](#manual-mode). Accepts the same tuning keys as the `manual_mode` config object (`deadband`, `gain`, `bias_alpha`, `loop_hz`, `p_gain`) inline as optional overrides, which layer on top of the configured `manual_mode` values. Calling this while already in manual mode is a no-op that returns the current status.
+Enter [manual (hand-guided) mode](#manual-mode). Accepts the same tuning keys as the `manual_mode` config object (`pos_deadband_deg`, `loop_hz`, `p_gain`) inline as optional overrides, which layer on top of the configured `manual_mode` values. Calling this while already in manual mode is a no-op that returns the current status.
 
 ```json
-{ "command": "enter_manual_mode", "gain": 0.6 }
+{ "command": "enter_manual_mode", "pos_deadband_deg": 3 }
 ```
 
 Response:

@@ -10,43 +10,38 @@ import (
 	"go.viam.com/rdk/logging"
 )
 
-// manualParams are the loop tuning constants (already resolved from config+defaults).
+// manualParams are the resolved loop tuning constants.
 type manualParams struct {
-	deadband  float64 // load excess (above bias) required before a joint follows the hand
-	gain      float64 // radians per (load-unit * second)
-	biasAlpha float64 // 0..1 low-pass factor for at-rest bias tracking
-	dt        float64 // seconds per tick (1/loopHz)
+	posDeadband float64 // radians; how far a joint must be backdriven from its goal before the goal follows
+	dt          float64 // seconds per tick (loop rate)
 }
 
 // jointState is the per-joint state carried between ticks.
 type jointState struct {
-	bias float64 // filtered steady holding load at rest
-	goal float64 // commanded position, radians
-	load float64 // last-observed present load (for status telemetry only)
+	goal   float64 // commanded position, radians
+	actual float64 // last observed actual position, radians (telemetry)
+	load   float64 // last observed present load (telemetry only)
 }
 
-// stepResult is the outcome of one control step for one joint.
-type stepResult struct {
-	bias  float64
-	goal  float64
-	moved bool // true if goal changed this tick (caller should write it)
-}
-
-// manualStep runs one admittance step for a single joint.
-// load is the present load (signed). limit is [min,max] radians.
-func manualStep(st jointState, load float64, limit [2]float64, p manualParams) stepResult {
-	excess := load - st.bias
-	if math.Abs(excess) < p.deadband {
-		// At rest: hold goal, let bias track toward the current load.
-		newBias := st.bias + p.biasAlpha*(load-st.bias)
-		return stepResult{bias: newBias, goal: st.goal, moved: false}
+// manualStep runs one position-deviation admittance step for a single joint. The servo
+// holds `goal`; when the joint is backdriven past posDeadband, the goal follows the hand,
+// trailing by the deadband (which leaves a small restoring force so the joint holds against
+// gravity). Returns the new goal (clamped to limit) and whether it changed.
+func manualStep(goal, actual float64, limit [2]float64, p manualParams) (newGoal float64, moved bool) {
+	dev := actual - goal
+	ng := goal
+	if dev > p.posDeadband {
+		ng = actual - p.posDeadband
+	} else if dev < -p.posDeadband {
+		ng = actual + p.posDeadband
 	}
-	// Pushing: move goal past the deadband edge, freeze bias.
-	drive := excess - math.Copysign(p.deadband, excess)
-	newGoal := st.goal + p.gain*drive*p.dt
-	newGoal = math.Max(limit[0], math.Min(limit[1], newGoal))
-	moved := newGoal != st.goal
-	return stepResult{bias: st.bias, goal: newGoal, moved: moved}
+	if ng < limit[0] {
+		ng = limit[0]
+	}
+	if ng > limit[1] {
+		ng = limit[1]
+	}
+	return ng, ng != goal
 }
 
 // manualIO is the seam between the manual-mode loop and the hardware controller.
@@ -96,18 +91,10 @@ func (m *manualSession) start() {
 		m.logger.Warnf("manual mode: failed to read start positions: %v", err)
 		pos = map[int]float64{}
 	}
-	loads, lerr := m.io.loadsFor(m.ctx)
-	if lerr != nil {
-		m.logger.Warnf("manual mode: failed to read start loads: %v", lerr)
-		loads = map[int]int{}
-	}
 	m.mu.Lock()
 	for _, id := range m.io.servoIDs() {
-		l := float64(loads[id])
-		// Seed bias to the current (gravity) holding load so entry reads as "at rest"
-		// (excess ~ 0) rather than a push — otherwise a gravity-loaded joint would
-		// immediately drive its own goal.
-		m.state[id] = jointState{bias: l, goal: pos[id], load: l}
+		p := pos[id]
+		m.state[id] = jointState{goal: p, actual: p}
 	}
 	m.run = true
 	m.mu.Unlock()
@@ -165,10 +152,11 @@ func (m *manualSession) loop() {
 }
 
 func (m *manualSession) tick() error {
-	loads, err := m.io.loadsFor(m.ctx)
+	pos, err := m.io.positions(m.ctx)
 	if err != nil {
 		return err
 	}
+	loads, _ := m.io.loadsFor(m.ctx) // telemetry only; a load read failure must not stop control
 	limits := m.io.limitsFor()
 
 	goals := map[int]float64{}
@@ -176,12 +164,18 @@ func (m *manualSession) tick() error {
 	for id, st := range m.state {
 		lim, ok := limits[id]
 		if !ok {
-			lim = [2]float64{-3.14159265, 3.14159265}
+			lim = [2]float64{-math.Pi, math.Pi}
 		}
-		res := manualStep(st, float64(loads[id]), lim, m.params)
-		m.state[id] = jointState{bias: res.bias, goal: res.goal, load: float64(loads[id])}
-		if res.moved {
-			goals[id] = res.goal
+		actual := pos[id]
+		ng, moved := manualStep(st.goal, actual, lim, m.params)
+		st.goal = ng
+		st.actual = actual
+		if loads != nil {
+			st.load = float64(loads[id])
+		}
+		m.state[id] = st
+		if moved {
+			goals[id] = ng
 		}
 	}
 	m.mu.Unlock()
@@ -194,19 +188,27 @@ func (m *manualSession) tick() error {
 
 // manualJointStatus is one joint's live telemetry for Status().
 type manualJointStatus struct {
-	Servo int     `json:"servo"`
-	Load  int     `json:"load"`
-	Bias  float64 `json:"bias"`
-	Goal  float64 `json:"goal"`
+	Servo     int     `json:"servo"`
+	ActualDeg float64 `json:"actual_deg"`
+	GoalDeg   float64 `json:"goal_deg"`
+	DevDeg    float64 `json:"dev_deg"`
+	Load      int     `json:"load"`
 }
 
 func (m *manualSession) statusJoints() []manualJointStatus {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	const rad2deg = 180.0 / math.Pi
 	out := make([]manualJointStatus, 0, len(m.state))
 	for _, id := range m.io.servoIDs() {
 		st := m.state[id]
-		out = append(out, manualJointStatus{Servo: id, Load: int(st.load), Bias: st.bias, Goal: st.goal})
+		out = append(out, manualJointStatus{
+			Servo:     id,
+			ActualDeg: st.actual * rad2deg,
+			GoalDeg:   st.goal * rad2deg,
+			DevDeg:    (st.actual - st.goal) * rad2deg,
+			Load:      int(st.load),
+		})
 	}
 	return out
 }
@@ -297,7 +299,7 @@ func (a *controllerManualIO) restorePGain(ctx context.Context) error {
 
 // manualDefaults returns the built-in tuning; conservative for a stable first bring-up.
 func manualDefaults() manualParams {
-	return manualParams{deadband: 40, gain: 0.4, biasAlpha: 0.05, dt: 1.0 / 50.0}
+	return manualParams{posDeadband: 2.0 * math.Pi / 180.0, dt: 1.0 / 50.0} // 2° deadband, 50 Hz
 }
 
 // resolveManualParams merges config + inline overrides over defaults.
@@ -306,14 +308,8 @@ func resolveManualParams(cfg *ManualModeConfig, overrides map[string]interface{}
 	p := manualDefaults()
 	pgain := 0
 	if cfg != nil {
-		if cfg.Deadband > 0 {
-			p.deadband = cfg.Deadband
-		}
-		if cfg.Gain > 0 {
-			p.gain = cfg.Gain
-		}
-		if cfg.BiasAlpha > 0 {
-			p.biasAlpha = cfg.BiasAlpha
+		if cfg.PosDeadbandDeg > 0 {
+			p.posDeadband = cfg.PosDeadbandDeg * math.Pi / 180.0
 		}
 		if cfg.LoopHz > 0 {
 			p.dt = 1.0 / cfg.LoopHz
@@ -322,14 +318,8 @@ func resolveManualParams(cfg *ManualModeConfig, overrides map[string]interface{}
 			pgain = cfg.PGain
 		}
 	}
-	if v, ok := overrides["deadband"].(float64); ok && v >= 0 {
-		p.deadband = v
-	}
-	if v, ok := overrides["gain"].(float64); ok && v >= 0 {
-		p.gain = v
-	}
-	if v, ok := overrides["bias_alpha"].(float64); ok && v >= 0 && v <= 1 {
-		p.biasAlpha = v
+	if v, ok := overrides["pos_deadband_deg"].(float64); ok && v > 0 {
+		p.posDeadband = v * math.Pi / 180.0
 	}
 	if v, ok := overrides["loop_hz"].(float64); ok && v > 0 {
 		p.dt = 1.0 / v
