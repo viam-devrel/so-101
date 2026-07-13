@@ -109,21 +109,27 @@ func (m *manualSession) start() {
 	go m.loop()
 }
 
-// stop cancels the loop, waits for it to exit, and restores stiffness.
+// stop cancels the loop and waits for it to exit; the loop's deferred cleanup
+// restores stiffness and flips running() to false (single cleanup owner).
 func (m *manualSession) stop() {
 	m.cancel()
 	<-m.done
-	if err := m.io.restorePGain(context.Background()); err != nil {
-		m.logger.Warnf("manual mode: failed to restore p_gain: %v", err)
-	}
-	m.mu.Lock()
-	m.run = false
-	m.mu.Unlock()
 }
 
 func (m *manualSession) loop() {
-	defer close(m.done)
+	defer func() {
+		if err := m.io.restorePGain(context.Background()); err != nil {
+			m.logger.Warnf("manual mode: failed to restore p_gain: %v", err)
+		}
+		m.mu.Lock()
+		m.run = false
+		m.mu.Unlock()
+		close(m.done)
+	}()
 	interval := time.Duration(m.params.dt * float64(time.Second))
+	if interval <= 0 {
+		interval = 20 * time.Millisecond
+	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
