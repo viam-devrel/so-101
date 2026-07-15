@@ -350,7 +350,7 @@ func TestBuildMoveDestinationMetricTypePath(t *testing.T) {
 		map[string]interface{}{"goal_metric_type": "position_only"})
 	require.NoError(t, err)
 	assert.Equal(t, pathMetricType, path)
-	assert.Nil(t, dest.GoalCloud, "no cloud: position_only sets orientScale=0, making a cloud meaningless")
+	assert.Nil(t, dest.GoalCloud, "no cloud: position_only sets orientScale=0, so a cloud's orientation leeways would stop mattering")
 	assert.Equal(t, "position_only", planExtra["goal_metric_type"], "the caller's metric is forwarded")
 }
 

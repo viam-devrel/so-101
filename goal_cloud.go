@@ -215,9 +215,8 @@ func buildMoveDestination(originFrame string, pose spatialmath.Pose, cfg goalClo
 
 	if hasCloud && hasMetric {
 		return nil, nil, pathInvalid, fmt.Errorf(
-			"extra cannot contain both %q and %q (got %s=%v): a goal cloud only matters when the "+
-				"planner scores orientation, and %s=\"position_only\" sets orientScale=0, which "+
-				"would make the cloud meaningless. Pass one or the other",
+			"extra cannot contain both %q and %q (got %s=%v): %s=\"position_only\" sets "+
+				"orientScale=0, so the cone's orientation leeways stop mattering. Pass one or the other",
 			extraKeyPoseCloud, extraKeyGoalMetricType, extraKeyGoalMetricType,
 			extra[extraKeyGoalMetricType], extraKeyGoalMetricType)
 	}
@@ -233,7 +232,7 @@ func buildMoveDestination(originFrame string, pose spatialmath.Pose, cfg goalClo
 	switch {
 	case hasMetric:
 		// The caller's metric wins and no cloud is sent: position_only sets orientScale=0,
-		// which would make any cloud meaningless.
+		// so a cloud's orientation leeways would stop mattering.
 		return referenceframe.NewPoseInFrame(originFrame, pose), planExtra, pathMetricType, nil
 	case hasCloud:
 		pc, err := parsePoseCloud(rawCloud)

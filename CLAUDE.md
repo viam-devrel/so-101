@@ -171,8 +171,10 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
     than requested, floored at ~2.56°.
   - The cloud only *zeroes the score* when a candidate is inside it. A cloud the solver
     cannot realistically land inside is **worse than no cloud**: planning reverts to strict
-    six-DOF scoring and fails. `position_only` sets `orientScale=0`, making any cloud
-    meaningless — the two are mutually exclusive.
+    six-DOF scoring and fails. `position_only` sets `orientScale=0`, so a cloud's
+    orientation leeways stop mattering (its positional leeways still zero the positional
+    residual, since `GetGoalMetric` consults `PoseInCloud` regardless of metric type).
+    Passing both is rejected as incoherent rather than silently honoring one.
   - **There is no `ReferenceFrame` field.** v0.123.0 had one; v1.0.0 removed it while
     leaving the struct's reference-frame doc comment in place as free-floating prose, so it
     reads as though the field still exists. The complete field set is
