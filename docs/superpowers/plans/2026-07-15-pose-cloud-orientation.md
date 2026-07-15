@@ -195,8 +195,10 @@ const (
 	// poseCloudSaturationCos is the cosine at which the cone accepts every orientation.
 	// PoseInCloud adds a 0.001 epsilon to the OZ leeway and the maximum possible
 	// deviation is 2.0, so saturation begins where 1-cos(a)+0.001 >= 2. Expressed as a
-	// cosine rather than the rounded 177.44 degrees: the true threshold is 177.4374, and
-	// a literal degree comparison would miss the [177.4374, 177.44) band.
+	// cosine rather than a degree literal: the exact threshold is acos(-0.999) =
+	// 177.4374412669, so any rounded degree constant is wrong in one direction or the
+	// other -- 177.4374 sits BELOW it (and so would miss [177.4374412669, 177.44)),
+	// while 177.44 sits above it. Comparing cosines avoids the choice entirely.
 	poseCloudSaturationCos = -0.999
 )
 
@@ -227,11 +229,12 @@ func resolveGoalCloudConfig(tolDeg, posTolMM float64, logger logging.Logger) goa
 			"from the goal (the cloud is a per-axis box, so the worst-case corner is sqrt(3) times this)",
 			cfg.PositionToleranceMM, math.Sqrt(3)*cfg.PositionToleranceMM)
 	}
-	// Cite 177.4374 (the true acos(-0.999) threshold), NOT the rounded 177.44 used in
-	// user-facing docs: this guard fires across [177.4374, 177.44), so quoting 177.44 here
-	// would contradict the action taken. %g likewise avoids printing 177.4374 as "177.4".
+	// Cite acos(-0.999) ~= 177.4375, NOT the rounded 177.44 used in user-facing docs:
+	// this guard fires across [177.4374412669, 177.44), so quoting 177.44 here would
+	// contradict the action taken. Note 177.4374 would be wrong too -- it rounds DOWN,
+	// below the true threshold. %g likewise avoids printing the value as "177.4".
 	if math.Cos(utils.DegToRad(cfg.OrientationToleranceDeg)) <= poseCloudSaturationCos {
-		logger.Warnf("orientation_tolerance_deg=%g saturates the approach-axis cone (>= 177.4374); "+
+		logger.Warnf("orientation_tolerance_deg=%g saturates the approach-axis cone (acos(-0.999) ~= 177.4375); "+
 			"every orientation will be accepted, which is equivalent to ignoring orientation",
 			cfg.OrientationToleranceDeg)
 	}

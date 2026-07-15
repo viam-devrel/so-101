@@ -219,7 +219,9 @@ saturated and accepts every orientation.
 
 The saturation check must be implemented as `math.Cos(rad(tol)) <= -0.999`, **not** as a
 literal `tol >= 177.44`: saturation actually begins at 177.4374°, so a literal 177.44
-threshold would stay silent across `[177.4374, 177.44)`, which is saturated. The rounded
+threshold would stay silent across `[177.4374412669, 177.44)`, which is saturated. Note
+`177.4374` is wrong in the other direction -- it rounds DOWN, below the true threshold, so
+`177.4374` itself does NOT saturate (verified: antipodal rejected there). The rounded
 177.44 figure is for user-facing docs only, where "≥ 177.44 accepts any orientation" is
 true as written.
 
