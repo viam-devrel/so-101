@@ -394,3 +394,26 @@ func TestBuildMoveDestinationReturnsPathInvalidOnError(t *testing.T) {
 	// The guarantee that makes this matter: wrapMoveErr must not dress it up as a cone failure.
 	assert.Equal(t, err, wrapMoveErr(err, path, cfg), "pathInvalid must pass the error through unwrapped")
 }
+
+// TestGoalCloudSurvivesSerialization guards the module-boundary gotcha: the cloud is only
+// useful if it crosses gRPC. An in-process check would pass even if it never shipped.
+func TestGoalCloudSurvivesSerialization(t *testing.T) {
+	cfg := resolveGoalCloudConfig(30, 1.0, nil)
+	dest, _, _, err := buildMoveDestination("myarm_origin", testGoal(), cfg, nil)
+	require.NoError(t, err)
+
+	proto := referenceframe.PoseInFrameToProtobuf(dest)
+	require.NotNil(t, proto.GoalCloud, "the cloud must be serialized onto the wire")
+
+	got := referenceframe.ProtobufToPoseInFrame(proto)
+	require.NotNil(t, got.GoalCloud, "the cloud must survive the round trip")
+
+	want := dest.GoalCloud
+	assert.InDelta(t, want.X, got.GoalCloud.X, 1e-9)
+	assert.InDelta(t, want.Y, got.GoalCloud.Y, 1e-9)
+	assert.InDelta(t, want.Z, got.GoalCloud.Z, 1e-9)
+	assert.InDelta(t, want.OX, got.GoalCloud.OX, 1e-9)
+	assert.InDelta(t, want.OY, got.GoalCloud.OY, 1e-9)
+	assert.InDelta(t, want.OZ, got.GoalCloud.OZ, 1e-9)
+	assert.InDelta(t, want.Theta, got.GoalCloud.Theta, 1e-9)
+}
