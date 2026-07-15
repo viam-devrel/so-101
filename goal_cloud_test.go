@@ -304,10 +304,93 @@ func TestParsePoseCloudRejects(t *testing.T) {
 		"negative":            map[string]interface{}{"oz": -0.1},
 		"NaN":                 map[string]interface{}{"oz": math.NaN()},
 		"Inf":                 map[string]interface{}{"oz": math.Inf(1)},
+		"nil value":           nil,
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := parsePoseCloud(input)
 			assert.Error(t, err)
 		})
 	}
+}
+
+func TestBuildMoveDestinationConePath(t *testing.T) {
+	cfg := resolveGoalCloudConfig(0, 0, nil)
+	dest, planExtra, path, err := buildMoveDestination("myarm_origin", testGoal(), cfg, nil)
+	require.NoError(t, err)
+	assert.Equal(t, pathCone, path)
+	assert.Equal(t, "myarm_origin", dest.Parent(), "the frame name is passed through unmodified")
+	require.NotNil(t, dest.GoalCloud)
+	assert.Equal(t, coneToPoseCloud(cfg), dest.GoalCloud, "the destination carries the config's cone")
+	assert.NotContains(t, planExtra, "goal_metric_type", "the cone replaces position_only")
+}
+
+func TestBuildMoveDestinationForwardsCallerExtras(t *testing.T) {
+	cfg := resolveGoalCloudConfig(0, 0, nil)
+	_, planExtra, _, err := buildMoveDestination("a_origin", testGoal(), cfg,
+		map[string]interface{}{"timeout": 5.0})
+	require.NoError(t, err)
+	assert.Equal(t, 5.0, planExtra["timeout"], "unrelated caller keys still pass through")
+}
+
+func TestBuildMoveDestinationRawCloudPath(t *testing.T) {
+	cfg := resolveGoalCloudConfig(0, 0, nil)
+	dest, planExtra, path, err := buildMoveDestination("a_origin", testGoal(), cfg,
+		map[string]interface{}{"pose_cloud": map[string]interface{}{"oz": 0.5}, "timeout": 5.0})
+	require.NoError(t, err)
+	assert.Equal(t, pathRawCloud, path)
+	require.NotNil(t, dest.GoalCloud)
+	assert.Equal(t, 0.5, dest.GoalCloud.OZ, "the raw cloud replaces the cone entirely")
+	assert.NotContains(t, planExtra, "pose_cloud", "pose_cloud is not a planner key")
+	assert.Equal(t, 5.0, planExtra["timeout"])
+}
+
+func TestBuildMoveDestinationMetricTypePath(t *testing.T) {
+	cfg := resolveGoalCloudConfig(0, 0, nil)
+	dest, planExtra, path, err := buildMoveDestination("a_origin", testGoal(), cfg,
+		map[string]interface{}{"goal_metric_type": "position_only"})
+	require.NoError(t, err)
+	assert.Equal(t, pathMetricType, path)
+	assert.Nil(t, dest.GoalCloud, "no cloud: position_only sets orientScale=0, making a cloud meaningless")
+	assert.Equal(t, "position_only", planExtra["goal_metric_type"], "the caller's metric is forwarded")
+}
+
+func TestBuildMoveDestinationRejectsBothKeys(t *testing.T) {
+	cfg := resolveGoalCloudConfig(0, 0, nil)
+	_, _, _, err := buildMoveDestination("a_origin", testGoal(), cfg, map[string]interface{}{
+		"pose_cloud":       map[string]interface{}{"oz": 0.5},
+		"goal_metric_type": "position_only",
+	})
+	require.Error(t, err, "incoherent: a raw cloud plus a metric that ignores clouds")
+	// The message is the entire UX here -- there is no fallback -- so pin that it names
+	// both offending keys rather than leaving the caller to guess which one to drop.
+	assert.ErrorContains(t, err, "pose_cloud")
+	assert.ErrorContains(t, err, "goal_metric_type")
+}
+
+func TestBuildMoveDestinationDoesNotMutateCallerExtra(t *testing.T) {
+	cfg := resolveGoalCloudConfig(0, 0, nil)
+	extra := map[string]interface{}{"pose_cloud": map[string]interface{}{"oz": 0.5}}
+	_, _, _, err := buildMoveDestination("a_origin", testGoal(), cfg, extra)
+	require.NoError(t, err)
+	assert.Contains(t, extra, "pose_cloud", "the caller's map must not be mutated")
+}
+
+func TestBuildMoveDestinationPropagatesParseError(t *testing.T) {
+	cfg := resolveGoalCloudConfig(0, 0, nil)
+	dest, planExtra, _, err := buildMoveDestination("a_origin", testGoal(), cfg,
+		map[string]interface{}{"pose_cloud": map[string]interface{}{"OX": 1.0}})
+	require.Error(t, err)
+	assert.Nil(t, dest)
+	assert.Nil(t, planExtra)
+}
+
+func TestBuildMoveDestinationReturnsPathInvalidOnError(t *testing.T) {
+	cfg := resolveGoalCloudConfig(0, 0, nil)
+	_, _, path, err := buildMoveDestination("a_origin", testGoal(), cfg,
+		map[string]interface{}{"pose_cloud": map[string]interface{}{"OX": 1.0}})
+	require.Error(t, err)
+	assert.Equal(t, pathInvalid, path,
+		"an error must not return pathCone, or wrapMoveErr would blame the cone for a parse error")
+	// The guarantee that makes this matter: wrapMoveErr must not dress it up as a cone failure.
+	assert.Equal(t, err, wrapMoveErr(err, path, cfg), "pathInvalid must pass the error through unwrapped")
 }

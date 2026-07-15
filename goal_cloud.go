@@ -8,6 +8,7 @@ import (
 
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/referenceframe"
+	"go.viam.com/rdk/spatialmath"
 	"go.viam.com/rdk/utils"
 )
 
@@ -159,4 +160,103 @@ func parsePoseCloud(raw interface{}) (*referenceframe.PoseCloud, error) {
 		set(pc, v)
 	}
 	return pc, nil
+}
+
+const (
+	extraKeyPoseCloud      = "pose_cloud"
+	extraKeyGoalMetricType = "goal_metric_type"
+)
+
+// goalPath reports which precedence row buildMoveDestination took, so callers can wrap
+// failures appropriately without re-inspecting extra (which would duplicate the
+// precedence logic across both arm models and let it drift).
+type goalPath int
+
+const (
+	// pathInvalid is the zero value, returned alongside any error. It exists so that an
+	// error return is never mistakable for pathCone: wrapMoveErr would otherwise dress a
+	// pose_cloud parse error up as a cone-planning failure and tell the caller to widen
+	// tolerances they never set.
+	pathInvalid    goalPath = iota
+	pathCone                // cone from config
+	pathRawCloud            // caller-supplied pose_cloud
+	pathMetricType          // caller-supplied goal_metric_type; no cloud sent
+)
+
+// buildMoveDestination applies the precedence table (see the plan/spec).
+//
+// originFrame is the FULLY-FORMED frame name (e.g. "myarm_origin"); this function does
+// not append "_origin". It is passed to NewPoseInFrame unmodified.
+//
+// On success it returns a destination, a NEW extras map (the caller's map is never
+// mutated), and the path taken. On error it returns (nil, nil, pathInvalid, err).
+func buildMoveDestination(originFrame string, pose spatialmath.Pose, cfg goalCloudConfig,
+	extra map[string]interface{},
+) (*referenceframe.PoseInFrame, map[string]interface{}, goalPath, error) {
+	rawCloud, hasCloud := extra[extraKeyPoseCloud]
+	_, hasMetric := extra[extraKeyGoalMetricType]
+
+	if hasCloud && hasMetric {
+		return nil, nil, pathInvalid, fmt.Errorf(
+			"extra cannot contain both %q and %q (got %s=%v): a goal cloud only matters when the "+
+				"planner scores orientation, and %s=\"position_only\" sets orientScale=0, which "+
+				"would make the cloud meaningless. Pass one or the other",
+			extraKeyPoseCloud, extraKeyGoalMetricType, extraKeyGoalMetricType,
+			extra[extraKeyGoalMetricType], extraKeyGoalMetricType)
+	}
+
+	planExtra := make(map[string]interface{}, len(extra))
+	for k, v := range extra {
+		if k == extraKeyPoseCloud {
+			continue // consumed here; not a planner key
+		}
+		planExtra[k] = v
+	}
+
+	switch {
+	case hasMetric:
+		// The caller's metric wins and no cloud is sent: position_only sets orientScale=0,
+		// which would make any cloud meaningless.
+		return referenceframe.NewPoseInFrame(originFrame, pose), planExtra, pathMetricType, nil
+	case hasCloud:
+		pc, err := parsePoseCloud(rawCloud)
+		if err != nil {
+			return nil, nil, pathInvalid, err
+		}
+		return referenceframe.NewPoseInFrameWithGoalCloud(originFrame, pose, pc), planExtra, pathRawCloud, nil
+	default:
+		return referenceframe.NewPoseInFrameWithGoalCloud(originFrame, pose, coneToPoseCloud(cfg)),
+			planExtra, pathCone, nil
+	}
+}
+
+// wrapMoveErr adds actionable guidance to a planning failure. The cone-specific wording
+// applies only on the cone path: on the other paths it would misdirect, telling a caller
+// who just passed position_only to pass position_only, or blaming a config tolerance that
+// had no bearing on a raw-cloud failure.
+//
+// The cone message names BOTH tolerances. Either can cause the failure: too tight a cone
+// leaves no reachable orientation, and too small a position tolerance means the solver can
+// never land inside the cloud (which reverts planning to strict 6-DOF scoring and fails
+// every move). Naming only the orientation knob would point at the wrong one half the time.
+func wrapMoveErr(err error, path goalPath, cfg goalCloudConfig) error {
+	if err == nil {
+		return nil
+	}
+	switch path {
+	case pathCone:
+		return fmt.Errorf("move to position failed with orientation_tolerance_deg=%g, "+
+			"position_tolerance_mm=%g (approach-axis cone): %w; widen either tolerance "+
+			"(too small a position_tolerance_mm means the solver can never land inside the "+
+			"goal cloud), pass extra {\"goal_metric_type\": \"position_only\"} to ignore "+
+			"orientation, or check that viam-server is >= 0.127.0 (older servers silently "+
+			"ignore goal clouds)",
+			cfg.OrientationToleranceDeg, cfg.PositionToleranceMM, err)
+	case pathRawCloud:
+		return fmt.Errorf("move to position failed with the caller-supplied pose_cloud: %w; "+
+			"widen the cloud, or check that viam-server is >= 0.127.0 (older servers silently "+
+			"ignore goal clouds)", err)
+	default:
+		return err
+	}
 }
