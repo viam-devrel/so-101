@@ -123,7 +123,41 @@ func TestResolveGoalCloudConfigKeepsExplicitValues(t *testing.T) {
 	assert.Equal(t, 12.5, got.OrientationToleranceDeg)
 	assert.Equal(t, 0.25, got.PositionToleranceMM)
 }
+
+// The warnings are the production path -- both tests above pass a nil logger and so
+// exercise only the early return. resolveGoalCloudConfig is the SINGLE owner of these
+// thresholds; nothing downstream re-checks them, so nothing downstream would catch a
+// regression either. Uses logging.NewObservedTestLogger (rdk logging/logging.go:145).
+func TestResolveGoalCloudConfigWarnsAtSaturationBoundary(t *testing.T) {
+	// The boundary is acos(-0.999) = 177.4374 -- exactly the band a literal ">= 177.44"
+	// check would miss, which is why poseCloudSaturationCos is a cosine.
+	logger, logs := logging.NewObservedTestLogger(t)
+	resolveGoalCloudConfig(177.438, 0, logger)
+	assert.Equal(t, 1, logs.FilterMessageSnippet("saturates").Len(), "just inside the boundary must warn")
+
+	logger, logs = logging.NewObservedTestLogger(t)
+	resolveGoalCloudConfig(177.40, 0, logger)
+	assert.Equal(t, 0, logs.FilterMessageSnippet("saturates").Len(), "just outside must not warn")
+}
+
+func TestResolveGoalCloudConfigWarnsOnLargePositionTolerance(t *testing.T) {
+	logger, logs := logging.NewObservedTestLogger(t)
+	resolveGoalCloudConfig(0, 25, logger)
+	assert.Equal(t, 1, logs.FilterMessageSnippet("is large").Len())
+
+	logger, logs = logging.NewObservedTestLogger(t)
+	resolveGoalCloudConfig(0, 10, logger)
+	assert.Equal(t, 0, logs.FilterMessageSnippet("is large").Len(), "at the threshold must not warn")
+}
+
+func TestResolveGoalCloudConfigDefaultsDoNotWarn(t *testing.T) {
+	logger, logs := logging.NewObservedTestLogger(t)
+	resolveGoalCloudConfig(0, 0, logger)
+	assert.Equal(t, 0, logs.Len(), "the defaults must be quiet")
+}
 ```
+
+The warning tests need `"go.viam.com/rdk/logging"` in the test import block as well.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -189,19 +223,33 @@ func resolveGoalCloudConfig(tolDeg, posTolMM float64, logger logging.Logger) goa
 		return cfg
 	}
 	if cfg.PositionToleranceMM > warnPositionToleranceMM {
-		logger.Warnf("position_tolerance_mm=%.1f is large; the planner may report success up to %.1fmm "+
+		logger.Warnf("position_tolerance_mm=%g is large; the planner may report success up to %.2fmm "+
 			"from the goal (the cloud is a per-axis box, so the worst-case corner is sqrt(3) times this)",
 			cfg.PositionToleranceMM, math.Sqrt(3)*cfg.PositionToleranceMM)
 	}
-	if math.Cos(degToRad(cfg.OrientationToleranceDeg)) <= poseCloudSaturationCos {
-		logger.Warnf("orientation_tolerance_deg=%.1f saturates the approach-axis cone (>= 177.44); "+
+	// Cite 177.4374 (the true acos(-0.999) threshold), NOT the rounded 177.44 used in
+	// user-facing docs: this guard fires across [177.4374, 177.44), so quoting 177.44 here
+	// would contradict the action taken. %g likewise avoids printing 177.4374 as "177.4".
+	if math.Cos(utils.DegToRad(cfg.OrientationToleranceDeg)) <= poseCloudSaturationCos {
+		logger.Warnf("orientation_tolerance_deg=%g saturates the approach-axis cone (>= 177.4374); "+
 			"every orientation will be accepted, which is equivalent to ignoring orientation",
 			cfg.OrientationToleranceDeg)
 	}
 	return cfg
 }
+```
 
-func degToRad(deg float64) float64 { return deg * math.Pi / 180 }
+**Use `utils.DegToRad`, do not declare a local `degToRad`.** `go.viam.com/rdk/utils.DegToRad`
+is identical and the package already uses it (`manager.go:130`, `speed.go`); a second
+spelling of deg→rad in one package invites a third. The import block is therefore:
+
+```go
+import (
+	"math"
+
+	"go.viam.com/rdk/logging"
+	"go.viam.com/rdk/utils"
+)
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
@@ -238,10 +286,15 @@ import (
 
 	"github.com/golang/geo/r3"
 	"github.com/stretchr/testify/assert"
+	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/referenceframe"
 	"go.viam.com/rdk/spatialmath"
+	"go.viam.com/rdk/utils"
 )
 ```
+
+(`logging` and `utils` arrive in Task 2 via the warning tests and `utils.DegToRad`; listed
+here so the block is complete.)
 
 ```go
 // testGoal is a tool pointing straight down, a typical SO-101 grasp pose.
@@ -255,7 +308,7 @@ func testGoal() spatialmath.Pose {
 // tiltedBy returns testGoal() tilted by deg about the axis (ax, ay, 0).
 func tiltedBy(ax, ay, deg float64) spatialmath.Pose {
 	return spatialmath.Compose(testGoal(), spatialmath.NewPoseFromOrientation(
-		&spatialmath.R4AA{RX: ax, RY: ay, RZ: 0, Theta: degToRad(deg)}))
+		&spatialmath.R4AA{RX: ax, RY: ay, RZ: 0, Theta: utils.DegToRad(deg)}))
 }
 
 func coneCloud(tolDeg float64) *referenceframe.PoseCloud {
@@ -270,7 +323,7 @@ func TestConeToPoseCloudFields(t *testing.T) {
 	// OX/OY are deliberately unconstrained: OZ alone defines the cone.
 	assert.Equal(t, 1.0, c.OX)
 	assert.Equal(t, 1.0, c.OY)
-	assert.InDelta(t, 1-math.Cos(degToRad(30)), c.OZ, 1e-12)
+	assert.InDelta(t, 1-math.Cos(utils.DegToRad(30)), c.OZ, 1e-12)
 	// MUST be 180: Theta encodes tilt AZIMUTH, not roll. See the spec.
 	assert.Equal(t, 180.0, c.Theta)
 	// X, Y, Z, OX, OY, OZ, Theta is the COMPLETE field set in rdk v1.0.0. Do not look for
@@ -281,7 +334,7 @@ func TestConeToPoseCloudFields(t *testing.T) {
 func TestConeBoundsTiltIsotropically(t *testing.T) {
 	c := coneCloud(30)
 	for _, azDeg := range []float64{0, 45, 90, 135, 180, 270} {
-		ax, ay := math.Cos(degToRad(azDeg)), math.Sin(degToRad(azDeg))
+		ax, ay := math.Cos(utils.DegToRad(azDeg)), math.Sin(utils.DegToRad(azDeg))
 		assert.True(t, c.PoseInCloud(testGoal(), tiltedBy(ax, ay, 29)),
 			"29deg tilt at azimuth %.0f should be accepted", azDeg)
 		assert.False(t, c.PoseInCloud(testGoal(), tiltedBy(ax, ay, 31)),
@@ -309,7 +362,7 @@ func TestConeRollIsFree(t *testing.T) {
 	c := coneCloud(30)
 	for _, roll := range []float64{0, 45, 90, 179} {
 		p := spatialmath.Compose(testGoal(), spatialmath.NewPoseFromOrientation(
-			&spatialmath.R4AA{RX: 0, RY: 0, RZ: 1, Theta: degToRad(roll)}))
+			&spatialmath.R4AA{RX: 0, RY: 0, RZ: 1, Theta: utils.DegToRad(roll)}))
 		assert.True(t, c.PoseInCloud(testGoal(), p), "roll %.0f should be accepted", roll)
 	}
 }
@@ -322,8 +375,8 @@ func TestConeTiltPlusRollStaysBounded(t *testing.T) {
 			want bool
 		}{{20, true}, {29, true}, {31, false}} {
 			p := spatialmath.Compose(testGoal(), spatialmath.Compose(
-				spatialmath.NewPoseFromOrientation(&spatialmath.R4AA{RX: 1, Theta: degToRad(tc.tilt)}),
-				spatialmath.NewPoseFromOrientation(&spatialmath.R4AA{RZ: 1, Theta: degToRad(roll)})))
+				spatialmath.NewPoseFromOrientation(&spatialmath.R4AA{RX: 1, Theta: utils.DegToRad(tc.tilt)}),
+				spatialmath.NewPoseFromOrientation(&spatialmath.R4AA{RZ: 1, Theta: utils.DegToRad(roll)})))
 			assert.Equal(t, tc.want, c.PoseInCloud(testGoal(), p),
 				"tilt %.0f roll %.0f", tc.tilt, roll)
 		}
@@ -396,7 +449,7 @@ func coneToPoseCloud(cfg goalCloudConfig) *referenceframe.PoseCloud {
 		Z:     cfg.PositionToleranceMM,
 		OX:    1,
 		OY:    1,
-		OZ:    1 - math.Cos(degToRad(cfg.OrientationToleranceDeg)),
+		OZ:    1 - math.Cos(utils.DegToRad(cfg.OrientationToleranceDeg)),
 		Theta: 180,
 	}
 }
@@ -770,17 +823,24 @@ func buildMoveDestination(originFrame string, pose spatialmath.Pose, cfg goalClo
 // applies only on the cone path: on the other paths it would misdirect, telling a caller
 // who just passed position_only to pass position_only, or blaming a config tolerance that
 // had no bearing on a raw-cloud failure.
+//
+// The cone message names BOTH tolerances. Either can cause the failure: too tight a cone
+// leaves no reachable orientation, and too small a position tolerance means the solver can
+// never land inside the cloud (which reverts planning to strict 6-DOF scoring and fails
+// every move). Naming only the orientation knob would point at the wrong one half the time.
 func wrapMoveErr(err error, path goalPath, cfg goalCloudConfig) error {
 	if err == nil {
 		return nil
 	}
 	switch path {
 	case pathCone:
-		return fmt.Errorf("move to position failed with orientation_tolerance_deg=%.1f "+
-			"(approach-axis cone): %w; widen the tolerance, pass extra "+
-			"{\"goal_metric_type\": \"position_only\"} to ignore orientation, or check that "+
-			"viam-server is >= 0.127.0 (older servers silently ignore goal clouds)",
-			cfg.OrientationToleranceDeg, err)
+		return fmt.Errorf("move to position failed with orientation_tolerance_deg=%g, "+
+			"position_tolerance_mm=%g (approach-axis cone): %w; widen either tolerance "+
+			"(too small a position_tolerance_mm means the solver can never land inside the "+
+			"goal cloud), pass extra {\"goal_metric_type\": \"position_only\"} to ignore "+
+			"orientation, or check that viam-server is >= 0.127.0 (older servers silently "+
+			"ignore goal clouds)",
+			cfg.OrientationToleranceDeg, cfg.PositionToleranceMM, err)
 	case pathRawCloud:
 		return fmt.Errorf("move to position failed with the caller-supplied pose_cloud: %w; "+
 			"widen the cloud, or check that viam-server is >= 0.127.0 (older servers silently "+
