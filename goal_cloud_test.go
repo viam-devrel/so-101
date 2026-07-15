@@ -219,3 +219,50 @@ func TestConePositionalBoxNotRadius(t *testing.T) {
 	// Per-axis box, not a radius: all three axes at the bound is accepted at norm ~1.73mm.
 	assert.True(t, c.PoseInCloud(testGoal(), offset(1.0005, 1.0005, 1.0005)))
 }
+
+// TestRDKContractThetaReportsTiltAzimuth documents why coneToPoseCloud sets Theta: 180, by
+// pinning the mechanism directly: the relative Theta reports a tilt's AZIMUTH, not its roll.
+//
+// This is a characterization test for rdk's Theta semantics, not a guard on coneToPoseCloud
+// (it overwrites Theta, so a mutation there is a no-op here -- TestConeBoundsTiltIsotropically
+// is what guards the mapping end-to-end). It earns its place by pinning the underlying rdk
+// contract that nothing else asserts: ovX.Theta == 90 and ovY.Theta == 0. Were an rdk upgrade
+// to change those semantics, the acceptance tests would fail with vague mismatches while this
+// one names the broken contract outright.
+//
+// Note the tempting shorthand -- "a smaller Theta rejects tilts" -- is FALSE: Theta=0 below
+// rejects a tilt about X but would ACCEPT one about Y (azimuth 90 reports Theta=0). What a
+// smaller Theta actually does is carve out a wedge of tilt DIRECTIONS. Since reported Theta
+// sweeps the full [-180, 180] as azimuth goes around, only a leeway of 180 admits every
+// azimuth.
+func TestRDKContractThetaReportsTiltAzimuth(t *testing.T) {
+	broken := coneCloud(30)
+	broken.Theta = 0 // the "obvious simplification"
+	assert.False(t, broken.PoseInCloud(testGoal(), tiltedBy(1, 0, 5)),
+		"with Theta=0 even a 5deg tilt is rejected, defeating the cone entirely")
+
+	// Proof of the cause: a pure tilt about X reports Theta=90, about Y reports Theta=0.
+	ovX := spatialmath.PoseBetween(testGoal(), tiltedBy(1, 0, 5)).Orientation().OrientationVectorDegrees()
+	assert.InDelta(t, 90.0, ovX.Theta, 1e-6, "tilt about X reports Theta=90, not roll")
+	ovY := spatialmath.PoseBetween(testGoal(), tiltedBy(0, 1, 5)).Orientation().OrientationVectorDegrees()
+	assert.InDelta(t, 0.0, ovY.Theta, 1e-6, "tilt about Y reports Theta=0")
+}
+
+// TestRDKContractZeroLeewayDemandsMicronMatch documents why X/Y/Z must be > 0: the 0.001
+// epsilon means a zero leeway demands a match within 1 micron -- which no IK solution will
+// realistically achieve, making the cloud useless in practice even though it does technically
+// accept an exact match (measured: it still accepts 0.0009mm, and rejects 0.0011mm).
+//
+// This is a characterization test for rdk's epsilon rule, not a guard on coneToPoseCloud
+// (it overwrites X/Y/Z, so a mutation there is a no-op here -- TestConePositionalBoxNotRadius
+// is what guards the mapping). It earns its place by demonstrating the failure mode that
+// motivates defaultPositionToleranceMM: the cloud a caller gets with zero leeway.
+func TestRDKContractZeroLeewayDemandsMicronMatch(t *testing.T) {
+	broken := coneCloud(30)
+	broken.X, broken.Y, broken.Z = 0, 0, 0
+	g := testGoal()
+	nudged := spatialmath.NewPose(
+		r3.Vector{X: g.Point().X + 0.01, Y: g.Point().Y, Z: g.Point().Z}, g.Orientation())
+	assert.False(t, broken.PoseInCloud(g, nudged),
+		"with zero positional leeway even a 0.01mm offset is rejected")
+}
