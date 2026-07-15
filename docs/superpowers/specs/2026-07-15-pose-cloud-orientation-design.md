@@ -126,13 +126,19 @@ the goal frame's axes. `position_tolerance_mm: 1.0` therefore permits a worst-ca
 deviation of `sqrt(3) x 1.001 ≈ 1.73mm`, not 1mm — verified: a per-axis offset of 1.0005mm
 (norm 1.7329mm) is accepted.
 
-### ReferenceFrame is inert and must be left unset
+### ReferenceFrame does not exist post-bump
 
-`PoseCloud.ReferenceFrame` carries the struct's longest doc comment and invites use, but:
-`PoseInCloud` never reads it, and `PoseCloud.ToProto()` does not serialize it —
-`commonpb.PoseCloud` has no such field (only `x`, `y`, `z`, `o_x`, `o_y`, `o_z`, `theta`).
-Any value set is silently dropped at the gRPC boundary and would break the round-trip
-test. Leave it zero.
+v0.123.0's `PoseCloud` had a `ReferenceFrame string` field (`pose_cloud.go:45`). **v1.0.0
+removes it.** Post-bump the fields are exactly `X`, `Y`, `Z`, `OX`, `OY`, `OZ`, `Theta`.
+
+The long doc comment about "evaluating in the reference frame of the object being asked to
+move" survives in v1.0.0 as free-floating prose inside the struct, with no field attached —
+which reliably reads as though the field still exists. It does not. Referencing it will not
+compile, and it was never wire-serialized anyway: `commonpb.PoseCloud` carries only `x`,
+`y`, `z`, `o_x`, `o_y`, `o_z`, `theta`.
+
+Consequence for the `pose_cloud` escape hatch: `reference_frame` is rejected as an unknown
+key because it is **not a `PoseCloud` field at all**, not because it is inert.
 
 ## The mapping
 
@@ -142,9 +148,10 @@ test. Leave it zero.
     OX: 1, OY: 1,                          // deliberately unconstrained; OZ alone defines the cone
     OZ:    1 - math.Cos(rad(toleranceDeg)),
     Theta: 180,                            // MUST be 180: Theta encodes tilt AZIMUTH, not roll
-    // ReferenceFrame deliberately unset: inert, and not wire-serialized.
 }
 ```
+
+These seven are the *complete* field set in v1.0.0; there is nothing else to set.
 
 ## Config surface
 
@@ -250,8 +257,8 @@ the point of an escape hatch, but it is sharp, and is documented as expert-mode.
 Note the casing is a genuine hazard: the Viam docs example renders these as `OX`/`OY`, and
 the protobuf JSON spells them `o_x`/`oX`. Neither is accepted. Unknown keys are therefore
 **rejected with an error** rather than ignored, so a typo or a copy-paste from the docs
-fails loudly instead of silently producing a 1-micron cloud. `reference_frame` is
-rejected for the same reason: it is inert and not wire-serialized.
+fails loudly instead of silently producing a 1-micron cloud. `reference_frame` is rejected
+under the same rule — it is not a `PoseCloud` field in v1.0.0.
 
 ## Components
 
@@ -475,9 +482,10 @@ the pinned version, so this needs no new infrastructure.
 - **CLAUDE.md**: update the RDK version, and add a gotcha covering `Theta`-encodes-azimuth
   (forcing `Theta: 180`), `OZ`-alone-defines-the-cone (valid across 0-180, saturating at
   177.44), the additive `0.001` epsilon and the ~2.56° effective-cone floor it implies,
-  that `ReferenceFrame` is inert and unserialized, and that goal clouds need viam-server
-  >= 0.127.0 (v0.125-v0.126 read the field but never decode it). Without it, the next
-  reader will "simplify" `Theta: 180` to `0` and break every move.
+  that `ReferenceFrame` was removed in v1.0.0 (v0.123.0 had it) leaving
+  `X, Y, Z, OX, OY, OZ, Theta` as the complete field set, and that goal clouds need
+  viam-server >= 0.127.0 (v0.125-v0.126 read the field but never decode it). Without it,
+  the next reader will "simplify" `Theta: 180` to `0` and break every move.
 
 ## Out of scope
 
