@@ -949,8 +949,8 @@ git commit -m "test(arm): guard that the goal cloud survives gRPC serialization"
 ## Task 8: Config fields and `Validate` on both models
 
 **Files:**
-- Modify: `arm.go:70-100` (`SO101ArmConfig`), `arm.go:103+` (`Validate`)
-- Modify: `simulated.go:42-71` (`SO101SimulatedArmConfig`), `simulated.go:75-91` (`Validate`)
+- Modify: `arm.go` — `SO101ArmConfig` and its `Validate`. **Line numbers are stale** (PR #27 added manual-mode config fields); locate by symbol name.
+- Modify: `simulated.go` — `SO101SimulatedArmConfig` and its `Validate`. Locate by symbol name.
 - Test: `goal_cloud_test.go`
 
 - [ ] **Step 1: Write the failing tests**
@@ -1067,7 +1067,7 @@ git commit -m "feat(arm): add orientation_tolerance_deg and position_tolerance_m
 ## Task 9: Wire the hardware arm's `MoveToPosition`
 
 **Files:**
-- Modify: `arm.go:138-160` (struct), `arm.go:353+` (`NewSO101`), `arm.go:482-504` (`MoveToPosition`)
+- Modify: `arm.go` — the `so101` struct, `NewSO101`, and `MoveToPosition` (~line 530). **Line numbers below are stale**: main gained PR #27 (manual/teach mode, +180 lines in arm.go) after this plan was written. Locate by symbol name, not by line.
 - Test: `arm_move_to_position_test.go` (create)
 
 - [ ] **Step 1: Write the failing test**
@@ -1163,7 +1163,7 @@ In `NewSO101`, add to the `&so101{...}` literal:
 
 - [ ] **Step 5: Rewrite `MoveToPosition`**
 
-Replace `arm.go:482-504` entirely:
+Replace the body of `MoveToPosition` (locate by name; it is around line 530 after PR #27). **It now begins with a manual-mode guard that you MUST keep** — see the code below:
 
 ```go
 // MoveToPosition moves the arm's end-effector to the target pose.
@@ -1179,9 +1179,18 @@ Replace `arm.go:482-504` entirely:
 // Requires viam-server >= 0.127.0; older servers silently ignore goal clouds, which makes
 // planning revert to strict six-DOF scoring and fail.
 func (s *so101) MoveToPosition(ctx context.Context, pose spatialmath.Pose, extra map[string]interface{}) error {
+	// PRESERVE THIS: added by the manual (hand-guided) teach mode feature. A motion
+	// command must take the arm out of manual mode. Do not drop it when rewriting below.
+	s.mu.Lock()
+	s.exitManualLocked("motion command received")
+	s.mu.Unlock()
+
 	dest, planExtra, path, err := buildMoveDestination(
 		fmt.Sprintf("%v_origin", s.Name().Name), pose, s.goalCloud, extra)
 	if err != nil {
+		// Return the build error UNWRAPPED. Do not pass it through wrapMoveErr: the path
+		// is pathInvalid, and wrapping a pose_cloud parse error as a cone-planning failure
+		// would tell the caller to widen tolerances they never set.
 		return err
 	}
 	s.logger.Debugf("MoveToPosition goal cloud: %+v", dest.GoalCloud)
@@ -1217,7 +1226,7 @@ git commit -m "feat(arm): plan MoveToPosition with an approach-axis cone"
 Identical shape to Task 9. The simulated model must stay a faithful stand-in for motion-plan testing.
 
 **Files:**
-- Modify: `simulated.go:114-140` (struct), `simulated.go:145+` (`newSimulatedSO101`), `simulated.go:296-318` (`MoveToPosition`)
+- Modify: `simulated.go` — the `simulatedSO101` struct, `newSimulatedSO101`, and `MoveToPosition`. Locate by symbol name; line numbers may have drifted.
 - Test: `arm_move_to_position_test.go`
 
 - [ ] **Step 1: Write the failing test**
@@ -1272,7 +1281,7 @@ In `newSimulatedSO101`, add to the `&simulatedSO101{...}` literal:
 
 - [ ] **Step 5: Rewrite `MoveToPosition`**
 
-Replace `simulated.go:296-318`, keeping the nil-motion guard:
+Replace the body of `simulated.go`'s `MoveToPosition` (locate by name), keeping the nil-motion guard. Note the simulated model has NO manual mode, so it needs no exitManual guard:
 
 ```go
 // MoveToPosition moves the arm's end effector to the target pose using the motion service.
