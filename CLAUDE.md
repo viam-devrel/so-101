@@ -147,3 +147,44 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
   the RDK motion planner feeds dense waypoints that keep per-waypoint displacements small, so
   independent-joint motion stays smooth on planned paths. Also note: `acceleration_degs_per_sec_per_sec`
   is validated and stored on the hardware arm but not yet written to servo hardware (planned follow-up).
+- **`referenceframe.PoseCloud` semantics are counterintuitive and were established
+  empirically** (see `docs/superpowers/specs/2026-07-15-pose-cloud-orientation-design.md`;
+  `goal_cloud.go` depends on all of it):
+  - `PoseInCloud` compares the *relative* pose `PoseBetween(goal, candidate)`, where zero
+    deviation is the orientation vector `(0,0,1)`.
+  - **`Theta` encodes the AZIMUTH of a tilt, not roll.** Measured exactly:
+    `Theta = 90 - azimuth`, independent of tilt magnitude (about X → 90, about Y → 0,
+    azimuth 270 → -180). Since reported Theta sweeps the full `[-180, 180]`, **only a
+    leeway of 180 admits every azimuth** — only 180 gives an isotropic cone. Beware the
+    tempting shorthand "a smaller Theta rejects tilts": it is **false** (`Theta: 0` still
+    accepts a 5° tilt about Y). Smaller values silently carve out a wedge of tilt
+    *directions*. `TestConeBoundsTiltIsotropically`'s azimuth-270 case is what pins this.
+    The cost: roll cannot be constrained alongside tilt, which is why this is
+    approach-axis planning with **free roll**.
+  - **`OZ` alone defines the cone**; `OX`/`OY` are set to `1` (unconstrained). Valid across
+    `[0, 180]`, saturating at `acos(-0.999) = 177.4374412669`. Check saturation by
+    comparing cosines (`cos(tol) <= -0.999`), never a rounded degree literal — every
+    rounding is wrong in one direction or the other.
+  - **`defaultEpsilon = 0.001` is ADDED to every leeway**, not just zeroed ones. So zero
+    `X`/`Y`/`Z` demands a match within 1 micron (which no IK solution realistically
+    achieves), and the effective cone is `acos(cos(tol) - 0.001)` — always slightly wider
+    than requested, floored at ~2.56°.
+  - The cloud only *zeroes the score* when a candidate is inside it. A cloud the solver
+    cannot realistically land inside is **worse than no cloud**: planning reverts to strict
+    six-DOF scoring and fails. `position_only` sets `orientScale=0`, making any cloud
+    meaningless — the two are mutually exclusive.
+  - **There is no `ReferenceFrame` field.** v0.123.0 had one; v1.0.0 removed it while
+    leaving the struct's reference-frame doc comment in place as free-floating prose, so it
+    reads as though the field still exists. The complete field set is
+    `X, Y, Z, OX, OY, OZ, Theta`.
+- **Goal clouds require viam-server >= 0.127.0.** RDK v0.125.0–v0.126.1 read `GoalCloud` in
+  `armplanning` but never decode it in `ProtobufToPoseInFrame`, so the cloud is silently
+  inert there; v0.127.0 is the first release with both halves. The module only *sends* the
+  cloud — its own RDK version has no bearing on whether the server honors it. The minimum is
+  declared Registry-side; `meta.json` has no field for it.
+- **`NewSO101`'s `goalCloud` wiring is untested** — it needs serial hardware, so no test
+  constructs the hardware arm. Deleting `goalCloud: resolveGoalCloudConfig(...)` from
+  `NewSO101` leaves the whole suite green, and the result is a zero-valued cloud that fails
+  every move silently. `TestSimulatedConstructorWiresGoalCloud` covers the equivalent line
+  in `newSimulatedSO101` and the shared `resolveGoalCloudConfig` contract, but the hardware
+  constructor's line is guarded only by review.
