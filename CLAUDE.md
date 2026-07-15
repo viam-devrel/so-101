@@ -2,7 +2,7 @@
 
 `viam-devrel/so-101` — a Viam module for the LeRobot **SO-101 / SO-ARM101** robot arm
 (TheRobotStudio open hardware: 6× Feetech STS3215 servos on one serial/USB bus @ 1 Mbaud).
-Go module `so_arm`, Go 1.25, `go.viam.com/rdk v0.123.0`. It can drive either the leader or
+Go module `so_arm`, Go 1.25, `go.viam.com/rdk v1.0.0`. It can drive either the leader or
 the follower arm, or both as separate components for mirrored teleoperation.
 
 ## Models
