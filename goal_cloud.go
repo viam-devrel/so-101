@@ -30,8 +30,10 @@ const (
 	// poseCloudSaturationCos is the cosine at which the cone accepts every orientation.
 	// PoseInCloud adds a 0.001 epsilon to the OZ leeway and the maximum possible
 	// deviation is 2.0, so saturation begins where 1-cos(a)+0.001 >= 2. Expressed as a
-	// cosine rather than the rounded 177.44 degrees: the true threshold is 177.4374, and
-	// a literal degree comparison would miss the [177.4374, 177.44) band.
+	// cosine rather than a degree literal: the exact threshold is acos(-0.999) =
+	// 177.4374412669, so any rounded degree constant is wrong in one direction or the
+	// other -- 177.4374 sits below it (misses [177.4374412669, 177.44)), and 177.44 sits
+	// above it. Comparing cosines avoids the choice entirely.
 	poseCloudSaturationCos = -0.999
 )
 
@@ -62,15 +64,30 @@ func resolveGoalCloudConfig(tolDeg, posTolMM float64, logger logging.Logger) goa
 			"from the goal (the cloud is a per-axis box, so the worst-case corner is sqrt(3) times this)",
 			cfg.PositionToleranceMM, math.Sqrt(3)*cfg.PositionToleranceMM)
 	}
-	// Cite 177.4374 (the true acos(-0.999) threshold), NOT the rounded 177.44 used in
-	// user-facing docs: this guard fires across [177.4374, 177.44), so quoting 177.44 here
-	// would contradict the action taken. %g likewise avoids printing 177.4374 as "177.4".
+	// Cite 177.4374412669 (the exact acos(-0.999) threshold), NOT the rounded 177.44 used
+	// in user-facing docs: this guard fires across [177.4374412669, 177.44), so quoting
+	// 177.44 here would contradict the action taken. Do not round the cited value down
+	// either -- 177.4374 sits below the threshold, where this guard does not fire. %g
+	// likewise avoids printing it as "177.4".
 	if math.Cos(utils.DegToRad(cfg.OrientationToleranceDeg)) <= poseCloudSaturationCos {
-		logger.Warnf("orientation_tolerance_deg=%g saturates the approach-axis cone (>= 177.4374); "+
+		logger.Warnf("orientation_tolerance_deg=%g saturates the approach-axis cone (>= 177.4374412669); "+
 			"every orientation will be accepted, which is equivalent to ignoring orientation",
 			cfg.OrientationToleranceDeg)
 	}
 	return cfg
+}
+
+// validateGoalCloudTolerances is shared by both arm models' Validate methods. Note NaN
+// must be rejected explicitly: NaN comparisons are always false, so a NaN would slip
+// through the range checks.
+func validateGoalCloudTolerances(tolDeg, posTolMM float64) error {
+	if math.IsNaN(tolDeg) || tolDeg < 0 || tolDeg > 180 {
+		return fmt.Errorf("orientation_tolerance_deg must be in [0, 180], got %v", tolDeg)
+	}
+	if math.IsNaN(posTolMM) || posTolMM < 0 {
+		return fmt.Errorf("position_tolerance_mm must not be negative, got %v", posTolMM)
+	}
+	return nil
 }
 
 // coneToPoseCloud converts an approach-axis cone half-angle into a PoseCloud.

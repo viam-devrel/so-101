@@ -101,6 +101,25 @@ type SO101ArmConfig struct {
 	// ManualMode tunes hand-guided ("manual") mode. Optional; nil disables
 	// the feature / uses built-in defaults throughout.
 	ManualMode *ManualModeConfig `json:"manual_mode,omitempty"`
+
+	// OrientationToleranceDeg is the half-angle, in degrees, of the cone of acceptable
+	// end-effector approach directions around the goal orientation. Roll about that axis
+	// is NOT constrained. Valid range [0, 180]. Zero or unset means
+	// defaultOrientationToleranceDeg (30).
+	//
+	// The planner adds a 0.001 epsilon to the OZ leeway, so the cone actually enforced is
+	// acos(cos(tol) - 0.001): always slightly wider than requested (30 gives ~30.11) and
+	// never narrower than ~2.56. At or above 177.44 every orientation is accepted.
+	//
+	// Requires viam-server >= 0.127.0; older servers silently ignore goal clouds.
+	OrientationToleranceDeg float64 `json:"orientation_tolerance_deg,omitempty"`
+
+	// PositionToleranceMM is the per-axis positional leeway of the goal cloud, applied as
+	// a box along the goal frame's axes (worst-case corner deviation is sqrt(3) times this
+	// value). It must be large enough for the IK solver to realistically land inside; a
+	// cloud only an exact match could satisfy means every move fails. Zero or unset means
+	// defaultPositionToleranceMM (1.0).
+	PositionToleranceMM float64 `json:"position_tolerance_mm,omitempty"`
 }
 
 // ManualModeConfig tunes hand-guided ("manual") mode. All fields optional;
@@ -159,6 +178,10 @@ func (cfg *SO101ArmConfig) Validate(path string) ([]string, []string, error) {
 	}
 
 	if err := cfg.ManualMode.Validate(); err != nil {
+		return nil, nil, err
+	}
+
+	if err := validateGoalCloudTolerances(cfg.OrientationToleranceDeg, cfg.PositionToleranceMM); err != nil {
 		return nil, nil, err
 	}
 

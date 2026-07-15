@@ -31,8 +31,8 @@ func TestResolveGoalCloudConfigKeepsExplicitValues(t *testing.T) {
 // thresholds; nothing downstream re-checks them, so nothing downstream would catch a
 // regression either.
 func TestResolveGoalCloudConfigWarnsAtSaturationBoundary(t *testing.T) {
-	// The boundary is acos(-0.999) = 177.4374 -- exactly the band a literal ">= 177.44"
-	// check would miss, which is why poseCloudSaturationCos is a cosine.
+	// The boundary is acos(-0.999) = 177.4374412669 -- exactly the band a literal
+	// ">= 177.44" check would miss, which is why poseCloudSaturationCos is a cosine.
 	logger, logs := logging.NewObservedTestLogger(t)
 	resolveGoalCloudConfig(177.438, 0, logger)
 	assert.Equal(t, 1, logs.FilterMessageSnippet("saturates").Len(), "just inside the boundary must warn")
@@ -126,7 +126,7 @@ func TestConeBoundsAbove90Degrees(t *testing.T) {
 // were wrong, and the sibling would still pass if both the constant and the mapping drifted
 // together.
 func TestConeSaturationBoundary(t *testing.T) {
-	// Saturation begins at acos(-0.999) = 177.4374, NOT 179.
+	// Saturation begins at acos(-0.999) = 177.4374412669, NOT 179.
 	assert.False(t, coneCloud(177.40).PoseInCloud(testGoal(), tiltedBy(1, 0, 180)),
 		"177.40 must still reject a 180deg tilt")
 	assert.True(t, coneCloud(177.44).PoseInCloud(testGoal(), tiltedBy(1, 0, 180)),
@@ -416,4 +416,49 @@ func TestGoalCloudSurvivesSerialization(t *testing.T) {
 	assert.InDelta(t, want.OY, got.GoalCloud.OY, 1e-9)
 	assert.InDelta(t, want.OZ, got.GoalCloud.OZ, 1e-9)
 	assert.InDelta(t, want.Theta, got.GoalCloud.Theta, 1e-9)
+}
+
+func TestArmConfigValidateToleranceRanges(t *testing.T) {
+	base := func() *SO101ArmConfig { return &SO101ArmConfig{Port: "/dev/null"} }
+
+	for name, mutate := range map[string]func(*SO101ArmConfig){
+		"negative orientation": func(c *SO101ArmConfig) { c.OrientationToleranceDeg = -1 },
+		"orientation over 180": func(c *SO101ArmConfig) { c.OrientationToleranceDeg = 181 },
+		"NaN orientation":      func(c *SO101ArmConfig) { c.OrientationToleranceDeg = math.NaN() },
+		"negative position":    func(c *SO101ArmConfig) { c.PositionToleranceMM = -0.1 },
+		"NaN position":         func(c *SO101ArmConfig) { c.PositionToleranceMM = math.NaN() },
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := base()
+			mutate(c)
+			_, _, err := c.Validate("")
+			assert.Error(t, err)
+		})
+	}
+
+	t.Run("valid bounds accepted", func(t *testing.T) {
+		c := base()
+		c.OrientationToleranceDeg, c.PositionToleranceMM = 180, 75
+		_, _, err := c.Validate("")
+		assert.NoError(t, err)
+	})
+}
+
+func TestSimulatedConfigValidateToleranceRanges(t *testing.T) {
+	c := &SO101SimulatedArmConfig{OrientationToleranceDeg: 181}
+	_, _, err := c.Validate("")
+	assert.Error(t, err)
+
+	c = &SO101SimulatedArmConfig{PositionToleranceMM: -1}
+	_, _, err = c.Validate("")
+	assert.Error(t, err)
+
+	// Negative control: without this, the two assertions above would pass even if Validate
+	// errored unconditionally, i.e. they could not tell "tolerances validated" from
+	// "Validate always fails".
+	t.Run("valid bounds accepted", func(t *testing.T) {
+		c := &SO101SimulatedArmConfig{OrientationToleranceDeg: 30, PositionToleranceMM: 5}
+		_, _, err := c.Validate("")
+		assert.NoError(t, err)
+	})
 }
