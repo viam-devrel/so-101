@@ -70,6 +70,8 @@ The following attributes are available for the arm component:
 | `use_urdf`         | bool     | Optional     | When `true`, sources kinematics and collision geometry from the bundled `arm/so101.urdf` instead of the embedded `so101.json`. Requires the `VIAM_MODULE_ROOT` environment variable to be set (viam-server sets this automatically). This is a drop-in swap: the bundled URDF uses `so101.json`'s frame names and TCP exactly, so the frame names, TCP pose, and kinematics are identical — only the collision geometry upgrades from primitive shapes to per-link meshes. Default `false`. |
 | `mesh_decimation_ratios` | []float | Optional | Per-collision-mesh simplification ratios, one per arm link in document order (base, shoulder, upper_arm, lower_arm, wrist), each in `[0, 1]`. Only used when `use_urdf` is `true`. Only values strictly in `(0, 1)` decimate (lower = more aggressive). Defaults to `0.9` for each of the 5 meshes when empty. |
 | `manual_mode`      | object   | Optional     | Tuning for hand-guided [manual mode](#manual-mode) (see below). Omit for the built-in defaults. |
+| `orientation_tolerance_deg` | float | Optional | Half-angle, in degrees, of the cone of acceptable end-effector approach directions around the goal orientation used by `MoveToPosition` (see [Approach-axis orientation planning](#approach-axis-orientation-planning) below). **Roll about that axis is NOT constrained.** Valid range `[0, 180]`. `0`/unset means the default (`30`), **not** an exact match. The planner adds a small epsilon to the cone, so the angle actually enforced is `acos(cos(tol) - 0.001)` — always slightly wider than requested (`30` gives ~`30.11`) and never narrower than ~`2.56`, regardless of how small a value you configure. At or above `177.44`, every orientation is accepted. |
+| `position_tolerance_mm` | float | Optional | Per-axis positional leeway, in millimeters, of the `MoveToPosition` goal cloud, applied as a box along the goal frame's axes (not a radius) — default `1.0`. Worst-case corner deviation is `sqrt(3)` times this value (~`1.73mm` at the default). Too small a value and the IK solver cannot realistically land inside the cloud, so planning reverts to strict six-DOF scoring and moves fail. |
 
 **If you're building and setting up an arm for the first time, please see the [calibration sensor component](#model-devrelso101calibration) for setup instructions.**
 
@@ -100,6 +102,21 @@ The hardware arm enforces a real per-joint speed cap on the Feetech servos: each
 `Stop()` does not currently interrupt an in-progress joint move: a move blocks until the servos settle (or the internal safety timeout elapses), so a `Stop()` issued mid-move takes effect only once that move returns. Interrupting in-flight motion is a planned follow-up.
 
 `acceleration_degs_per_sec_per_sec` is validated and stored when set via config or `set_acceleration` DoCommand, but is not yet written to the servo hardware. Acceleration enforcement is a planned follow-up.
+
+### Approach-axis orientation planning
+
+The SO-101 is a 5-DOF arm, so most six-DOF pose targets are unreachable exactly. Rather than discard orientation wholesale, `MoveToPosition` attaches a `referenceframe.PoseCloud` to the goal: a cone that constrains where the tool points (the approach axis), while **roll about that axis is free**. `orientation_tolerance_deg` and `position_tolerance_mm` (documented in the Attributes table above) control the cone's size.
+
+**Behavior change for existing users:** this cone is on by default and is **stricter** than the previous behavior, which passed `goal_metric_type: position_only` and accepted any orientation at all. A goal that planned successfully before may now fail to plan. There is deliberately no fallback — a failed plan fails loudly rather than silently accepting an orientation you didn't intend. If you relied on the old orientation-agnostic behavior, pass `extra: {"goal_metric_type": "position_only"}` on the call (see below) to restore it.
+
+**Requires viam-server >= 0.127.0.** Older servers accept a goal cloud but silently ignore it, which means planning falls back to strict six-degree-of-freedom scoring against the exact goal pose and fails.
+
+`MoveToPosition` accepts two mutually exclusive `extra` keys to bypass the default cone:
+
+- `extra: {"goal_metric_type": "position_only"}` — restores the previous orientation-agnostic behavior for that call; no cloud is sent.
+- `extra: {"pose_cloud": {...}}` — supplies a raw `referenceframe.PoseCloud`, replacing the cone entirely (expert mode). Keys are **lowercase**: `x`, `y`, `z`, `ox`, `oy`, `oz`, `theta`. Note the Viam docs render these fields as `OX`/`OY` and the protobuf wire format spells them `o_x` — **neither of those is accepted here**; an unknown key is rejected with an error rather than silently ignored, so a typo fails loudly instead of quietly producing a near-zero-leeway cloud that fails every move. Any field you omit means ~zero leeway for that field.
+
+Passing both `goal_metric_type` and `pose_cloud` in the same `extra` map is an error.
 
 ### Manual Mode
 
@@ -391,6 +408,8 @@ The following attributes are available for the simulated arm component:
 | `visualize_ee_frame` | bool   | Optional  | When `true`, serves a colored XYZ coordinate-frame marker at the end-effector for the 3D viewer. Default is `false`.                                       |
 | `use_urdf`           | bool   | Optional  | When `true`, sources kinematics and collision geometry from the bundled `arm/so101.urdf` instead of the embedded `so101.json`. Requires the `VIAM_MODULE_ROOT` environment variable to be set (viam-server sets this automatically). This is a drop-in swap: the bundled URDF uses `so101.json`'s frame names and TCP exactly, so the frame names, TCP pose, and kinematics are identical — only the collision geometry upgrades from primitive shapes to per-link meshes. Default `false`. |
 | `mesh_decimation_ratios` | []float | Optional | Per-collision-mesh simplification ratios, one per arm link in document order (base, shoulder, upper_arm, lower_arm, wrist), each in `[0, 1]`. Only used when `use_urdf` is `true`. Only values strictly in `(0, 1)` decimate (lower = more aggressive). Defaults to `0.9` for each of the 5 meshes when empty. |
+| `orientation_tolerance_deg` | float | Optional | Half-angle, in degrees, of the cone of acceptable end-effector approach directions around the goal orientation used by `MoveToPosition` (see [Approach-axis orientation planning](#approach-axis-orientation-planning) below). **Roll about that axis is NOT constrained.** Valid range `[0, 180]`. `0`/unset means the default (`30`), **not** an exact match. The planner adds a small epsilon to the cone, so the angle actually enforced is `acos(cos(tol) - 0.001)` — always slightly wider than requested (`30` gives ~`30.11`) and never narrower than ~`2.56`, regardless of how small a value you configure. At or above `177.44`, every orientation is accepted. |
+| `position_tolerance_mm` | float | Optional | Per-axis positional leeway, in millimeters, of the `MoveToPosition` goal cloud, applied as a box along the goal frame's axes (not a radius) — default `1.0`. Worst-case corner deviation is `sqrt(3)` times this value (~`1.73mm` at the default). Too small a value and the IK solver cannot realistically land inside the cloud, so planning reverts to strict six-DOF scoring and moves fail. |
 
 Example configuration with attributes:
 
@@ -403,7 +422,7 @@ Example configuration with attributes:
 ### Behavior
 
 - `MoveToJointPositions`, `MoveThroughJointPositions`, and `GoToInputs` interpolate the joints toward each target over time; the calls block until the arm arrives.
-- `MoveToPosition` plans through the motion service. Because the SO-101 is a 5-DOF arm, it defaults the planner goal metric to `position_only`; pass your own `goal_metric_type` via `extra` to override.
+- `MoveToPosition` plans through the motion service. As with the `devrel:so101:arm` model, it attaches an approach-axis cone (`orientation_tolerance_deg`/`position_tolerance_mm`) to the goal by default instead of ignoring orientation — see [Approach-axis orientation planning](#approach-axis-orientation-planning) above for the config attributes, the `extra` escape hatches, and the viam-server version requirement.
 - `JointPositions`, `EndPosition`, `Geometries`, and `IsMoving` report the simulated state.
 
 ### DoCommand
