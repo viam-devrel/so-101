@@ -69,6 +69,7 @@ The following attributes are available for the arm component:
 | `acceleration_degs_per_sec_per_sec` | float | Optional | Validated and stored but **not yet enforced** on hardware (planned follow-up). Default `100`, valid range 10–500. |
 | `use_urdf`         | bool     | Optional     | When `true`, sources kinematics and collision geometry from the bundled `arm/so101.urdf` instead of the embedded `so101.json`. Requires the `VIAM_MODULE_ROOT` environment variable to be set (viam-server sets this automatically). This is a drop-in swap: the bundled URDF uses `so101.json`'s frame names and TCP exactly, so the frame names, TCP pose, and kinematics are identical — only the collision geometry upgrades from primitive shapes to per-link meshes. Default `false`. |
 | `mesh_decimation_ratios` | []float | Optional | Per-collision-mesh simplification ratios, one per arm link in document order (base, shoulder, upper_arm, lower_arm, wrist), each in `[0, 1]`. Only used when `use_urdf` is `true`. Only values strictly in `(0, 1)` decimate (lower = more aggressive). Defaults to `0.9` for each of the 5 meshes when empty. |
+| `manual_mode`      | object   | Optional     | Tuning for hand-guided [manual mode](#manual-mode) (see below). Omit for the built-in defaults. |
 
 **If you're building and setting up an arm for the first time, please see the [calibration sensor component](#model-devrelso101calibration) for setup instructions.**
 
@@ -99,6 +100,55 @@ The hardware arm enforces a real per-joint speed cap on the Feetech servos: each
 `Stop()` does not currently interrupt an in-progress joint move: a move blocks until the servos settle (or the internal safety timeout elapses), so a `Stop()` issued mid-move takes effect only once that move returns. Interrupting in-flight motion is a planned follow-up.
 
 `acceleration_degs_per_sec_per_sec` is validated and stored when set via config or `set_acceleration` DoCommand, but is not yet written to the servo hardware. Acceleration enforcement is a planned follow-up.
+
+### Manual Mode
+
+Manual mode is a live jog-by-hand mode using position-deviation admittance. While active, a background control loop keeps each arm servo in position mode holding a goal — so the arm holds against gravity and never goes limp. When you backdrive a joint past a small angular deadband, the goal follows your hand, trailing by the deadband (which leaves a small restoring force so the joint still holds against gravity); when released, the joint holds its new pose. Torque is never fully disabled. The servo's `present_load` register is not used for control — it saturates on the gentlest push and doesn't encode push direction — and is reported only as telemetry.
+
+Manual mode is entered and exited with the `enter_manual_mode` / `exit_manual_mode` DoCommands (see below) and is tuned with the optional `manual_mode` config object. Calling `enter_manual_mode` again while already active re-applies with the new parameters (no need to `exit_manual_mode` first) — useful for live tuning.
+
+| Name               | Type    | Inclusion | Description                                                                                                                                                   |
+| ------------------ | ------- | --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pos_deadband_deg` | float   | Optional  | Degrees a joint must be backdriven from its goal before the goal follows your hand. Higher = stiffer/less sensitive. Valid range 0-45. Default `0.5`. |
+| `loop_hz`          | float   | Optional  | Control loop rate, in Hz. Valid range 0-200 (`0` uses the default). Default `50`.                                                                               |
+| `p_gain`           | int     | Optional  | Reduced servo position P-gain applied during manual mode, restored on exit. Valid range 0-255. Default `8`. Lower = easier to backdrive/lighter feel, but must stay high enough to hold gravity. |
+| `torque_limit`     | int     | Optional  | Servo torque cap (STS3215 `torque_limit` register) applied during manual mode, restored on exit. Valid range 0-1000. Default `50`. Lower = easier to backdrive, but it **must stay above the gravity-hold load or the joint will sag** — and a sagging joint drifting past `pos_deadband_deg` re-triggers following, so watch that `dev_deg` at rest stays close to `0`. `p_gain` alone softens the position loop but doesn't cap applied force; `torque_limit` is what actually makes the servo compliant to a hand. |
+
+All fields are optional; a zero/omitted value falls back to the built-in default, so manual mode is usable with no `manual_mode` config at all.
+
+**The defaults are bench-validated** on an unloaded SO-101: `p_gain: 8`, `torque_limit: 50`, `pos_deadband_deg: 0.5` — easy to guide by hand, and holds a fully extended arm without drooping. Compliance is arm- and payload-dependent, so an arm carrying a payload (or with different servo tuning) may need a higher `torque_limit` to hold its pose; verify on your arm that `dev_deg` at rest stays close to `0`. To leave the servos' configured `p_gain`/`torque_limit` untouched entirely, pass an explicit `0` as an inline override to `enter_manual_mode` (a config `0` is indistinguishable from omitted and uses the default).
+
+```json
+{
+  "manual_mode": {
+    "pos_deadband_deg": 0.5,
+    "loop_hz": 50,
+    "p_gain": 8,
+    "torque_limit": 50
+  }
+}
+```
+
+**Safety:** any motion command auto-exits manual mode first and re-stiffens the arm at its current pose — this includes `MoveToPosition`, `MoveToJointPositions`, `MoveThroughJointPositions`, motion-service planning (`GoToInputs`), and `Stop`. A hand may still be on the arm when this happens, so expect the arm to become rigid and then move. Manual mode is also torn down on `Close`/reconfigure. It has no idle timeout — it stays active until explicitly exited (`exit_manual_mode`) or auto-exited by one of the events above.
+
+The arm's `GetStatus`/`Status` reports the current mode. Normally:
+
+```json
+{ "mode": "auto" }
+```
+
+While manual mode is active, it also reports live per-joint telemetry (`actual_deg`, `goal_deg`, `dev_deg`, and `load`), which is useful for tuning `pos_deadband_deg`. `load` is telemetry only and is not used for control:
+
+```json
+{
+  "mode": "manual",
+  "manual_mode": {
+    "joints": [{ "servo": 1, "actual_deg": 12.3, "goal_deg": 10.3, "dev_deg": 2.0, "load": 0 }]
+  }
+}
+```
+
+**Tuning diagnostic:** the `set_torque_limit` DoCommand directly writes the `torque_limit` register on every arm servo (with a readback in the response) so you can find the lowest value that still holds the arm before dialing it into `manual_mode`. It takes a `value` (0–1000), requires manual mode to be off, and does not auto-restore — set it back to `1000` (or reinitialize) when done.
 
 ### Communication
 
@@ -230,6 +280,34 @@ Retrieve current calibration data:
 {
   "command": "get_calibration"
 }
+```
+
+#### Enter Manual Mode
+
+Enter [manual (hand-guided) mode](#manual-mode). Accepts the same tuning keys as the `manual_mode` config object (`pos_deadband_deg`, `loop_hz`, `p_gain`, `torque_limit`) inline as optional overrides, which layer on top of the configured `manual_mode` values. Calling this while already in manual mode tears down the current session and starts a fresh one with the new parameters — no need to `exit_manual_mode` first.
+
+```json
+{ "command": "enter_manual_mode", "pos_deadband_deg": 3 }
+```
+
+Response:
+
+```json
+{ "mode": "manual", "servos": [1, 2, 3, 4, 5] }
+```
+
+#### Exit Manual Mode
+
+Leave manual mode, restore normal servo stiffness, and hold the current pose:
+
+```json
+{ "command": "exit_manual_mode" }
+```
+
+Response:
+
+```json
+{ "mode": "auto" }
 ```
 
 #### Set Speed

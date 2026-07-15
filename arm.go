@@ -97,6 +97,41 @@ type SO101ArmConfig struct {
 	// aggressive. Defaults to 0.9 for each of the 5 meshes when empty. Ignored unless
 	// UseURDF is set.
 	MeshDecimationRatios []float64 `json:"mesh_decimation_ratios,omitempty"`
+
+	// ManualMode tunes hand-guided ("manual") mode. Optional; nil disables
+	// the feature / uses built-in defaults throughout.
+	ManualMode *ManualModeConfig `json:"manual_mode,omitempty"`
+}
+
+// ManualModeConfig tunes hand-guided ("manual") mode. All fields optional;
+// zero means "use the built-in default". See manualDefaults(), defaultManualPGain,
+// and defaultManualTorqueLimit — the defaults are the bench-validated tuning, so
+// manual mode is usable with no config at all.
+type ManualModeConfig struct {
+	PosDeadbandDeg float64 `json:"pos_deadband_deg,omitempty"` // backdrive distance (deg) before the goal follows the hand (default 0.5)
+	LoopHz         float64 `json:"loop_hz,omitempty"`          // control loop rate (Hz) (default 50)
+	PGain          int     `json:"p_gain,omitempty"`           // reduced servo P-gain during manual mode (default 8; 0-255)
+	TorqueLimit    int     `json:"torque_limit,omitempty"`     // servo torque cap during manual mode for backdrive compliance (default 50; 0-1000; lower = easier to move but must stay above gravity-hold load)
+}
+
+// Validate ensures the manual mode config's fields are within acceptable ranges.
+func (m *ManualModeConfig) Validate() error {
+	if m == nil {
+		return nil
+	}
+	if m.PosDeadbandDeg < 0 || m.PosDeadbandDeg > 45 {
+		return fmt.Errorf("manual_mode.pos_deadband_deg must be in [0,45], got %v", m.PosDeadbandDeg)
+	}
+	if m.LoopHz < 0 || m.LoopHz > 200 {
+		return fmt.Errorf("manual_mode.loop_hz must be in [0,200], got %v", m.LoopHz)
+	}
+	if m.PGain < 0 || m.PGain > 255 {
+		return fmt.Errorf("manual_mode.p_gain must be in [0,255], got %v", m.PGain)
+	}
+	if m.TorqueLimit < 0 || m.TorqueLimit > 1000 {
+		return fmt.Errorf("manual_mode.torque_limit must be in [0,1000], got %v", m.TorqueLimit)
+	}
+	return nil
 }
 
 // Validate ensures all parts of the config are valid
@@ -123,6 +158,10 @@ func (cfg *SO101ArmConfig) Validate(path string) ([]string, []string, error) {
 		}
 	}
 
+	if err := cfg.ManualMode.Validate(); err != nil {
+		return nil, nil, err
+	}
+
 	deps := []string{}
 
 	if cfg.Motion != "" {
@@ -143,6 +182,7 @@ type so101 struct {
 	cfg        *SO101ArmConfig
 	opMgr      *operation.SingleOperationManager
 	controller *SafeSoArmController
+	manual     *manualSession
 
 	mu       sync.RWMutex
 	moveLock sync.Mutex
@@ -488,6 +528,10 @@ func (s *so101) EndPosition(ctx context.Context, extra map[string]interface{}) (
 // and accepts whatever orientation falls out. Callers who want different planner behavior may
 // override any key by passing their own value via extra.
 func (s *so101) MoveToPosition(ctx context.Context, pose spatialmath.Pose, extra map[string]interface{}) error {
+	s.mu.Lock()
+	s.exitManualLocked("motion command received")
+	s.mu.Unlock()
+
 	planExtra := map[string]interface{}{"goal_metric_type": "position_only"}
 	for k, v := range extra {
 		planExtra[k] = v
@@ -581,6 +625,10 @@ func parseWaitExtra(extra map[string]interface{}) bool {
 }
 
 func (s *so101) MoveToJointPositions(ctx context.Context, positions []referenceframe.Input, extra map[string]interface{}) error {
+	s.mu.Lock()
+	s.exitManualLocked("motion command received")
+	s.mu.Unlock()
+
 	s.moveLock.Lock()
 	defer s.moveLock.Unlock()
 
@@ -600,6 +648,10 @@ func (s *so101) MoveToJointPositions(ctx context.Context, positions []referencef
 }
 
 func (s *so101) MoveThroughJointPositions(ctx context.Context, positions [][]referenceframe.Input, options *arm.MoveOptions, extra map[string]interface{}) error {
+	s.mu.Lock()
+	s.exitManualLocked("motion command received")
+	s.mu.Unlock()
+
 	s.moveLock.Lock()
 	defer s.moveLock.Unlock()
 
@@ -655,6 +707,10 @@ func (s *so101) JointPositions(ctx context.Context, extra map[string]interface{}
 }
 
 func (s *so101) Stop(ctx context.Context, extra map[string]interface{}) error {
+	s.mu.Lock()
+	s.exitManualLocked("stop command received")
+	s.mu.Unlock()
+
 	s.isMoving.Store(false)
 	return s.controller.Stop(ctx)
 }
@@ -680,7 +736,111 @@ func (s *so101) Get3DModels(ctx context.Context, extra map[string]interface{}) (
 
 // Status returns the current status of the resource as a map of key-value pairs.
 func (s *so101) Status(ctx context.Context) (map[string]interface{}, error) {
-	return map[string]interface{}{}, nil
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.manual != nil && s.manual.running() {
+		// GetStatus serializes this via structpb.NewStruct, which only accepts
+		// structpb-native types — a typed []manualJointStatus slice fails. Emit the
+		// joints as []interface{} of map[string]interface{} so the wire format holds.
+		js := s.manual.statusJoints()
+		joints := make([]interface{}, 0, len(js))
+		for _, j := range js {
+			joints = append(joints, map[string]interface{}{
+				"servo":      j.Servo,
+				"actual_deg": j.ActualDeg,
+				"goal_deg":   j.GoalDeg,
+				"dev_deg":    j.DevDeg,
+				"load":       j.Load,
+			})
+		}
+		return map[string]interface{}{
+			"mode":        "manual",
+			"manual_mode": map[string]interface{}{"joints": joints},
+		}, nil
+	}
+	return map[string]interface{}{"mode": "auto"}, nil
+}
+
+// regDecodeLE decodes a little-endian unsigned register value from its raw bytes
+// (STS3215 registers are little-endian; low byte first).
+func regDecodeLE(data []byte) int {
+	v := 0
+	for i, b := range data {
+		v |= int(b) << (8 * i)
+	}
+	return v
+}
+
+// setTorqueLimitDiag is a diagnostic that writes the torque_limit register directly on every
+// arm servo, in isolation from manual mode, so you can confirm the register actually governs
+// holding torque on this firmware (e.g. value 10 should make the arm droop; 1000 restores full
+// torque). Requires a "value" (0-1000). Run with manual mode OFF; it does not auto-restore —
+// set it back to 1000 (or reinitialize) when done. Refuses while manual mode is active so it
+// can't fight the control loop.
+func (s *so101) setTorqueLimitDiag(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
+	s.mu.RLock()
+	active := s.manual != nil && s.manual.running()
+	s.mu.RUnlock()
+	if active {
+		return nil, fmt.Errorf("exit manual mode before set_torque_limit (it would fight the control loop)")
+	}
+	v, ok := cmd["value"].(float64)
+	if !ok {
+		return nil, fmt.Errorf("set_torque_limit requires a 'value' number (0-1000)")
+	}
+	iv := int(v)
+	if iv < 0 || iv > 1000 {
+		return nil, fmt.Errorf("value must be in [0,1000], got %d", iv)
+	}
+	data := []byte{byte(iv & 0xFF), byte((iv >> 8) & 0xFF)}
+	results := make([]interface{}, 0, len(s.armServoIDs))
+	for _, id := range s.armServoIDs {
+		err := s.controller.WriteServoRegister(ctx, id, "torque_limit", data)
+		row := map[string]interface{}{"servo": id, "ok": err == nil}
+		if err != nil {
+			row["error"] = err.Error()
+		}
+		// Read back to confirm the write stuck.
+		if rb, rerr := s.controller.ReadServoRegister(ctx, id, "torque_limit"); rerr == nil {
+			row["readback"] = regDecodeLE(rb)
+		}
+		results = append(results, row)
+	}
+	return map[string]interface{}{
+		"set_torque_limit": iv,
+		"servos":           results,
+		"note":             "diagnostic: restore full torque with value 1000 (or reinitialize) when done",
+	}, nil
+}
+
+// enterManualLocked starts a manual-mode session. Caller holds s.mu.
+func (s *so101) enterManualLocked(overrides map[string]interface{}) map[string]interface{} {
+	// If already active, tear down first so the new parameters take effect (live re-tuning).
+	// exitManualLocked restores the prior compliance registers before the fresh session
+	// re-applies with the new values.
+	if s.manual != nil && s.manual.running() {
+		s.exitManualLocked("re-enter with new parameters")
+	}
+	var mm *ManualModeConfig
+	if s.cfg != nil {
+		mm = s.cfg.ManualMode
+	}
+	params, pGain, torqueLimit := resolveManualParams(mm, overrides)
+	io := newControllerManualIO(s.controller, s.armServoIDs, s.calculateJointLimits())
+	s.manual = newManualSession(s.cancelCtx, io, params, pGain, torqueLimit, s.logger)
+	s.manual.start()
+	return map[string]interface{}{"mode": "manual", "servos": s.armServoIDs}
+}
+
+// exitManualLocked tears down manual mode if active and holds the current pose.
+// Caller holds s.mu. Safe to call when not active.
+func (s *so101) exitManualLocked(reason string) {
+	if s.manual == nil || !s.manual.running() {
+		return
+	}
+	s.logger.Infof("manual mode exiting: %s", reason)
+	s.manual.stop()
+	s.manual = nil
 }
 
 func (s *so101) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
@@ -785,6 +945,20 @@ func (s *so101) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[
 			"calibration": calibration,
 		}, nil
 
+	case "enter_manual_mode":
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.enterManualLocked(cmd), nil
+
+	case "exit_manual_mode":
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.exitManualLocked("exit_manual_mode command")
+		return map[string]interface{}{"mode": "auto"}, nil
+
+	case "set_torque_limit":
+		return s.setTorqueLimitDiag(ctx, cmd)
+
 	default:
 		// Check for speed and acceleration setting
 		result := make(map[string]interface{})
@@ -856,6 +1030,10 @@ func (s *so101) Geometries(ctx context.Context, extra map[string]interface{}) ([
 }
 
 func (s *so101) Close(context.Context) error {
+	s.mu.Lock()
+	s.exitManualLocked("arm closing")
+	s.mu.Unlock()
+
 	s.cancelFunc()
 	ReleaseSharedController()
 	return nil

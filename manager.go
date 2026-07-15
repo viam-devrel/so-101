@@ -278,6 +278,28 @@ func (s *SafeSoArmController) Ping(ctx context.Context) error {
 	return nil
 }
 
+// LoadForServos reads present load (signed, sign-magnitude decoded) for the given
+// servos. One Load read per servo; at 50 Hz over 5 servos this is well within the
+// 1 Mbaud bus budget. Future optimization: a single SyncRead of RegPresentLoad.
+func (s *SafeSoArmController) LoadForServos(ctx context.Context, servoIDs []int) (map[int]int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	out := make(map[int]int, len(servoIDs))
+	for _, id := range servoIDs {
+		servo := s.group.ServoByID(id)
+		if servo == nil {
+			return nil, fmt.Errorf("servo %d not available", id)
+		}
+		load, err := servo.Load(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read load for servo %d: %w", id, err)
+		}
+		out[id] = load
+	}
+	return out, nil
+}
+
 // WriteServoRegister writes to a specific servo register by name
 func (s *SafeSoArmController) WriteServoRegister(ctx context.Context, servoID int, registerName string, data []byte) error {
 	s.mu.Lock()
@@ -289,6 +311,19 @@ func (s *SafeSoArmController) WriteServoRegister(ctx context.Context, servoID in
 	}
 
 	return servo.WriteRegister(ctx, registerName, data)
+}
+
+// ReadServoRegister reads a named register from a specific servo.
+func (s *SafeSoArmController) ReadServoRegister(ctx context.Context, servoID int, registerName string) ([]byte, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	servo := s.group.ServoByID(servoID)
+	if servo == nil {
+		return nil, fmt.Errorf("servo %d not available", servoID)
+	}
+
+	return servo.ReadRegister(ctx, registerName)
 }
 
 func (s *SafeSoArmController) SetCalibration(calibration SO101FullCalibration) error {
