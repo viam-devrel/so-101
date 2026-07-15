@@ -104,12 +104,14 @@ type SO101ArmConfig struct {
 }
 
 // ManualModeConfig tunes hand-guided ("manual") mode. All fields optional;
-// zero means "use the built-in default". See manualDefaults().
+// zero means "use the built-in default". See manualDefaults(), defaultManualPGain,
+// and defaultManualTorqueLimit — the defaults are the bench-validated tuning, so
+// manual mode is usable with no config at all.
 type ManualModeConfig struct {
-	PosDeadbandDeg float64 `json:"pos_deadband_deg,omitempty"` // backdrive distance (deg) before the goal follows the hand
-	LoopHz         float64 `json:"loop_hz,omitempty"`          // control loop rate (Hz)
-	PGain          int     `json:"p_gain,omitempty"`           // optional reduced servo P-gain during manual mode (0 = unchanged)
-	TorqueLimit    int     `json:"torque_limit,omitempty"`     // optional servo torque cap during manual mode for backdrive compliance (0 = unchanged; ~0-1000; lower = easier to move but must stay above gravity-hold load)
+	PosDeadbandDeg float64 `json:"pos_deadband_deg,omitempty"` // backdrive distance (deg) before the goal follows the hand (default 0.5)
+	LoopHz         float64 `json:"loop_hz,omitempty"`          // control loop rate (Hz) (default 50)
+	PGain          int     `json:"p_gain,omitempty"`           // reduced servo P-gain during manual mode (default 8; 0-255)
+	TorqueLimit    int     `json:"torque_limit,omitempty"`     // servo torque cap during manual mode for backdrive compliance (default 50; 0-1000; lower = easier to move but must stay above gravity-hold load)
 }
 
 // Validate ensures the manual mode config's fields are within acceptable ranges.

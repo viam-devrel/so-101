@@ -328,17 +328,27 @@ func (a *controllerManualIO) restoreCompliance(ctx context.Context) error {
 	return firstErr
 }
 
-// manualDefaults returns the built-in tuning; conservative for a stable first bring-up.
+// Bench-validated compliance defaults: the lowest settings found to still hold a fully
+// extended arm against gravity while staying easy to guide by hand. These are arm- and
+// payload-dependent, so a heavily loaded arm may need a higher torqueLimit; see README.
+const (
+	defaultManualPGain       = 8
+	defaultManualTorqueLimit = 50
+)
+
+// manualDefaults returns the built-in loop tuning (bench-validated).
 func manualDefaults() manualParams {
-	return manualParams{posDeadband: 2.0 * math.Pi / 180.0, dt: 1.0 / 50.0} // 2° deadband, 50 Hz
+	return manualParams{posDeadband: 0.5 * math.Pi / 180.0, dt: 1.0 / 50.0} // 0.5° deadband, 50 Hz
 }
 
 // resolveManualParams merges config + inline overrides over defaults.
 // Guarantees dt > 0 (LoopHz override only applies when > 0; default is 1/50).
+// A config zero is indistinguishable from "absent" and so falls back to the default; an
+// explicit 0 *override* is the escape hatch for leaving a compliance register untouched.
 func resolveManualParams(cfg *ManualModeConfig, overrides map[string]interface{}) (manualParams, int, int) {
 	p := manualDefaults()
-	pGain := 0
-	torqueLimit := 0
+	pGain := defaultManualPGain
+	torqueLimit := defaultManualTorqueLimit
 	if cfg != nil {
 		if cfg.PosDeadbandDeg > 0 {
 			p.posDeadband = cfg.PosDeadbandDeg * math.Pi / 180.0

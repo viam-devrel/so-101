@@ -109,18 +109,22 @@ Manual mode is entered and exited with the `enter_manual_mode` / `exit_manual_mo
 
 | Name               | Type    | Inclusion | Description                                                                                                                                                   |
 | ------------------ | ------- | --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `pos_deadband_deg` | float   | Optional  | Degrees a joint must be backdriven from its goal before the goal follows your hand. Higher = stiffer/less sensitive. Valid range 0-45. Default `2`. |
+| `pos_deadband_deg` | float   | Optional  | Degrees a joint must be backdriven from its goal before the goal follows your hand. Higher = stiffer/less sensitive. Valid range 0-45. Default `0.5`. |
 | `loop_hz`          | float   | Optional  | Control loop rate, in Hz. Valid range 0-200 (`0` uses the default). Default `50`.                                                                               |
-| `p_gain`           | int     | Optional  | Reduced servo position P-gain applied during manual mode. `0` leaves the servo's configured stiffness unchanged (the default); valid range 0-255. Lower = easier to backdrive/lighter feel, but must stay high enough to hold gravity. |
-| `torque_limit`     | int     | Optional  | Servo torque cap (STS3215 `torque_limit` register) applied during manual mode. `0` leaves the servo's configured torque limit unchanged (the default); valid range 0-1000. Lower = easier to backdrive, but it **must stay above the gravity-hold load or the joint will sag** — and a sagging joint drifting past `pos_deadband_deg` re-triggers following, so watch that `dev_deg` at rest stays close to `0`. `p_gain` alone softens the position loop but doesn't cap applied force; `torque_limit` is what actually makes the servo compliant to a hand. This is arm/scale-dependent, so tune per arm — on our bench, a value around 50 held an extended arm without drooping while staying easy to move; lower it gradually for a lighter feel while confirming the arm still holds its pose. |
+| `p_gain`           | int     | Optional  | Reduced servo position P-gain applied during manual mode, restored on exit. Valid range 0-255. Default `8`. Lower = easier to backdrive/lighter feel, but must stay high enough to hold gravity. |
+| `torque_limit`     | int     | Optional  | Servo torque cap (STS3215 `torque_limit` register) applied during manual mode, restored on exit. Valid range 0-1000. Default `50`. Lower = easier to backdrive, but it **must stay above the gravity-hold load or the joint will sag** — and a sagging joint drifting past `pos_deadband_deg` re-triggers following, so watch that `dev_deg` at rest stays close to `0`. `p_gain` alone softens the position loop but doesn't cap applied force; `torque_limit` is what actually makes the servo compliant to a hand. |
 
-All fields are optional; a zero/omitted value falls back to the built-in default.
+All fields are optional; a zero/omitted value falls back to the built-in default, so manual mode is usable with no `manual_mode` config at all.
+
+**The defaults are bench-validated** on an unloaded SO-101: `p_gain: 8`, `torque_limit: 50`, `pos_deadband_deg: 0.5` — easy to guide by hand, and holds a fully extended arm without drooping. Compliance is arm- and payload-dependent, so an arm carrying a payload (or with different servo tuning) may need a higher `torque_limit` to hold its pose; verify on your arm that `dev_deg` at rest stays close to `0`. To leave the servos' configured `p_gain`/`torque_limit` untouched entirely, pass an explicit `0` as an inline override to `enter_manual_mode` (a config `0` is indistinguishable from omitted and uses the default).
 
 ```json
 {
   "manual_mode": {
-    "pos_deadband_deg": 2,
-    "loop_hz": 50
+    "pos_deadband_deg": 0.5,
+    "loop_hz": 50,
+    "p_gain": 8,
+    "torque_limit": 50
   }
 }
 ```

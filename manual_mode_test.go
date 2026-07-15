@@ -262,3 +262,43 @@ func TestManualSession_StatusReportsLoad(t *testing.T) {
 		t.Fatalf("joint with load but no backdrive must not move, got %v", io.pos[1])
 	}
 }
+
+// TestResolveManualParams_BenchValidatedDefaults pins the out-of-the-box tuning to the
+// values validated on the bench: easy to guide by hand while holding a fully extended arm.
+func TestResolveManualParams_BenchValidatedDefaults(t *testing.T) {
+	p, pGain, torqueLimit := resolveManualParams(nil, nil)
+	if !approx(p.posDeadband, 0.5*math.Pi/180.0) {
+		t.Fatalf("default pos_deadband_deg must be 0.5, got %v rad", p.posDeadband)
+	}
+	if !approx(p.dt, 1.0/50.0) {
+		t.Fatalf("default loop rate must be 50 Hz, got dt=%v", p.dt)
+	}
+	if pGain != 8 {
+		t.Fatalf("default p_gain must be 8, got %d", pGain)
+	}
+	if torqueLimit != 50 {
+		t.Fatalf("default torque_limit must be 50, got %d", torqueLimit)
+	}
+}
+
+// Config values must win over the defaults, including for the compliance registers.
+func TestResolveManualParams_ConfigOverridesDefaults(t *testing.T) {
+	cfg := &ManualModeConfig{PosDeadbandDeg: 3, LoopHz: 25, PGain: 32, TorqueLimit: 400}
+	p, pGain, torqueLimit := resolveManualParams(cfg, nil)
+	if !approx(p.posDeadband, 3*math.Pi/180.0) || !approx(p.dt, 1.0/25.0) {
+		t.Fatalf("config loop params ignored: %+v", p)
+	}
+	if pGain != 32 || torqueLimit != 400 {
+		t.Fatalf("config compliance ignored: p_gain=%d torque_limit=%d", pGain, torqueLimit)
+	}
+}
+
+// An explicit 0 override is the escape hatch for leaving a compliance register untouched,
+// since a config zero is indistinguishable from "absent" and falls back to the default.
+func TestResolveManualParams_ZeroOverrideDisablesCompliance(t *testing.T) {
+	overrides := map[string]interface{}{"p_gain": float64(0), "torque_limit": float64(0)}
+	_, pGain, torqueLimit := resolveManualParams(nil, overrides)
+	if pGain != 0 || torqueLimit != 0 {
+		t.Fatalf("explicit zero must disable compliance writes: p_gain=%d torque_limit=%d", pGain, torqueLimit)
+	}
+}
