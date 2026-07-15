@@ -358,6 +358,19 @@ func TestConeSaturationBoundary(t *testing.T) {
 		"177.44 must be saturated")
 }
 
+// TestSaturationConstantMatchesConeMapping ties Task 2's poseCloudSaturationCos to this
+// task's cone mapping. The constant is only correct while coneToPoseCloud maps the cone to
+// OZ = 1-cos(a); if that formula ever changes, resolveGoalCloudConfig would keep warning at
+// the wrong angle with nothing to catch it. The tests above use literal degrees and would
+// not notice. This one derives the angle FROM the constant, so the two cannot drift apart.
+func TestSaturationConstantMatchesConeMapping(t *testing.T) {
+	satDeg := math.Acos(poseCloudSaturationCos) * 180 / math.Pi // 177.4374...
+	assert.True(t, coneCloud(satDeg+0.001).PoseInCloud(testGoal(), tiltedBy(1, 0, 180)),
+		"at the angle where resolveGoalCloudConfig warns, the cone must actually be saturated")
+	assert.False(t, coneCloud(satDeg-0.01).PoseInCloud(testGoal(), tiltedBy(1, 0, 180)),
+		"just below that angle the cone must still bound tilt")
+}
+
 func TestConeRollIsFree(t *testing.T) {
 	c := coneCloud(30)
 	for _, roll := range []float64{0, 45, 90, 179} {
