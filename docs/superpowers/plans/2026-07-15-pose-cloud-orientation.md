@@ -796,7 +796,12 @@ const (
 type goalPath int
 
 const (
-	pathCone       goalPath = iota // cone from config
+	// pathInvalid is the zero value, returned alongside any error. It exists so an error
+	// return is never mistakable for pathCone: otherwise wrapMoveErr would dress a
+	// pose_cloud parse error up as a cone-planning failure and tell the caller to widen
+	// tolerances they never set.
+	pathInvalid    goalPath = iota
+	pathCone                       // cone from config
 	pathRawCloud                   // caller-supplied pose_cloud
 	pathMetricType                 // caller-supplied goal_metric_type; no cloud sent
 )
@@ -807,7 +812,7 @@ const (
 // not append "_origin". It is passed to NewPoseInFrame unmodified.
 //
 // On success it returns a destination, a NEW extras map (the caller's map is never
-// mutated), and the path taken. On error it returns (nil, nil, 0, err).
+// mutated), and the path taken. On error it returns (nil, nil, pathInvalid, err).
 func buildMoveDestination(originFrame string, pose spatialmath.Pose, cfg goalCloudConfig,
 	extra map[string]interface{},
 ) (*referenceframe.PoseInFrame, map[string]interface{}, goalPath, error) {
@@ -815,7 +820,7 @@ func buildMoveDestination(originFrame string, pose spatialmath.Pose, cfg goalClo
 	_, hasMetric := extra[extraKeyGoalMetricType]
 
 	if hasCloud && hasMetric {
-		return nil, nil, 0, fmt.Errorf(
+		return nil, nil, pathInvalid, fmt.Errorf(
 			"extra cannot contain both %q and %q: %q makes the planner ignore goal clouds, "+
 				"so the combination is incoherent", extraKeyPoseCloud, extraKeyGoalMetricType,
 			extraKeyGoalMetricType)
@@ -837,7 +842,7 @@ func buildMoveDestination(originFrame string, pose spatialmath.Pose, cfg goalClo
 	case hasCloud:
 		pc, err := parsePoseCloud(rawCloud)
 		if err != nil {
-			return nil, nil, 0, err
+			return nil, nil, pathInvalid, err
 		}
 		return referenceframe.NewPoseInFrameWithGoalCloud(originFrame, pose, pc), planExtra, pathRawCloud, nil
 	default:
