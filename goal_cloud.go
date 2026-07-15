@@ -4,6 +4,7 @@ import (
 	"math"
 
 	"go.viam.com/rdk/logging"
+	"go.viam.com/rdk/referenceframe"
 	"go.viam.com/rdk/utils"
 )
 
@@ -66,4 +67,34 @@ func resolveGoalCloudConfig(tolDeg, posTolMM float64, logger logging.Logger) goa
 			cfg.OrientationToleranceDeg)
 	}
 	return cfg
+}
+
+// coneToPoseCloud converts an approach-axis cone half-angle into a PoseCloud.
+//
+// Every field here is load-bearing and was established empirically; see
+// docs/superpowers/specs/2026-07-15-pose-cloud-orientation-design.md before changing any
+// of them:
+//
+//   - X/Y/Z must be > 0. PoseInCloud adds a 0.001 epsilon to each leeway, so a zero
+//     leeway demands a 1-micron match and the cloud would never match.
+//   - OX/OY are deliberately 1 (unconstrained). OZ alone defines the cone.
+//   - Theta must be exactly 180. For a pure tilt, the relative Theta reports the tilt's
+//     AZIMUTH (about X -> 90, about Y -> 0), not the roll -- and it does so independent of
+//     the tilt's magnitude. Azimuth sweeps the full [-180, 180], so ONLY 180 admits every
+//     azimuth; that is, only 180 yields an isotropic cone. Smaller values do not reject
+//     tilts outright -- they silently carve out a wedge of tilt DIRECTIONS (Theta=90 still
+//     accepts a tilt about X, but rejects azimuths past 180). TestConeBoundsTiltIsotropically
+//     pins this: at azimuth 270 the reported Theta is exactly -180.
+//     The cost is that roll cannot be constrained at all, which is why this is
+//     approach-axis planning with free roll.
+func coneToPoseCloud(cfg goalCloudConfig) *referenceframe.PoseCloud {
+	return &referenceframe.PoseCloud{
+		X:     cfg.PositionToleranceMM,
+		Y:     cfg.PositionToleranceMM,
+		Z:     cfg.PositionToleranceMM,
+		OX:    1,
+		OY:    1,
+		OZ:    1 - math.Cos(utils.DegToRad(cfg.OrientationToleranceDeg)),
+		Theta: 180,
+	}
 }

@@ -1,10 +1,15 @@
 package so_arm
 
 import (
+	"math"
 	"testing"
 
+	"github.com/golang/geo/r3"
 	"github.com/stretchr/testify/assert"
 	"go.viam.com/rdk/logging"
+	"go.viam.com/rdk/referenceframe"
+	"go.viam.com/rdk/spatialmath"
+	"go.viam.com/rdk/utils"
 )
 
 func TestResolveGoalCloudConfigDefaults(t *testing.T) {
@@ -50,4 +55,167 @@ func TestResolveGoalCloudConfigDefaultsDoNotWarn(t *testing.T) {
 	logger, logs := logging.NewObservedTestLogger(t)
 	resolveGoalCloudConfig(0, 0, logger)
 	assert.Equal(t, 0, logs.Len(), "the defaults must be quiet")
+}
+
+// testGoal is a tool pointing straight down, a typical SO-101 grasp pose.
+func testGoal() spatialmath.Pose {
+	return spatialmath.NewPose(
+		r3.Vector{X: 300, Y: 0, Z: 200},
+		&spatialmath.OrientationVectorDegrees{OX: 0, OY: 0, OZ: -1, Theta: 0},
+	)
+}
+
+// tiltedBy returns testGoal() tilted by deg about the goal's local (ax, ay, 0) axis. The
+// rotation composes onto the goal, so it applies in the goal's own frame -- and since the
+// goal points straight down, that local frame is not the world frame.
+func tiltedBy(ax, ay, deg float64) spatialmath.Pose {
+	return spatialmath.Compose(testGoal(), spatialmath.NewPoseFromOrientation(
+		&spatialmath.R4AA{RX: ax, RY: ay, RZ: 0, Theta: utils.DegToRad(deg)}))
+}
+
+// coneCloud builds the cloud under test for a cone half-angle. Its position tolerance is
+// deliberately 2.5 rather than 1: that keeps it distinct from the unconstrained OX/OY
+// sentinel of 1, so the position -> X/Y/Z mapping stays legible and a transposition of the
+// two would be caught.
+func coneCloud(tolDeg float64) *referenceframe.PoseCloud {
+	return coneToPoseCloud(goalCloudConfig{OrientationToleranceDeg: tolDeg, PositionToleranceMM: 2.5})
+}
+
+// TestConeToPoseCloudFields pins the complete field set: X, Y, Z, OX, OY, OZ, Theta is the
+// WHOLE struct in rdk v1.0.0. Do not look for a ReferenceFrame field -- v0.123.0 had one,
+// v1.0.0 removed it, and the struct's free-floating doc comment about reference frames
+// misleadingly survives.
+func TestConeToPoseCloudFields(t *testing.T) {
+	c := coneCloud(30)
+	// The position tolerance maps to all three positional axes...
+	assert.Equal(t, 2.5, c.X)
+	assert.Equal(t, 2.5, c.Y)
+	assert.Equal(t, 2.5, c.Z)
+	// ...while OX/OY are deliberately unconstrained: OZ alone defines the cone.
+	assert.Equal(t, 1.0, c.OX)
+	assert.Equal(t, 1.0, c.OY)
+	assert.InDelta(t, 1-math.Cos(utils.DegToRad(30)), c.OZ, 1e-12)
+	// MUST be 180: Theta encodes tilt AZIMUTH, not roll. See the spec.
+	assert.Equal(t, 180.0, c.Theta)
+}
+
+func TestConeBoundsTiltIsotropically(t *testing.T) {
+	c := coneCloud(30)
+	for _, azDeg := range []float64{0, 45, 90, 135, 180, 270} {
+		ax, ay := math.Cos(utils.DegToRad(azDeg)), math.Sin(utils.DegToRad(azDeg))
+		assert.True(t, c.PoseInCloud(testGoal(), tiltedBy(ax, ay, 29)),
+			"29deg tilt at azimuth %.0f should be accepted", azDeg)
+		assert.False(t, c.PoseInCloud(testGoal(), tiltedBy(ax, ay, 31)),
+			"31deg tilt at azimuth %.0f should be rejected", azDeg)
+	}
+}
+
+func TestConeBoundsAbove90Degrees(t *testing.T) {
+	// The cone does NOT go degenerate above 90, despite OZ = 1-cos(a) exceeding 1.
+	assert.True(t, coneCloud(90).PoseInCloud(testGoal(), tiltedBy(1, 0, 89)))
+	assert.False(t, coneCloud(90).PoseInCloud(testGoal(), tiltedBy(1, 0, 91)))
+	assert.True(t, coneCloud(120).PoseInCloud(testGoal(), tiltedBy(1, 0, 119)))
+	assert.False(t, coneCloud(120).PoseInCloud(testGoal(), tiltedBy(1, 0, 121)))
+}
+
+// TestConeSaturationBoundary is the empirical anchor for saturation: it brackets the
+// boundary with literal MEASURED degrees, owing nothing to poseCloudSaturationCos. Its
+// sibling TestSaturationConstantMatchesConeMapping is the drift guard, deriving the same
+// boundary FROM that constant. Both are needed: this one would still pass if the constant
+// were wrong, and the sibling would still pass if both the constant and the mapping drifted
+// together.
+func TestConeSaturationBoundary(t *testing.T) {
+	// Saturation begins at acos(-0.999) = 177.4374, NOT 179.
+	assert.False(t, coneCloud(177.40).PoseInCloud(testGoal(), tiltedBy(1, 0, 180)),
+		"177.40 must still reject a 180deg tilt")
+	assert.True(t, coneCloud(177.44).PoseInCloud(testGoal(), tiltedBy(1, 0, 180)),
+		"177.44 must be saturated")
+}
+
+// TestSaturationConstantMatchesConeMapping ties Task 2's poseCloudSaturationCos to this
+// task's cone mapping. The constant is only correct while coneToPoseCloud maps the cone to
+// OZ = 1-cos(a); if that formula ever changes, resolveGoalCloudConfig would keep warning at
+// the wrong angle with nothing to catch it. The tests above use literal degrees and would
+// not notice. This one derives the angle FROM the constant, so the two cannot drift apart.
+func TestSaturationConstantMatchesConeMapping(t *testing.T) {
+	satDeg := math.Acos(poseCloudSaturationCos) * 180 / math.Pi // 177.4374...
+	assert.True(t, coneCloud(satDeg+0.001).PoseInCloud(testGoal(), tiltedBy(1, 0, 180)),
+		"at the angle where resolveGoalCloudConfig warns, the cone must actually be saturated")
+	assert.False(t, coneCloud(satDeg-0.01).PoseInCloud(testGoal(), tiltedBy(1, 0, 180)),
+		"just below that angle the cone must still bound tilt")
+}
+
+func TestConeRollIsFree(t *testing.T) {
+	c := coneCloud(30)
+	// 180 is the actual boundary case: |Theta| = 180 against a leeway of 180 + 0.001.
+	for _, roll := range []float64{0, 45, 90, 179, 180} {
+		p := spatialmath.Compose(testGoal(), spatialmath.NewPoseFromOrientation(
+			&spatialmath.R4AA{RX: 0, RY: 0, RZ: 1, Theta: utils.DegToRad(roll)}))
+		assert.True(t, c.PoseInCloud(testGoal(), p), "roll %.0f should be accepted", roll)
+	}
+}
+
+func TestConeTiltPlusRollStaysBounded(t *testing.T) {
+	c := coneCloud(30)
+	for _, roll := range []float64{0, 70, 170} {
+		for _, tc := range []struct {
+			tilt float64
+			want bool
+		}{{20, true}, {29, true}, {31, false}} {
+			p := spatialmath.Compose(testGoal(), spatialmath.Compose(
+				spatialmath.NewPoseFromOrientation(&spatialmath.R4AA{RX: 1, Theta: utils.DegToRad(tc.tilt)}),
+				spatialmath.NewPoseFromOrientation(&spatialmath.R4AA{RZ: 1, Theta: utils.DegToRad(roll)})))
+			assert.Equal(t, tc.want, c.PoseInCloud(testGoal(), p),
+				"tilt %.0f roll %.0f", tc.tilt, roll)
+		}
+	}
+}
+
+// effectiveConeDeg measures the cone rdk's PoseInCloud actually enforces, by binary
+// search on acceptance.
+func effectiveConeDeg(c *referenceframe.PoseCloud) float64 {
+	lo, hi := 0.0, 180.0
+	for i := 0; i < 60; i++ {
+		mid := (lo + hi) / 2
+		if c.PoseInCloud(testGoal(), tiltedBy(1, 0, mid)) {
+			lo = mid
+		} else {
+			hi = mid
+		}
+	}
+	return lo
+}
+
+func TestConeEffectiveWideningFormula(t *testing.T) {
+	// rdk ADDS its 0.001 epsilon to the leeway, so the cone actually enforced is always
+	// slightly wider than requested. Comparing measurement (LHS, from rdk's real
+	// PoseInCloud) against our model (RHS) is not tautological: it pins that our
+	// understanding of rdk's behavior is right, for any angle rather than six points.
+	// The sample spans all three regimes: 0 is epsilon-dominated, 2.6 is the crossover
+	// where the requested leeway equals the epsilon, 90+ is epsilon-negligible.
+	for _, requested := range []float64{0, 1, 2.6, 10, 30, 90, 150} {
+		want := math.Acos(math.Cos(utils.DegToRad(requested))-0.001) * 180 / math.Pi
+		assert.InDelta(t, want, effectiveConeDeg(coneCloud(requested)), 0.01,
+			"effective cone for requested %.1f", requested)
+	}
+	// One literal anchor, independent of the formula: at tolerance 0 the epsilon alone
+	// still admits ~2.5626deg. That is the floor a caller cannot get below.
+	assert.InDelta(t, 2.5626, effectiveConeDeg(coneCloud(0)), 0.01)
+}
+
+func TestConePositionalBoxNotRadius(t *testing.T) {
+	// Deliberately NOT coneCloud (which uses 2.5): the bounds below are measured values
+	// tied to a 1.0mm tolerance, so this test pins its own.
+	c := coneToPoseCloud(goalCloudConfig{OrientationToleranceDeg: 30, PositionToleranceMM: 1.0})
+	offset := func(dx, dy, dz float64) spatialmath.Pose {
+		g := testGoal()
+		return spatialmath.NewPose(
+			r3.Vector{X: g.Point().X + dx, Y: g.Point().Y + dy, Z: g.Point().Z + dz},
+			g.Orientation())
+	}
+	// The epsilon is additive: at X=1.0 the true bound is 1.001mm.
+	assert.True(t, c.PoseInCloud(testGoal(), offset(1.0009, 0, 0)))
+	assert.False(t, c.PoseInCloud(testGoal(), offset(1.0015, 0, 0)))
+	// Per-axis box, not a radius: all three axes at the bound is accepted at norm ~1.73mm.
+	assert.True(t, c.PoseInCloud(testGoal(), offset(1.0005, 1.0005, 1.0005)))
 }
