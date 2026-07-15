@@ -6,6 +6,7 @@ import (
 
 	"github.com/golang/geo/r3"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/referenceframe"
 	"go.viam.com/rdk/spatialmath"
@@ -265,4 +266,48 @@ func TestRDKContractZeroLeewayDemandsMicronMatch(t *testing.T) {
 		r3.Vector{X: g.Point().X + 0.01, Y: g.Point().Y, Z: g.Point().Z}, g.Orientation())
 	assert.False(t, broken.PoseInCloud(g, nudged),
 		"with zero positional leeway even a 0.01mm offset is rejected")
+}
+
+func TestParsePoseCloudValid(t *testing.T) {
+	// extra arrives via structpb, so every JSON number is a float64.
+	//
+	// Every value is DISTINCT and all seven are asserted: identical values (e.g. x==y)
+	// would let a setter transposition survive undetected, and coneToPoseCloud's OX:1/OY:1
+	// means no other test would catch it either.
+	got, err := parsePoseCloud(map[string]interface{}{
+		"x": 2.0, "y": 3.0, "z": 0.5, "ox": 0.25, "oy": 0.5, "oz": 0.1, "theta": 180.0,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 2.0, got.X)
+	assert.Equal(t, 3.0, got.Y)
+	assert.Equal(t, 0.5, got.Z)
+	assert.Equal(t, 0.25, got.OX)
+	assert.Equal(t, 0.5, got.OY)
+	assert.Equal(t, 0.1, got.OZ)
+	assert.Equal(t, 180.0, got.Theta)
+}
+
+func TestParsePoseCloudOmittedFieldsStayZero(t *testing.T) {
+	got, err := parsePoseCloud(map[string]interface{}{"oz": 0.1})
+	require.NoError(t, err)
+	assert.Equal(t, 0.0, got.X, "omitted fields stay zero -- sharp, but faithful passthrough")
+}
+
+func TestParsePoseCloudRejects(t *testing.T) {
+	for name, input := range map[string]interface{}{
+		"not an object":       "nope",
+		"docs-style casing":   map[string]interface{}{"OX": 1.0},
+		"protobuf casing":     map[string]interface{}{"o_x": 1.0},
+		"not a field in v1.0": map[string]interface{}{"reference_frame": 1.0},
+		"unknown key":         map[string]interface{}{"wobble": 1.0},
+		"non-numeric":         map[string]interface{}{"oz": "0.1"},
+		"negative":            map[string]interface{}{"oz": -0.1},
+		"NaN":                 map[string]interface{}{"oz": math.NaN()},
+		"Inf":                 map[string]interface{}{"oz": math.Inf(1)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := parsePoseCloud(input)
+			assert.Error(t, err)
+		})
+	}
 }

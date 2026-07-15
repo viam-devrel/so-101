@@ -1,7 +1,10 @@
 package so_arm
 
 import (
+	"fmt"
 	"math"
+	"sort"
+	"strings"
 
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/referenceframe"
@@ -100,4 +103,60 @@ func coneToPoseCloud(cfg goalCloudConfig) *referenceframe.PoseCloud {
 		OZ:    1 - math.Cos(utils.DegToRad(cfg.OrientationToleranceDeg)),
 		Theta: 180,
 	}
+}
+
+// poseCloudSetters maps the accepted pose_cloud keys to their fields. The names match
+// referenceframe.PoseCloud's own JSON tags exactly, and are all lowercase. Note the Viam
+// docs render these as OX/OY and protobuf JSON spells them o_x/oX; neither is accepted,
+// which is why unknown keys are an error rather than ignored. This is also the complete
+// field set: "reference_frame" is not a PoseCloud field in rdk v1.0.0.
+var poseCloudSetters = map[string]func(*referenceframe.PoseCloud, float64){
+	"x":     func(p *referenceframe.PoseCloud, v float64) { p.X = v },
+	"y":     func(p *referenceframe.PoseCloud, v float64) { p.Y = v },
+	"z":     func(p *referenceframe.PoseCloud, v float64) { p.Z = v },
+	"ox":    func(p *referenceframe.PoseCloud, v float64) { p.OX = v },
+	"oy":    func(p *referenceframe.PoseCloud, v float64) { p.OY = v },
+	"oz":    func(p *referenceframe.PoseCloud, v float64) { p.OZ = v },
+	"theta": func(p *referenceframe.PoseCloud, v float64) { p.Theta = v },
+}
+
+func poseCloudKeyList() string {
+	keys := make([]string, 0, len(poseCloudSetters))
+	for k := range poseCloudSetters {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return strings.Join(keys, ", ")
+}
+
+// parsePoseCloud converts a caller-supplied extra["pose_cloud"] into a PoseCloud.
+// Omitted fields stay zero, which -- given the additive 0.001 epsilon -- means
+// near-zero leeway. That is faithful passthrough and the point of an escape hatch, but it
+// is sharp: a cloud whose leeways are all zero demands a match within 1 micron / 0.001
+// degrees, which no IK solution will realistically achieve.
+func parsePoseCloud(raw interface{}) (*referenceframe.PoseCloud, error) {
+	m, ok := raw.(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("pose_cloud must be an object, got %T", raw)
+	}
+	pc := &referenceframe.PoseCloud{}
+	for k, rv := range m {
+		set, known := poseCloudSetters[k]
+		if !known {
+			return nil, fmt.Errorf("pose_cloud: unknown key %q; valid keys are %s (all lowercase; "+
+				"the Viam docs' OX/OY casing and protobuf's o_x are not accepted)", k, poseCloudKeyList())
+		}
+		v, ok := rv.(float64)
+		if !ok {
+			return nil, fmt.Errorf("pose_cloud: %q must be a number, got %T", k, rv)
+		}
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return nil, fmt.Errorf("pose_cloud: %q must be finite, got %v", k, v)
+		}
+		if v < 0 {
+			return nil, fmt.Errorf("pose_cloud: %q must not be negative, got %v", k, v)
+		}
+		set(pc, v)
+	}
+	return pc, nil
 }
