@@ -20,7 +20,7 @@ Three facts drive every design choice. All were verified empirically against rdk
 2. **`defaultEpsilon = 0.001` is ADDED to every leeway**, not just zeroed ones. Zero `X`/`Y`/`Z` therefore demands a 1-micron match, so positional leeway is **mandatory**. The effective cone is `acos(cos(tol) - 0.001)` — always slightly wider than requested.
 3. **`OZ` alone defines the cone.** `OX`/`OY` are set to `1` (unconstrained). Valid across `[0, 180]`, saturating at `acos(-0.999) = 177.4374°`.
 
-A cloud that never matches is **worse than no cloud**: the planner silently reverts to strict 6-DOF scoring and every move fails.
+A cloud the solver cannot realistically land inside is **worse than no cloud**: the planner silently reverts to strict 6-DOF scoring and moves fail.
 
 ---
 
@@ -563,12 +563,18 @@ Note this task's tests are the first to use `require`; add `"github.com/stretchr
 ```go
 func TestParsePoseCloudValid(t *testing.T) {
 	// extra arrives via structpb, so every JSON number is a float64.
+	// Every value is DISTINCT and all seven are asserted: identical values (e.g. x==y)
+	// would let a setter transposition survive undetected, and coneToPoseCloud's OX:1/OY:1
+	// means no other test would catch it either.
 	got, err := parsePoseCloud(map[string]interface{}{
-		"x": 2.0, "y": 2.0, "z": 0.5, "ox": 1.0, "oy": 1.0, "oz": 0.1, "theta": 180.0,
+		"x": 2.0, "y": 3.0, "z": 0.5, "ox": 0.25, "oy": 0.5, "oz": 0.1, "theta": 180.0,
 	})
 	require.NoError(t, err)
 	assert.Equal(t, 2.0, got.X)
+	assert.Equal(t, 3.0, got.Y)
 	assert.Equal(t, 0.5, got.Z)
+	assert.Equal(t, 0.25, got.OX)
+	assert.Equal(t, 0.5, got.OY)
 	assert.Equal(t, 0.1, got.OZ)
 	assert.Equal(t, 180.0, got.Theta)
 }
@@ -1318,7 +1324,7 @@ git commit -m "feat(simulated): plan MoveToPosition with an approach-axis cone"
 Follow the existing attribute-table style. Cover, for each model:
 
 - `orientation_tolerance_deg` — approach-axis cone half-angle. **Roll is not constrained.** Range `[0, 180]`, default `30`. `0` means the default, **not** exact. The enforced cone is `acos(cos(tol) - 0.001)`, so always slightly wider than requested (30 → ~30.11) and never narrower than ~2.56. At `>= 177.44` every orientation is accepted.
-- `position_tolerance_mm` — per-axis box leeway along the goal frame's axes, default `1.0`. Worst-case corner deviation is `sqrt(3)` times the value (~1.73mm at the default). Too small and the cloud never matches, so every move fails.
+- `position_tolerance_mm` — per-axis box leeway along the goal frame's axes, default `1.0`. Worst-case corner deviation is `sqrt(3)` times the value (~1.73mm at the default). Too small and the IK solver cannot realistically land inside the cloud, so planning reverts to strict six-DOF scoring and moves fail.
 
 - [ ] **Step 2: Add a short subsection on the escape hatch and server requirement**
 

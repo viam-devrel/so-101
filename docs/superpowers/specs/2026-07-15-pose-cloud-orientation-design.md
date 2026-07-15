@@ -47,9 +47,9 @@ reasonable reading of the docs, and each is load-bearing.
 `armplanning.PlannerOptions.GetGoalMetric` (v1.0.0, `planner_options.go:177`) consults
 `goal.GoalCloud.PoseInCloud(goal.Pose(), &dq)`. Inside the cloud the candidate scores
 zero; outside, the full weighted metric applies with `orientScale = 100`. For a goal the
-arm cannot reach exactly, landing in the cloud is the *only* path to success. A cloud that
-never matches is therefore worse than no cloud at all: planning silently reverts to strict
-6-DOF scoring and fails.
+arm cannot reach exactly, landing in the cloud is the *only* path to success. A cloud the solver
+cannot realistically land inside is therefore worse than no cloud at all: planning silently
+reverts to strict 6-DOF scoring and fails.
 
 ### Theta encodes tilt azimuth, not roll
 
@@ -237,7 +237,7 @@ comfortably below it.
 The default is therefore a **starting point to be tuned empirically during the
 experiment**, not a derived value. The geometry is documented so the trade-off is
 legible: smaller tolerance means better accuracy but the cloud matches less often, and a
-cloud that never matches fails every move.
+cloud the solver cannot realistically land inside fails every move.
 
 ## Behavior
 
