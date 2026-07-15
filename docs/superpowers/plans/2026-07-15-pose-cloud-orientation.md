@@ -449,7 +449,9 @@ Add to `goal_cloud.go` (add `"go.viam.com/rdk/referenceframe"` to imports):
 // of them:
 //
 //   - X/Y/Z must be > 0. PoseInCloud adds a 0.001 epsilon to each leeway, so a zero
-//     leeway demands a 1-micron match and the cloud would never match.
+//     leeway demands a match within 1 micron -- which no IK solution will realistically
+//     achieve, making the cloud useless in practice even though it does technically
+//     accept an exact match.
 //   - OX/OY are deliberately 1 (unconstrained). OZ alone defines the cone.
 //   - Theta must be exactly 180. For a pure tilt, the relative Theta reports the tilt's
 //     AZIMUTH (about X -> 90, about Y -> 0), not the roll -- and it does so independent of
@@ -519,8 +521,8 @@ func TestRegressionThetaMustBe180(t *testing.T) {
 }
 
 // TestRegressionPositionalLeewayIsMandatory documents why X/Y/Z must be > 0: the 0.001
-// epsilon means a zero leeway demands a 1-micron match, so the cloud never matches and
-// planning silently reverts to strict 6-DOF scoring.
+// epsilon means a zero leeway demands a match within 1 micron, which no IK solution will
+// realistically achieve -- so planning silently reverts to strict 6-DOF scoring.
 func TestRegressionPositionalLeewayIsMandatory(t *testing.T) {
 	broken := coneCloud(30)
 	broken.X, broken.Y, broken.Z = 0, 0, 0
@@ -634,7 +636,8 @@ func poseCloudKeyList() string {
 // parsePoseCloud converts a caller-supplied extra["pose_cloud"] into a PoseCloud.
 // Omitted fields stay zero, which -- given the additive 0.001 epsilon -- means
 // near-zero leeway. That is faithful passthrough and the point of an escape hatch, but it
-// is sharp: a cloud whose leeways are all zero will never match.
+// is sharp: a cloud whose leeways are all zero demands a match within 1 micron / 0.001
+// degrees, which no IK solution will realistically achieve.
 func parsePoseCloud(raw interface{}) (*referenceframe.PoseCloud, error) {
 	m, ok := raw.(map[string]interface{})
 	if !ok {

@@ -71,8 +71,9 @@ magnitude**. Verified across azimuths 0/45/90/135/180/225/270 at tilts of 5°, 2
 every reading matched the prediction to three decimals, and azimuth 270 reports exactly
 `-180`.
 
-Consequence: **`Theta` leeway must be exactly 180.** Azimuth sweeps the full `[-180, 180]`,
-so only a leeway of 180 admits every azimuth — only 180 yields an *isotropic* cone.
+Consequence: **`Theta` leeway must be exactly 180.** Azimuth sweeps `[0, 360)`, so the
+*reported* `Theta` sweeps the full `[-180, 180]` — and only a leeway of 180 admits every
+azimuth. Only 180 yields an *isotropic* cone.
 
 The precise failure mode matters, because the tempting shorthand ("smaller Theta rejects
 tilts") is **false** and a reader who tests it will falsify it. A smaller `Theta` does not
@@ -193,8 +194,8 @@ OrientationToleranceDeg float64 `json:"orientation_tolerance_deg,omitempty"`
 
 // PositionToleranceMM is the per-axis positional leeway of the goal cloud, applied as a
 // box along the goal frame's axes (worst-case corner deviation is sqrt(3) times this).
-// It must be large enough for the IK solver to land inside, or the cloud never matches
-// and every move fails. Zero or unset means the default, 1.0.
+// It must be large enough for the IK solver to realistically land inside; a cloud only an
+// exact match could satisfy means every move fails. Zero or unset means the default, 1.0.
 PositionToleranceMM float64 `json:"position_tolerance_mm,omitempty"`
 ```
 
