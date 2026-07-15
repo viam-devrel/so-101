@@ -16,7 +16,7 @@
 
 Three facts drive every design choice. All were verified empirically against rdk v1.0.0:
 
-1. **`PoseCloud.Theta` encodes the AZIMUTH of a tilt, not roll.** Tilt about X → `Theta=90`; about Y → `Theta=0`; diagonal → `Theta=45`. So `Theta` **must be 180** or the check rejects tilts by azimuth before the cone is consulted (a `Theta: 0` cloud rejects even a 5° tilt). Consequence: roll cannot be constrained alongside tilt. This is approach-axis planning with **free roll**.
+1. **`PoseCloud.Theta` encodes the AZIMUTH of a tilt, not roll.** Measured exactly: `Theta = 90 - azimuth`, independent of the tilt's magnitude (about X → `90`; about Y → `0`; diagonal → `45`; azimuth 270 → `-180`). Since azimuth sweeps the full `[-180, 180]`, **only `Theta: 180` admits every azimuth** — only 180 gives an *isotropic* cone. Beware the tempting shorthand "smaller Theta rejects tilts": it is **false** (a `Theta: 0` cloud still accepts a 5° tilt about Y). Smaller values silently carve out a wedge of tilt *directions*. Consequence: roll cannot be constrained alongside tilt. This is approach-axis planning with **free roll**.
 2. **`defaultEpsilon = 0.001` is ADDED to every leeway**, not just zeroed ones. Zero `X`/`Y`/`Z` therefore demands a 1-micron match, so positional leeway is **mandatory**. The effective cone is `acos(cos(tol) - 0.001)` — always slightly wider than requested.
 3. **`OZ` alone defines the cone.** `OX`/`OY` are set to `1` (unconstrained). Valid across `[0, 180]`, saturating at `acos(-0.999) = 177.4374°`.
 
@@ -451,10 +451,15 @@ Add to `goal_cloud.go` (add `"go.viam.com/rdk/referenceframe"` to imports):
 //   - X/Y/Z must be > 0. PoseInCloud adds a 0.001 epsilon to each leeway, so a zero
 //     leeway demands a 1-micron match and the cloud would never match.
 //   - OX/OY are deliberately 1 (unconstrained). OZ alone defines the cone.
-//   - Theta must be 180. For a pure tilt, PoseCloud's Theta reports the AZIMUTH of that
-//     tilt (about X -> 90, about Y -> 0), not the roll. At any smaller leeway the Theta
-//     check rejects tilts before the cone is consulted. The cost is that roll cannot be
-//     constrained at all, which is why this is approach-axis planning with free roll.
+//   - Theta must be exactly 180. For a pure tilt, the relative Theta reports the tilt's
+//     AZIMUTH (about X -> 90, about Y -> 0), not the roll -- and it does so independent of
+//     the tilt's magnitude. Azimuth sweeps the full [-180, 180], so ONLY 180 admits every
+//     azimuth; that is, only 180 yields an isotropic cone. Smaller values do not reject
+//     tilts outright -- they silently carve out a wedge of tilt DIRECTIONS (Theta=90 still
+//     accepts a tilt about X, but rejects azimuths past 180). TestConeBoundsTiltIsotropically
+//     pins this: at azimuth 270 the reported Theta is exactly -180.
+//     The cost is that roll cannot be constrained at all, which is why this is
+//     approach-axis planning with free roll.
 func coneToPoseCloud(cfg goalCloudConfig) *referenceframe.PoseCloud {
 	return &referenceframe.PoseCloud{
 		X:     cfg.PositionToleranceMM,

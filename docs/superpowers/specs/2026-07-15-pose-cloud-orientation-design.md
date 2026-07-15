@@ -66,10 +66,32 @@ relative `Theta` reports the **azimuth of the tilt**:
 `Theta` measures roll only when tilt is zero. There is also a parameterization singularity
 at identity: a 0.5° tilt about X reports `Theta = 0`, while 5° reports `Theta = 90`.
 
-Consequence: **`Theta` leeway must be 180.** At anything less, the `Theta` check rejects
-tilts by azimuth before the `OX`/`OY`/`OZ` cone is ever consulted — a `Theta: 0` cloud
-rejects even a 5° tilt, making the cone useless. And because `Theta` mixes azimuth with
-roll, no value of it can bound roll while permitting isotropic tilt. Hence: roll is free.
+The relationship is exact: measured **`Theta = 90 - azimuth`, independent of the tilt's
+magnitude**. Verified across azimuths 0/45/90/135/180/225/270 at tilts of 5°, 20° and 29° —
+every reading matched the prediction to three decimals, and azimuth 270 reports exactly
+`-180`.
+
+Consequence: **`Theta` leeway must be exactly 180.** Azimuth sweeps the full `[-180, 180]`,
+so only a leeway of 180 admits every azimuth — only 180 yields an *isotropic* cone.
+
+The precise failure mode matters, because the tempting shorthand ("smaller Theta rejects
+tilts") is **false** and a reader who tests it will falsify it. A smaller `Theta` does not
+reject tilts outright; it silently carves out a wedge of tilt *directions*. Measured with a
+30° cone against a 5° tilt:
+
+| `Theta` leeway | azimuth 0 (about X) | azimuth 90 (about Y) | azimuth 270 |
+|---|---|---|---|
+| 0 | rejected | **accepted** | rejected |
+| 90 | **accepted** | accepted | rejected |
+| 170 | **accepted** | accepted | rejected |
+| 180 | accepted | accepted | **accepted** |
+
+So even `Theta: 0` accepts a 5° tilt about Y. Only the isotropy argument holds under
+testing, which is why it — not the shorthand — is what `coneToPoseCloud`'s doc comment
+carries, alongside a pointer to the azimuth-270 test that enforces it.
+
+And because `Theta` mixes azimuth with roll, no value of it can bound roll while permitting
+isotropic tilt. Hence: roll is free.
 
 ### OZ alone defines the cone, across the full 0-180 range
 
