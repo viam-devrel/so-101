@@ -101,6 +101,25 @@ type SO101ArmConfig struct {
 	// ManualMode tunes hand-guided ("manual") mode. Optional; nil disables
 	// the feature / uses built-in defaults throughout.
 	ManualMode *ManualModeConfig `json:"manual_mode,omitempty"`
+
+	// OrientationToleranceDeg is the half-angle, in degrees, of the cone of acceptable
+	// end-effector approach directions around the goal orientation. Roll about that axis
+	// is NOT constrained. Valid range [0, 180]. Zero or unset means
+	// defaultOrientationToleranceDeg (30).
+	//
+	// The planner adds a 0.001 epsilon to the OZ leeway, so the cone actually enforced is
+	// acos(cos(tol) - 0.001): always slightly wider than requested (30 gives ~30.11) and
+	// never narrower than ~2.56. At or above 177.44 every orientation is accepted.
+	//
+	// Requires viam-server >= 0.127.0; older servers silently ignore goal clouds.
+	OrientationToleranceDeg float64 `json:"orientation_tolerance_deg,omitempty"`
+
+	// PositionToleranceMM is the per-axis positional leeway of the goal cloud, applied as
+	// a box along the goal frame's axes (worst-case corner deviation is sqrt(3) times this
+	// value). It must be large enough for the IK solver to realistically land inside; a
+	// cloud only an exact match could satisfy means every move fails. Zero or unset means
+	// defaultPositionToleranceMM (1.0).
+	PositionToleranceMM float64 `json:"position_tolerance_mm,omitempty"`
 }
 
 // ManualModeConfig tunes hand-guided ("manual") mode. All fields optional;
@@ -162,6 +181,10 @@ func (cfg *SO101ArmConfig) Validate(path string) ([]string, []string, error) {
 		return nil, nil, err
 	}
 
+	if err := validateGoalCloudTolerances(cfg.OrientationToleranceDeg, cfg.PositionToleranceMM); err != nil {
+		return nil, nil, err
+	}
+
 	deps := []string{}
 
 	if cfg.Motion != "" {
@@ -183,6 +206,10 @@ type so101 struct {
 	opMgr      *operation.SingleOperationManager
 	controller *SafeSoArmController
 	manual     *manualSession
+
+	// goalCloud is the resolved approach-axis tolerance pair. Set once in NewSO101 and
+	// never mutated (the model is resource.AlwaysRebuild), so it needs no mutex.
+	goalCloud goalCloudConfig
 
 	mu       sync.RWMutex
 	moveLock sync.Mutex
@@ -476,6 +503,7 @@ func NewSO101(ctx context.Context, deps resource.Dependencies, name resource.Nam
 		defaultSpeed: speedDegsPerSec,
 		defaultAcc:   accelerationDegsPerSec,
 		motion:       ms,
+		goalCloud:    resolveGoalCloudConfig(conf.OrientationToleranceDeg, conf.PositionToleranceMM, logger),
 		cancelCtx:    cancelCtx,
 		cancelFunc:   cancelFunc,
 		initCtx:      ctx, // Store initialization context
@@ -521,30 +549,38 @@ func (s *so101) EndPosition(ctx context.Context, extra map[string]interface{}) (
 
 // MoveToPosition moves the arm's end-effector to the target pose.
 //
-// The SO-101 is a 5-DOF arm. Six-DOF pose targets (position + orientation) are only reachable
-// on a 5-dimensional submanifold of SE(3); most combinations of target position and target
-// orientation are unreachable, producing "zero IK solutions produced" errors. We therefore
-// default the planner's goal metric to "position_only" so the solver matches the target point
-// and accepts whatever orientation falls out. Callers who want different planner behavior may
-// override any key by passing their own value via extra.
+// The SO-101 is a 5-DOF arm, so most six-DOF pose targets are unreachable. Rather than
+// discard orientation wholesale, the planner is given an approach-axis cone (a
+// referenceframe.PoseCloud) around the goal orientation: the tool's pointing direction is
+// constrained to within orientation_tolerance_deg, while roll about that axis is free.
+//
+// Callers may bypass the cone via extra: "goal_metric_type" restores the old
+// orientation-agnostic behavior, and "pose_cloud" supplies a raw cloud. See goal_cloud.go.
+//
+// Requires viam-server >= 0.127.0; older servers silently ignore goal clouds, which makes
+// planning revert to strict six-DOF scoring and fail.
 func (s *so101) MoveToPosition(ctx context.Context, pose spatialmath.Pose, extra map[string]interface{}) error {
+	// A motion command takes the arm out of hand-guided ("manual") mode.
 	s.mu.Lock()
 	s.exitManualLocked("motion command received")
 	s.mu.Unlock()
 
-	planExtra := map[string]interface{}{"goal_metric_type": "position_only"}
-	for k, v := range extra {
-		planExtra[k] = v
+	dest, planExtra, path, err := buildMoveDestination(
+		fmt.Sprintf("%v_origin", s.Name().Name), pose, s.goalCloud, extra)
+	if err != nil {
+		// Return the build error UNWRAPPED: path is pathInvalid, and wrapping a pose_cloud
+		// parse error as a cone-planning failure would tell the caller to widen tolerances
+		// they never set.
+		return err
 	}
-	_, err := s.motion.Move(
-		ctx,
-		motion.MoveReq{
-			ComponentName: s.Name().Name,
-			Destination:   referenceframe.NewPoseInFrame(fmt.Sprintf("%v_origin", s.Name().Name), pose),
-			Extra:         planExtra,
-		},
-	)
-	return err
+	s.logger.Debugf("MoveToPosition goal cloud: %+v", dest.GoalCloud)
+
+	_, err = s.motion.Move(ctx, motion.MoveReq{
+		ComponentName: s.Name().Name,
+		Destination:   dest,
+		Extra:         planExtra,
+	})
+	return wrapMoveErr(err, path, s.goalCloud)
 }
 
 // clampPositions clamps joint inputs (already in radians) to each joint's calibrated

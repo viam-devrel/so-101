@@ -68,6 +68,25 @@ type SO101SimulatedArmConfig struct {
 	// aggressive. Defaults to 0.9 for each of the 5 meshes when empty. Ignored unless
 	// UseURDF is set.
 	MeshDecimationRatios []float64 `json:"mesh_decimation_ratios,omitempty"`
+
+	// OrientationToleranceDeg is the half-angle, in degrees, of the cone of acceptable
+	// end-effector approach directions around the goal orientation. Roll about that axis
+	// is NOT constrained. Valid range [0, 180]. Zero or unset means
+	// defaultOrientationToleranceDeg (30).
+	//
+	// The planner adds a 0.001 epsilon to the OZ leeway, so the cone actually enforced is
+	// acos(cos(tol) - 0.001): always slightly wider than requested (30 gives ~30.11) and
+	// never narrower than ~2.56. At or above 177.44 every orientation is accepted.
+	//
+	// Requires viam-server >= 0.127.0; older servers silently ignore goal clouds.
+	OrientationToleranceDeg float64 `json:"orientation_tolerance_deg,omitempty"`
+
+	// PositionToleranceMM is the per-axis positional leeway of the goal cloud, applied as
+	// a box along the goal frame's axes (worst-case corner deviation is sqrt(3) times this
+	// value). It must be large enough for the IK solver to realistically land inside; a
+	// cloud only an exact match could satisfy means every move fails. Zero or unset means
+	// defaultPositionToleranceMM (1.0).
+	PositionToleranceMM float64 `json:"position_tolerance_mm,omitempty"`
 }
 
 // Validate ensures all parts of the config are valid and declares the motion service
@@ -81,6 +100,10 @@ func (cfg *SO101SimulatedArmConfig) Validate(path string) ([]string, []string, e
 		if math.IsNaN(r) || r < 0 || r > 1 {
 			return nil, nil, fmt.Errorf("mesh_decimation_ratios[%d] must be in [0, 1], got %f", i, r)
 		}
+	}
+
+	if err := validateGoalCloudTolerances(cfg.OrientationToleranceDeg, cfg.PositionToleranceMM); err != nil {
+		return nil, nil, err
 	}
 
 	motionName := cfg.Motion
@@ -128,6 +151,10 @@ type simulatedSO101 struct {
 
 	// visualizeEEFrame adds the colored EE coordinate-frame marker to Get3DModels.
 	visualizeEEFrame bool
+
+	// goalCloud is the resolved approach-axis tolerance pair. Set once in
+	// newSimulatedSO101 and never mutated (resource.AlwaysRebuild), so it needs no mutex.
+	goalCloud goalCloudConfig
 
 	// lifetime management
 	closed     atomic.Bool
@@ -182,6 +209,7 @@ func newSimulatedSO101(
 		motion:           ms,
 		speed:            speedDegsPerSec * math.Pi / 180.0,
 		visualizeEEFrame: conf.VisualizeEEFrame,
+		goalCloud:        resolveGoalCloudConfig(conf.OrientationToleranceDeg, conf.PositionToleranceMM, logger),
 		cancelCtx:        cancelCtx,
 		cancelFunc:       cancelFunc,
 		currInputs:       make([]float64, len(model.DoF())),
@@ -295,26 +323,33 @@ func (s *simulatedSO101) EndPosition(ctx context.Context, extra map[string]inter
 
 // MoveToPosition moves the arm's end effector to the target pose using the motion service.
 //
-// The SO-101 is a 5-DOF arm, so most six-DOF pose targets are unreachable. As with the
-// devrel:so101:arm model, the planner's goal metric defaults to "position_only" so the
-// solver matches the target point and accepts whatever orientation results. Callers may
-// override any planner key via extra.
+// As with the devrel:so101:arm model, the planner is given an approach-axis cone around
+// the goal orientation rather than discarding orientation via "position_only": the tool's
+// pointing direction is constrained to within orientation_tolerance_deg, while roll about
+// that axis is free. Callers may bypass the cone via extra; see goal_cloud.go.
+//
+// Requires viam-server >= 0.127.0; older servers silently ignore goal clouds.
 func (s *simulatedSO101) MoveToPosition(ctx context.Context, pose spatialmath.Pose, extra map[string]interface{}) error {
 	if s.motion == nil {
 		return errors.New("MoveToPosition requires a motion service, which was not available at construction")
 	}
 
-	planExtra := map[string]interface{}{"goal_metric_type": "position_only"}
-	for k, v := range extra {
-		planExtra[k] = v
+	dest, planExtra, path, err := buildMoveDestination(
+		fmt.Sprintf("%v_origin", s.name.Name), pose, s.goalCloud, extra)
+	if err != nil {
+		// Return the build error UNWRAPPED: path is pathInvalid, and wrapping a pose_cloud
+		// parse error as a cone-planning failure would tell the caller to widen tolerances
+		// they never set.
+		return err
 	}
+	s.logger.Debugf("MoveToPosition goal cloud: %+v", dest.GoalCloud)
 
-	_, err := s.motion.Move(ctx, motion.MoveReq{
+	_, err = s.motion.Move(ctx, motion.MoveReq{
 		ComponentName: s.name.Name,
-		Destination:   referenceframe.NewPoseInFrame(fmt.Sprintf("%v_origin", s.name.Name), pose),
+		Destination:   dest,
 		Extra:         planExtra,
 	})
-	return err
+	return wrapMoveErr(err, path, s.goalCloud)
 }
 
 // MoveToJointPositions starts a move to the given joint configuration and blocks until it
