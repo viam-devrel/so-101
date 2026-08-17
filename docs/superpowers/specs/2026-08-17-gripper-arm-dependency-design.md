@@ -1,8 +1,76 @@
 # Gripper as an explicit dependency of the arm
 
 **Date:** 2026-08-17
-**Status:** Approved design, pending implementation plan
+**Status:** Interface half proven by spike (`8f90c57`); split into two independent changes
 **Affects:** `devrel:so101:gripper`, `devrel:so101:arm`, `devrel:so101:calibration`, `devrel:so101:discovery`
+
+## What the spike changed about this design
+
+A working spike (commit `8f90c57`, 26 tests, green under `-race`) built the gripper→arm
+dependency and the `servo_*` protocol **without touching `registry.go`, the lease, or the
+arm's controller acquisition at all**. Everything works.
+
+That is the single most important finding, because this document was written on the
+assumption that the two halves were one change with a PR boundary in the middle. They are
+not. They are two independent changes that happen to share a package:
+
+| | Change A — the interface | Change B — bus ownership |
+|---|---|---|
+| **Delivers** | Gripper stops owning a serial connection | Registry stops handing out broken copies; arm/sensor exclusivity |
+| **Fixes** | Config triplication (5), gripper-stops-arm, gripper's forked calibration | Problems 1, 2, 3, 4, 6 |
+| **Depends on** | nothing in B | nothing in A |
+| **Size** | ~560 lines, over half of them tests | Larger, and concentrated in concurrency |
+| **Review needs** | Any Go reviewer | Someone who will reason carefully about lock ordering |
+| **Status** | Proven by spike | Designed, unbuilt |
+
+**Change A is strictly easier after nothing, and Change B is strictly easier after A** —
+because A removes the gripper from the shared controller entirely, turning B from a
+three-party problem into a two-party one.
+
+Sections below are marked **[A]** or **[B]** accordingly. Sections marked **[B]** are
+unchanged design work that has not been built or validated; treat them with more suspicion
+than the **[A]** sections, which now describe running code.
+
+### Scope cuts the spike justifies
+
+1. **Ship A alone, first.** It has no dependency on B and introduces no lifecycle
+   regression: `Release()` is still a no-op, so the bus is still never closed — exactly as
+   today. Nothing gets worse.
+2. **Re-scope B once A ships.** After A, the only parties on the shared controller are the
+   arm and the calibration sensor, and the only *hazard* that genuinely needs a total bus
+   lockout is `SetID`/`SetBaudRate` in `assignMotorIDAndBaudrate`. The hard lease is
+   narrow and well-understood; the soft motion hold may be deferrable to a third change, or
+   dropped if the arm-moves-during-calibration case turns out to be rare enough to document
+   rather than enforce.
+3. **Drop `servo_move` returning both `percent` and `raw`.** The spike echoes back only what
+   was commanded. Returning both would cost a bus read on every move to satisfy no caller.
+4. **Drop the `speed` argument** from `servo_move`, or accept it is unused. The gripper never
+   sets it; it is plumbed through on speculation.
+5. **`servo_wait_stop` needs a default timeout.** Not in the original design. The spike uses
+   3000 ms when the caller omits `timeout_ms`, since an unbounded wait on a shared bus is
+   the wrong default.
+
+### Corrections the spike forced
+
+- **`NormMode` handling is not a one-liner.** "Denormalize through the servo's own
+  `NormMode`" requires explicit `percentToNormalized`/`normalizedToPercent` helpers, because
+  percent and degrees are different units with different ranges — a Range100 servo takes the
+  percentage directly, a degree-mode servo needs proportional mapping across its normalized
+  span. The design implied a single call.
+- **Numeric coercion is needed on lists too, not just scalars.** `servo_capabilities`
+  round-trips a `servo_ids` slice, which arrives as `[]int` locally and `[]interface{}` of
+  `float64` remotely. The spike needs a dedicated `servoIDsFromCapabilities` for this; the
+  design only anticipated scalar fields.
+- **`CalibratedServo.Calibration()` is a prerequisite, not a cleanup.** It was filed under
+  Change B as a fix for problem 3, but the new single-servo controller methods cannot read
+  calibration safely without it, so it lands in A.
+
+### Still unverified after the spike
+
+- The arm's `DoCommand` routing line itself needs hardware; it is guarded only by the
+  compile-time assertion `var _ servoOps = (*SafeSoArmController)(nil)` plus review.
+- Every claim in the **[B]** sections.
+- Grab-detection retuning, per risk 2.
 
 ## Problem
 
@@ -80,7 +148,7 @@ This is the mechanism the ufactory module relies on.
 
 ## Design
 
-### Ownership
+### Ownership [A + B]
 
 ```
           registry (port-keyed, ref-counted)
@@ -107,7 +175,7 @@ Proxying its full surface (homing, range recording, `SetID`, `SetBaudRate`) thro
 `DoCommand` would be a large protocol for little gain, and it keeps the calibration wizard
 configurable without an arm.
 
-### Registry: shared pointer, identity-carrying handles, two-tier exclusivity
+### [B] Registry: shared pointer, identity-carrying handles, two-tier exclusivity
 
 ```go
 // one per port — the shared bus
@@ -191,7 +259,7 @@ predecessor — its acquire against a hold still recorded to the dead instance w
 the same owner re-acquiring, and its release would target a record it does not own. `owner`
 survives only for log lines and error messages.
 
-### Collapsing the controller's two calibration copies
+### [B] Collapsing the controller's two calibration copies
 
 Sharing the controller pointer does **not**, on its own, fix problem 2 — it relocates it.
 `SafeSoArmController` holds calibration twice:
@@ -217,7 +285,7 @@ one place to write, and no path can observe a half-updated calibration. If colla
 invasive, the fallback is to route the acquire-time update through `SetCalibration` — but
 that leaves two copies and one more chance to desynchronize, so prefer the collapse.
 
-### Handle teardown
+### [B] Handle teardown
 
 `Release()` is where exclusivity state and resource lifecycle meet, and both the arm and the
 calibration sensor are `resource.AlwaysRebuild` (`arm.go:201`, `calibration.go:109`) — so a
@@ -255,7 +323,7 @@ during `StateRangeRecording` would close the serial port under a live goroutine 
 `recordPositions` gains a `done` channel, and `Close` and `stopRangeRecording`
 (`calibration.go:645-648`) both join it — the same audit manual mode already passes.
 
-### Two-tier exclusivity
+### [B] Two-tier exclusivity
 
 The arm and the calibration sensor must not drive the bus concurrently, but the two hazards
 have different shapes and different durations, and applying one mechanism to both is what
@@ -308,7 +376,7 @@ block beats a timer that can destroy recorded calibration data.
 unless the hard lease is `free` *and* no motion hold is set. Without this the acquire race in
 the next section stays open even after preemption.
 
-### Preemption
+### [B] Preemption
 
 Acquiring either the hard lease or the motion hold preempts, and preemption is a hook rather
 than merely a stop. Stopping servos is not enough, because `enter_manual_mode` launches
@@ -374,7 +442,7 @@ tiers, and `Geometries()` already falls back to a closed jaw when a position rea
 from `initializeServos()` as fatal would mean reconfiguring during calibration permanently
 breaks the arm. It logs a warning and builds.
 
-### The `servo_*` command family
+### [A] The `servo_*` command family — BUILT
 
 New file `servo_commands.go` holds the command-name constants used by both sides. Dispatch
 is a pure function over a small interface so it is testable without hardware:
@@ -436,7 +504,7 @@ The **read** side keeps its gripper branch: the calibration sensor still calls
 `GetJointPositionsForServos` with servo 6 (`calibration.go:836`). Removing that encoding is
 a follow-up, not part of this change.
 
-### Gripper
+### [A] Gripper — BUILT
 
 ```go
 type SO101GripperConfig struct {
@@ -638,6 +706,38 @@ that instruction was unfollowable.)
 
 ## Sequencing
 
+Two independent changes, in this order. The order is a preference, not a dependency: A does
+not need B, and B does not need A. A first, because it shrinks B.
+
+### Change A — the interface (spike complete, needs finishing)
+
+Built in `8f90c57`. What the spike covers:
+
+1. `SO101GripperConfig` takes a required `arm`, reports it as a dependency, and drops
+   `port`/`baudrate`/`timeout`/`calibration_file`.
+2. `servo_commands.go`: the `servo_*` family dispatched by a pure `handleServoCommand` over
+   the `servoOps` interface, with numeric coercion for the local/remote split.
+3. Single-servo controller methods, denormalizing through each servo's own `NormMode`.
+4. `CalibratedServo.Calibration()` — the locked accessor (also fixes problem 3).
+5. The gripper rewritten against `arm.Arm`: no controller, no calibration, no port;
+   `Stop()` scoped to its own servo; `Open`/`Grab` waiting rather than sleeping.
+6. `discovery.go` suggesting a gripper only alongside an arm.
+
+Remaining to finish A:
+
+7. **`README.md`** — rewrite the gripper model section, document the `servo_*` family, and
+   describe the new failure mode where the gripper cannot build if its arm cannot (risk 9).
+8. **Release notes** — the config break and the drive-mode double-inversion fix. There is no
+   `meta.json` version field; the signal is the release tag.
+9. **Hardware validation** — grab detection against `servo_wait_stop` (risk 2), and the arm's
+   `DoCommand` routing line, which no unit test can reach.
+
+### Change B — bus ownership (designed, unbuilt)
+
+Do not start B until A has shipped and been validated on hardware, both because A shrinks B
+and because B's design has been through four review rounds *without* being built — the same
+condition that produced the errors the spike found in A's design.
+
 1. **Registry and calibration collapse.** Shared pointer, `ControllerHandle` with the full
    bus surface, `AcquireController`, working `Release` with the `refCount`/`pins` split.
    Collapse the controller's two calibration copies. Convert `arm.go`, `calibration.go`, and
@@ -659,15 +759,12 @@ that instruction was unfollowable.)
    snapshot), the **pin/refcount split** (teardown owned by whichever counter decrements
    last), and the **read/motion classification** of every handle method — a method filed
    under the wrong tier is a silent hole in exactly one direction.
-3. Controller single-servo methods, `handleServoCommand` with numeric coercion, arm DoCommand
-   wiring.
-4. Gripper rewrite and the config break.
-5. `discovery.go`, README, release notes (there is no `meta.json` version to bump).
 
-Steps 1 and 2 are independently valuable and independently testable — together they fix all
-six problems with no config break — so they are a natural PR boundary if the whole change
-proves too large to review at once. Step 1 alone is also coherent: it fixes problems 1, 2, 3,
-4, and 6 and leaves exclusivity for step 2.
+**Re-scope B before building it.** Step 1 (registry + calibration collapse) is mechanical and
+fixes problems 1, 2, 3, 4, and 6 on its own. Step 2 is where all the concurrency risk lives,
+and after A it guards a narrower hazard than when it was designed. Consider splitting step 2
+again — hard lease first, soft motion hold only if the arm-moves-during-calibration case
+proves real in practice rather than in principle.
 
 ## Rejected alternatives
 
