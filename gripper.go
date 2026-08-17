@@ -8,10 +8,10 @@ import (
 	"math"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/golang/geo/r3"
 	commonpb "go.viam.com/api/common/v1"
+	"go.viam.com/rdk/components/arm"
 	"go.viam.com/rdk/components/gripper"
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/referenceframe"
@@ -38,16 +38,13 @@ const (
 )
 
 type SO101GripperConfig struct {
-	Port     string `json:"port,omitempty"`
-	Baudrate int    `json:"baudrate,omitempty"`
+	// Arm names the devrel:so101:arm component that owns this gripper's serial bus.
+	// The gripper issues no serial traffic of its own -- it drives its servo through
+	// the arm's servo_* DoCommand family -- so the arm is a required dependency.
+	Arm string `json:"arm"`
 
 	// Default to 6
 	ServoID int `json:"servo_id,omitempty"`
-
-	Timeout time.Duration `json:"timeout,omitempty"`
-
-	// Shared with arm
-	CalibrationFile string `json:"calibration_file,omitempty"`
 
 	// GripperType selects which meshes Geometries() serves: "follower" (moving
 	// jaw, the default) or "leader" (thumb-loop handle + trigger).
@@ -59,10 +56,13 @@ type SO101GripperConfig struct {
 	MeshDetail string `json:"mesh_detail,omitempty"`
 }
 
-// Validate ensures all parts of the config are valid
+// Validate ensures all parts of the config are valid, and reports the arm as a required
+// dependency so viam-server constructs it first and hands this module the real arm object.
 func (cfg *SO101GripperConfig) Validate(path string) ([]string, []string, error) {
-	if cfg.Port == "" {
-		return nil, nil, fmt.Errorf("must specify port for serial communication")
+	if cfg.Arm == "" {
+		return nil, nil, fmt.Errorf(
+			"must specify arm: the SO-101 gripper shares the arm's serial connection. " +
+				"Set \"arm\" to your devrel:so101:arm component name (and remove \"port\")")
 	}
 
 	if cfg.ServoID == 0 {
@@ -71,10 +71,6 @@ func (cfg *SO101GripperConfig) Validate(path string) ([]string, []string, error)
 
 	if cfg.ServoID < 1 || cfg.ServoID > 6 {
 		return nil, nil, fmt.Errorf("servo_id must be between 1 and 6, got %d", cfg.ServoID)
-	}
-
-	if cfg.Baudrate == 0 {
-		cfg.Baudrate = 1000000
 	}
 
 	if cfg.GripperType != "" && cfg.GripperType != leaderGripper && cfg.GripperType != followerGripper {
@@ -87,15 +83,18 @@ func (cfg *SO101GripperConfig) Validate(path string) ([]string, []string, error)
 			highDetail, lowDetail, cfg.MeshDetail)
 	}
 
-	return nil, nil, nil
+	return []string{cfg.Arm}, nil, nil
 }
 
 type so101Gripper struct {
 	resource.AlwaysRebuild
 
-	name        resource.Name
+	name resource.Name
+	// arm owns the serial bus. The gripper drives its servo exclusively through this
+	// dependency's servo_* DoCommand family and holds no controller, port, or
+	// calibration state of its own.
+	arm         arm.Arm
 	logger      logging.Logger
-	controller  *SafeSoArmController
 	gripperType string
 	meshDetail  string
 	servoID     int
@@ -132,32 +131,13 @@ func newSO101Gripper(ctx context.Context, deps resource.Dependencies, conf resou
 		cfg.ServoID = 6
 	}
 
-	if cfg.Baudrate == 0 {
-		cfg.Baudrate = 1000000
-	}
-
-	controllerConfig := &SoArm101Config{
-		Port:            cfg.Port,
-		Baudrate:        cfg.Baudrate,
-		ServoIDs:        []int{1, 2, 3, 4, 5, 6},
-		Timeout:         cfg.Timeout,
-		CalibrationFile: cfg.CalibrationFile,
-		Logger:          logger,
-	}
-
-	controllerConfig.Validate(cfg.CalibrationFile)
-
-	fullCalibration, fromFile := controllerConfig.LoadCalibration(logger)
-
-	if fullCalibration.Gripper.ID != cfg.ServoID {
-		logger.Debugf("Updating gripper calibration servo ID from %d to %d (from config)",
-			fullCalibration.Gripper.ID, cfg.ServoID)
-		fullCalibration.Gripper.ID = cfg.ServoID
-	}
-
-	controller, err := GetSharedControllerWithCalibration(controllerConfig, fullCalibration, fromFile)
+	armDep, err := arm.FromDependencies(deps, cfg.Arm)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get shared controller for gripper: %w", err)
+		return nil, fmt.Errorf("failed to get arm %q for gripper: %w", cfg.Arm, err)
+	}
+
+	if err := probeServoSupport(ctx, armDep, cfg.Arm, cfg.ServoID); err != nil {
+		return nil, err
 	}
 
 	gripperType := cfg.GripperType
@@ -179,7 +159,7 @@ func newSO101Gripper(ctx context.Context, deps resource.Dependencies, conf resou
 	g := &so101Gripper{
 		name:           conf.ResourceName(),
 		logger:         logger,
-		controller:     controller,
+		arm:            armDep,
 		gripperType:    gripperType,
 		meshDetail:     meshDetail,
 		servoID:        cfg.ServoID,
@@ -200,6 +180,83 @@ func (g *so101Gripper) Name() resource.Name {
 	return g.name
 }
 
+// probeServoSupport verifies at construction time that the configured arm actually speaks
+// the servo_* protocol and offers this gripper's servo. Without it, a gripper pointed at a
+// non-SO-101 arm (or a stale arm name) would build cleanly and fail only on the first move.
+func probeServoSupport(ctx context.Context, a arm.Arm, armName string, servoID int) error {
+	res, err := a.DoCommand(ctx, map[string]interface{}{"command": cmdServoCapabilities})
+	if err != nil {
+		return fmt.Errorf(
+			"arm %q does not support the servo_* command family (is it a devrel:so101:arm?): %w",
+			armName, err)
+	}
+	for _, id := range servoIDsFromCapabilities(res) {
+		if id == servoID {
+			return nil
+		}
+	}
+	return fmt.Errorf("arm %q does not offer servo %d (it reports %v)",
+		armName, servoID, servoIDsFromCapabilities(res))
+}
+
+// servoIDsFromCapabilities reads the servo_ids list out of a capabilities response,
+// tolerating both the local ([]int) and remote ([]interface{} of float64) encodings.
+func servoIDsFromCapabilities(res map[string]interface{}) []int {
+	switch ids := res["servo_ids"].(type) {
+	case []int:
+		return ids
+	case []interface{}:
+		out := make([]int, 0, len(ids))
+		for i := range ids {
+			if n, ok := numArg(map[string]any{"v": ids[i]}, "v"); ok {
+				out = append(out, n)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+// servoDo sends one servo_* command for this gripper's servo.
+func (g *so101Gripper) servoDo(
+	ctx context.Context, command string, args map[string]interface{},
+) (map[string]interface{}, error) {
+	cmd := map[string]interface{}{"command": command, "servo_id": g.servoID}
+	for k, v := range args {
+		cmd[k] = v
+	}
+	return g.arm.DoCommand(ctx, cmd)
+}
+
+// moveToPercent commands the servo and waits for it to settle.
+func (g *so101Gripper) moveToPercent(ctx context.Context, percent float64) error {
+	if _, err := g.servoDo(ctx, cmdServoMove,
+		map[string]interface{}{"percent": clampPercent(percent)}); err != nil {
+		return err
+	}
+	_, err := g.servoDo(ctx, cmdServoWaitStop,
+		map[string]interface{}{"timeout_ms": gripperSettleTimeoutMs})
+	return err
+}
+
+// positionPercent reads the servo's current opening as a percentage.
+func (g *so101Gripper) positionPercent(ctx context.Context) (float64, error) {
+	res, err := g.servoDo(ctx, cmdServoPosition, nil)
+	if err != nil {
+		return 0, err
+	}
+	pct, ok := floatArg(res, "percent")
+	if !ok {
+		return 0, fmt.Errorf("no position data available")
+	}
+	return pct, nil
+}
+
+// gripperSettleTimeoutMs bounds the wait for the gripper servo to stop moving. It replaces
+// the fixed 500ms sleep the previous implementation used after every command.
+const gripperSettleTimeoutMs = 2000
+
 func (g *so101Gripper) Open(ctx context.Context, extra map[string]interface{}) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -209,11 +266,9 @@ func (g *so101Gripper) Open(ctx context.Context, extra map[string]interface{}) e
 
 	g.logger.Debug("Opening gripper")
 
-	if err := g.controller.MoveServosToPositions(ctx, []int{g.servoID}, []float64{g.openPositionRadians()}, 0, 0); err != nil {
+	if err := g.moveToPercent(ctx, g.openPosition); err != nil {
 		return fmt.Errorf("failed to open gripper: %w", err)
 	}
-
-	time.Sleep(500 * time.Millisecond)
 
 	g.logger.Debug("Gripper opened")
 	return nil
@@ -228,24 +283,15 @@ func (g *so101Gripper) Grab(ctx context.Context, extra map[string]interface{}) (
 
 	g.logger.Debug("Attempting to grab with gripper")
 
-	if err := g.controller.MoveServosToPositions(ctx, []int{g.servoID}, []float64{g.closedPositionRadians()}, 0, 0); err != nil {
+	if err := g.moveToPercent(ctx, g.closedPosition); err != nil {
 		return false, fmt.Errorf("failed to close gripper: %w", err)
 	}
 
-	time.Sleep(500 * time.Millisecond)
-
-	currentPositions, err := g.controller.GetJointPositionsForServos(ctx, []int{g.servoID})
+	currentPercent, err := g.positionPercent(ctx)
 	if err != nil {
 		g.logger.Warnf("Failed to read gripper position after grab: %v", err)
 		return true, nil
 	}
-
-	if len(currentPositions) == 0 {
-		g.logger.Warn("No position data received from gripper")
-		return false, nil
-	}
-
-	currentPercent := g.radiansToPercent(currentPositions[0])
 
 	positionDifference := currentPercent - g.closedPosition
 	threshold := 15.0
@@ -261,9 +307,13 @@ func (g *so101Gripper) Grab(ctx context.Context, extra map[string]interface{}) (
 	return grabbed, nil
 }
 
+// Stop halts only this gripper's servo. The previous implementation called a controller
+// Stop that zeroed velocity on every servo on the shared bus, so stopping the gripper also
+// killed any in-flight arm motion.
 func (g *so101Gripper) Stop(ctx context.Context, extra map[string]interface{}) error {
 	g.isMoving.Store(false)
-	return g.controller.Stop(ctx)
+	_, err := g.servoDo(ctx, cmdServoStop, nil)
+	return err
 }
 
 func (g *so101Gripper) IsMoving(ctx context.Context) (bool, error) {
@@ -429,11 +479,11 @@ func buildGripperModel(gripperType, meshDetail, name string) (referenceframe.Mod
 // jawAngle maps the gripper's current open percentage onto the URDF gripper-joint
 // range. If the live position cannot be read it assumes the gripper is closed.
 func (g *so101Gripper) jawAngle(ctx context.Context) float64 {
-	positions, err := g.controller.GetJointPositionsForServos(ctx, []int{g.servoID})
-	if err != nil || len(positions) == 0 {
+	percent, err := g.positionPercent(ctx)
+	if err != nil {
 		return gripperJointMin
 	}
-	pct := math.Max(0, math.Min(1, g.radiansToPercent(positions[0])/100.0))
+	pct := math.Max(0, math.Min(1, percent/100.0))
 	return gripperJointMin + pct*(gripperJointMax-gripperJointMin)
 }
 
@@ -465,25 +515,15 @@ func gripperSetPositionPercent(cmd map[string]interface{}) (float64, bool) {
 
 func (g *so101Gripper) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
 	if cmd["get"] == true {
-		positions, err := g.controller.GetJointPositionsForServos(ctx, []int{g.servoID})
+		percentPos, err := g.positionPercent(ctx)
 		if err != nil {
 			return nil, err
 		}
-		if len(positions) == 0 {
-			return nil, fmt.Errorf("no position data available")
-		}
-
-		percentPos := g.radiansToPercent(positions[0])
 		return map[string]interface{}{"position": percentPos}, nil
 	}
 
 	if percentPos, ok := cmd["set"].(float64); ok {
-		if percentPos < 0 {
-			percentPos = 0
-		}
-		if percentPos > 100 {
-			percentPos = 100
-		}
+		percentPos = clampPercent(percentPos)
 
 		g.mu.Lock()
 		defer g.mu.Unlock()
@@ -491,9 +531,7 @@ func (g *so101Gripper) DoCommand(ctx context.Context, cmd map[string]interface{}
 		g.isMoving.Store(true)
 		defer g.isMoving.Store(false)
 
-		targetRadians := g.percentToRadians(percentPos)
-		err := g.controller.MoveServosToPositions(ctx, []int{g.servoID}, []float64{targetRadians}, 0, 0)
-		if err != nil {
+		if err := g.moveToPercent(ctx, percentPos); err != nil {
 			return nil, err
 		}
 		return map[string]interface{}{"position": percentPos}, nil
@@ -501,65 +539,56 @@ func (g *so101Gripper) DoCommand(ctx context.Context, cmd map[string]interface{}
 
 	switch cmd["command"] {
 	case "get_position":
-		positions, err := g.controller.GetJointPositionsForServos(ctx, []int{g.servoID})
+		percentPos, err := g.positionPercent(ctx)
 		if err != nil {
 			return nil, err
 		}
-		if len(positions) == 0 {
-			return nil, fmt.Errorf("no position data available")
-		}
-
-		percentPos := g.radiansToPercent(positions[0])
 
 		return map[string]interface{}{
-			"position_radians":    positions[0],
+			// position_radians is now derived from the percentage rather than read as a
+			// radian value, so single-key get/set round-trips (arm-recorder) keep working.
+			"position_radians":    (percentPos/100.0*2.0 - 1.0) * math.Pi,
 			"position_percentage": percentPos,
 			"open_position":       g.openPosition,
 			"closed_position":     g.closedPosition,
 		}, nil
 
 	case "set_position":
-		var targetPercent float64
-
-		if percentPos, ok := gripperSetPositionPercent(cmd); ok {
-			targetPercent = percentPos
-		} else if servoPos, ok := cmd["servo_position"].(float64); ok {
-			cal := g.controller.getCalibrationForServo(g.servoID)
-			if cal != nil {
-				normalizedPos := (servoPos - float64(cal.RangeMin)) / float64(cal.RangeMax-cal.RangeMin)
-				targetPercent = normalizedPos * 100.0
-			} else {
-				targetPercent = (servoPos / 4095.0) * 100.0
-			}
-		} else {
-			return nil, fmt.Errorf("set_position command requires 'percentage', 'position_percentage', or 'servo_position' parameter")
-		}
-
-		if targetPercent < 0 {
-			targetPercent = 0
-		}
-		if targetPercent > 100 {
-			targetPercent = 100
-		}
-
 		g.mu.Lock()
 		defer g.mu.Unlock()
 
 		g.isMoving.Store(true)
 		defer g.isMoving.Store(false)
 
-		targetRadians := g.percentToRadians(targetPercent)
-		err := g.controller.MoveServosToPositions(ctx, []int{g.servoID}, []float64{targetRadians}, 0, 0)
+		// The raw servo_position form goes to the arm as raw ticks; the arm owns the
+		// calibration needed to interpret them, so the gripper no longer converts.
+		if servoPos, ok := floatArg(cmd, "servo_position"); ok {
+			_, err := g.servoDo(ctx, cmdServoMove, map[string]interface{}{"raw": int(servoPos)})
+			return map[string]interface{}{"success": err == nil}, err
+		}
+
+		targetPercent, ok := gripperSetPositionPercent(cmd)
+		if !ok {
+			return nil, fmt.Errorf("set_position command requires 'percentage', 'position_percentage', or 'servo_position' parameter")
+		}
+
+		err := g.moveToPercent(ctx, targetPercent)
 		return map[string]interface{}{"success": err == nil}, err
 
 	case "controller_status":
-		refCount, hasController, configSummary := GetControllerStatus()
-		return map[string]interface{}{
-			"ref_count":      refCount,
-			"has_controller": hasController,
-			"config":         configSummary,
-			"servo_id":       g.servoID,
-		}, nil
+		// The arm owns the controller now, so forward and re-shape to this component's
+		// documented keys.
+		res, err := g.arm.DoCommand(ctx, map[string]interface{}{"command": "controller_status"})
+		if err != nil {
+			return nil, err
+		}
+		out := map[string]interface{}{"servo_id": g.servoID}
+		for _, k := range []string{"ref_count", "has_controller", "config"} {
+			if v, ok := res[k]; ok {
+				out[k] = v
+			}
+		}
+		return out, nil
 
 	case "calibrate_positions":
 		if openPos, ok := cmd["open_position"].(float64); ok {
@@ -610,8 +639,9 @@ func (g *so101Gripper) DoCommand(ctx context.Context, cmd map[string]interface{}
 	}
 }
 
+// Close releases nothing: the gripper owns no serial connection. The arm it depends on
+// owns the bus and is torn down on its own schedule.
 func (g *so101Gripper) Close(ctx context.Context) error {
-	ReleaseSharedController()
 	return nil
 }
 
@@ -631,68 +661,4 @@ func (g *so101Gripper) Kinematics(ctx context.Context) (referenceframe.Model, er
 
 func (g *so101Gripper) IsHoldingSomething(ctx context.Context, extra map[string]interface{}) (gripper.HoldingStatus, error) {
 	return gripper.HoldingStatus{}, nil
-}
-
-func (g *so101Gripper) openPositionRadians() float64 {
-	return g.percentToRadians(g.openPosition)
-}
-
-func (g *so101Gripper) closedPositionRadians() float64 {
-	return g.percentToRadians(g.closedPosition)
-}
-
-func (g *so101Gripper) percentToRadians(percent float64) float64 {
-	// Since the gripper calibration uses NormModeRange100 (0-100%),
-	// we can directly use the percentage value and let feetech-servo handle conversion
-	// But we need to convert to the expected format for the controller
-
-	// For now, we'll do a simple mapping based on the calibration range
-	cal := g.controller.getCalibrationForServo(g.servoID)
-	if cal == nil {
-		// Fallback to default behavior
-		return (percent - 50.0) / 50.0 * math.Pi
-	}
-
-	// Convert percentage to normalized position within the calibrated range
-	normalizedPos := percent / 100.0
-
-	// Convert to radians (assuming ±π range)
-	radians := (normalizedPos*2.0 - 1.0) * math.Pi // Convert 0-1 to -π to +π
-
-	// Apply drive mode if needed
-	if cal.DriveMode != 0 {
-		radians = -radians
-	}
-
-	return radians
-}
-
-func (g *so101Gripper) radiansToPercent(radians float64) float64 {
-	cal := g.controller.getCalibrationForServo(g.servoID)
-	if cal == nil {
-		// Fallback to default behavior
-		return (radians/math.Pi)*50.0 + 50.0
-	}
-
-	// Apply drive mode if needed
-	adjustedRadians := radians
-	if cal.DriveMode != 0 {
-		adjustedRadians = -radians
-	}
-
-	// Convert radians to normalized position (-1 to 1)
-	normalizedPos := adjustedRadians / math.Pi
-
-	// Convert to percentage (0-100)
-	percent := (normalizedPos + 1.0) / 2.0 * 100.0
-
-	// Clamp to valid range
-	if percent < 0 {
-		percent = 0
-	}
-	if percent > 100 {
-		percent = 100
-	}
-
-	return percent
 }

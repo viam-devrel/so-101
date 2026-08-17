@@ -880,6 +880,13 @@ func (s *so101) exitManualLocked(reason string) {
 }
 
 func (s *so101) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
+	// The servo_* family lets a gripper on this bus drive its own servo without holding a
+	// serial connection. Routed before the arm's own commands; handleServoCommand refuses
+	// any servo this arm drives itself, so the two cannot collide.
+	if command, ok := cmd["command"].(string); ok && isServoCommand(command) {
+		return handleServoCommand(ctx, cmd, s.controller, s.armServoIDs)
+	}
+
 	// Handle custom commands specific to SO-101
 	switch cmd["command"] {
 	case "set_torque":
