@@ -467,6 +467,35 @@ Follow the [arm setup steps](#first-time-arm-setup) to learn how to set up the a
 | `gripper_type`     | string   | Optional  | Which gripper meshes `Geometries()` serves for the 3D viewer: `follower` (moving jaw, default) or `leader` (thumb-loop handle + trigger). The moving part articulates with the live gripper opening. |
 | `mesh_detail`      | string   | Optional  | Gripper mesh resolution: `low` (decimated, the default) or `high` (full resolution). `Geometries()` is also the motion-planning collision geometry, so `low` keeps planning fast; `high` is mainly for visual comparison. |
 
+### Reference frame (TCP)
+
+Parent the gripper to the arm with a zero offset — the module supplies the rest:
+
+```json
+{
+  "name": "gripper",
+  "frame": { "parent": "arm" }
+}
+```
+
+The gripper reports a kinematic model whose frame is its **tool center point**: the grasp point
+between the tips of the two jaws, `(x: 6.835, y: 0, z: 99.9)` mm ahead of the arm's `tool` frame,
+with the same axes (so `+Z` remains the approach axis). So `GetPose("gripper", "world")` and any
+motion request targeting the gripper resolve to the jaw tips, not to the arm's wrist. Do **not** add
+a compensating `translation` to the gripper's `frame` config — that would double the offset.
+
+The `leader` gripper is a hand-held trigger rather than a pair of jaws, so it has no grasp point;
+its frame stays at the mount.
+
+The model also carries the gripper meshes, which is what makes the gripper a real obstacle for
+motion planning: for `arm`/`gantry`/`gripper` components viam-server takes collision geometry from
+the kinematic model and never calls `Geometries()`. The model is static, so its collision meshes are
+frozen with the jaws **closed**; `Geometries()` still serves the live, articulating jaw to the 3D
+viewer.
+
+The 3D viewer reads the model's frames directly, so a `<gripper>:tcp` node appears in the scene tree
+with its axes drawn at the grasp point — no extra configuration and no placeholder geometry needed.
+
 ### Communication
 
 You can use the included [discovery service](#model-devrelso101discovery) or find the available serial port options from your machine's command line.
@@ -556,6 +585,9 @@ All attributes are optional, so the simulated gripper works with an empty config
 | -------------- | ------ | --------- | ---------------------------------------------------------------------------------------------------------- |
 | `gripper_type` | string | Optional  | Which gripper meshes to serve: `follower` (moving jaw, the default) or `leader` (thumb-loop handle + trigger). |
 | `mesh_detail`  | string | Optional  | Gripper mesh resolution: `low` (decimated, the default) or `high` (full resolution). The mesh is also the motion-planning collision geometry, so `low` keeps planning fast; set `high` on a second gripper for a visual side-by-side. |
+
+The simulated gripper reports the same TCP reference frame as the hardware gripper — see
+[Reference frame (TCP)](#reference-frame-tcp).
 
 ### DoCommand
 

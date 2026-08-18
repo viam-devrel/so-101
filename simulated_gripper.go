@@ -69,6 +69,7 @@ type simulatedSO101Gripper struct {
 	name        resource.Name
 	gripperType string
 	meshDetail  string
+	model       referenceframe.Model
 
 	// lifetime management
 	closed     atomic.Bool
@@ -101,11 +102,17 @@ func newSimulatedSO101Gripper(
 		meshDetail = lowDetail
 	}
 
+	model, err := buildGripperModel(gripperType, meshDetail, rawConf.ResourceName().ShortName())
+	if err != nil {
+		return nil, fmt.Errorf("failed to build gripper kinematic model: %w", err)
+	}
+
 	cancelCtx, cancelFunc := context.WithCancel(context.Background())
 	g := &simulatedSO101Gripper{
 		name:        rawConf.ResourceName(),
 		gripperType: gripperType,
 		meshDetail:  meshDetail,
+		model:       model,
 		cancelCtx:   cancelCtx,
 		cancelFunc:  cancelFunc,
 		lastUpdated: time.Now(),
@@ -259,9 +266,10 @@ func (g *simulatedSO101Gripper) DoCommand(
 	}
 }
 
-// Kinematics is unsupported: the gripper has no kinematic model.
+// Kinematics returns the gripper's static model, whose leaf frame is the TCP between the jaw
+// tips. See buildGripperModel for why the gripper needs one at all.
 func (g *simulatedSO101Gripper) Kinematics(ctx context.Context) (referenceframe.Model, error) {
-	return nil, errors.ErrUnsupported
+	return g.model, nil
 }
 
 func (g *simulatedSO101Gripper) CurrentInputs(ctx context.Context) ([]referenceframe.Input, error) {
