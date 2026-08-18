@@ -131,7 +131,7 @@ func newSO101Gripper(ctx context.Context, deps resource.Dependencies, conf resou
 		cfg.ServoID = 6
 	}
 
-	armDep, err := arm.FromDependencies(deps, cfg.Arm)
+	armDep, err := arm.FromProvider(deps, cfg.Arm)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get arm %q for gripper: %w", cfg.Arm, err)
 	}
