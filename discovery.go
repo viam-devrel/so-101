@@ -188,21 +188,23 @@ func (dis *so101Discovery) generateConfigs(
 		})
 	}
 
-	// Generate gripper config if servo 6 responded
-	if hasGripper {
-		attrs := map[string]interface{}{
-			"port": portPath,
-		}
-		if calibrationFile != "" {
-			attrs["calibration_file"] = calibrationFile
-		}
-
+	// Generate gripper config if servo 6 responded. The gripper reaches the bus only
+	// through the arm, so it is suggested only when an arm was also found -- a gripper
+	// with no arm has nothing to depend on and would fail validation.
+	if hasGripper && hasArm {
 		configs = append(configs, resource.Config{
-			Name:       "so101-gripper-" + portSuffix,
-			API:        gripper.API,
-			Model:      SO101GripperModel,
-			Attributes: attrs,
+			Name:  "so101-gripper-" + portSuffix,
+			API:   gripper.API,
+			Model: SO101GripperModel,
+			Attributes: map[string]interface{}{
+				"arm": "so101-arm-" + portSuffix,
+			},
 		})
+	} else if hasGripper {
+		dis.logger.Infof(
+			"Servo 6 responded on %s but servo 1 did not, so no arm was found. "+
+				"The SO-101 gripper requires an arm component to own the serial connection, "+
+				"so no gripper config is suggested for this port.", portPath)
 	}
 
 	// Always generate calibration sensor if either servo responded

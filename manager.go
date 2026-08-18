@@ -105,6 +105,122 @@ func (s *SafeSoArmController) MoveServosToPositions(ctx context.Context, servoID
 	return s.writePositions(ctx, rawPositions, speed)
 }
 
+// --- Single-servo operations backing the servo_* DoCommand family ---
+//
+// These exist so a gripper can drive one servo on this bus without holding a controller of
+// its own. Each takes the shared mutex only for the duration of its bus transaction, and
+// each denormalizes through the servo's own calibration rather than assuming a NormMode --
+// servo 6 is Range100, but a 4-DOF arm may host a gripper on servo 5, which is Degrees.
+
+// MoveServoPercent moves one servo to a position given as a percentage of its calibrated
+// range. speed <= 0 uses the servo's configured speed.
+func (s *SafeSoArmController) MoveServoPercent(ctx context.Context, id int, percent float64, speed int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	cs, ok := s.calibratedServos[id]
+	if !ok {
+		return fmt.Errorf("servo %d not available", id)
+	}
+	cal := cs.Calibration()
+	if cal == nil {
+		return fmt.Errorf("no calibration for servo %d", id)
+	}
+
+	raw, err := cal.Denormalize(percentToNormalized(cal, percent))
+	if err != nil {
+		return fmt.Errorf("failed to denormalize percent for servo %d: %w", id, err)
+	}
+	return s.writePositions(ctx, feetech.PositionMap{id: raw}, speed)
+}
+
+// MoveServoRaw moves one servo to a raw encoder tick value, clamped to its calibrated range.
+func (s *SafeSoArmController) MoveServoRaw(ctx context.Context, id, raw int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	cs, ok := s.calibratedServos[id]
+	if !ok {
+		return fmt.Errorf("servo %d not available", id)
+	}
+	if cal := cs.Calibration(); cal != nil {
+		if raw < cal.RangeMin {
+			raw = cal.RangeMin
+		}
+		if raw > cal.RangeMax {
+			raw = cal.RangeMax
+		}
+	}
+	return s.writePositions(ctx, feetech.PositionMap{id: raw}, 0)
+}
+
+// ServoPositionPercent reads one servo's position as both a percentage of its calibrated
+// range and the underlying raw tick value.
+func (s *SafeSoArmController) ServoPositionPercent(ctx context.Context, id int) (float64, int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	cs, ok := s.calibratedServos[id]
+	if !ok {
+		return 0, 0, fmt.Errorf("servo %d not available", id)
+	}
+	servo := s.group.ServoByID(id)
+	if servo == nil {
+		return 0, 0, fmt.Errorf("servo %d not available", id)
+	}
+
+	raw, err := servo.Position(ctx)
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to read position for servo %d: %w", id, err)
+	}
+	cal := cs.Calibration()
+	if cal == nil {
+		return 0, raw, fmt.Errorf("no calibration for servo %d", id)
+	}
+	normalized, err := cal.Normalize(raw)
+	if err != nil {
+		return 0, raw, fmt.Errorf("failed to normalize servo %d: %w", id, err)
+	}
+	return normalizedToPercent(cal, normalized), raw, nil
+}
+
+// StopServo halts a single servo. Unlike Stop, it leaves every other servo on the bus
+// untouched, so stopping a gripper cannot kill an in-flight arm move.
+func (s *SafeSoArmController) StopServo(ctx context.Context, id int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	cs, ok := s.calibratedServos[id]
+	if !ok {
+		return fmt.Errorf("servo %d not available", id)
+	}
+	return cs.SetVelocity(ctx, 0)
+}
+
+// percentToNormalized converts a 0-100 percentage into whatever normalized unit the servo's
+// calibration expects: Range100 servos take the percentage directly, while degree-normalized
+// servos take a proportional position within their normalized range.
+func percentToNormalized(cal *MotorCalibration, percent float64) float64 {
+	if cal.NormMode == NormModeRange100 {
+		return percent
+	}
+	return degreeRangeMin + (percent/100.0)*(degreeRangeMax-degreeRangeMin)
+}
+
+// normalizedToPercent is the inverse of percentToNormalized.
+func normalizedToPercent(cal *MotorCalibration, normalized float64) float64 {
+	if cal.NormMode == NormModeRange100 {
+		return normalized
+	}
+	return (normalized - degreeRangeMin) / (degreeRangeMax - degreeRangeMin) * 100.0
+}
+
+// The normalized degree span a degree-mode servo reports across its calibrated range.
+const (
+	degreeRangeMin = -100.0
+	degreeRangeMax = 100.0
+)
+
 func (s *SafeSoArmController) GetJointPositions(ctx context.Context) ([]float64, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

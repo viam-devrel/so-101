@@ -308,3 +308,12 @@ func (cs *CalibratedServo) UpdateCalibration(calibration *MotorCalibration) {
 	defer cs.mu.Unlock()
 	cs.calibration = calibration
 }
+
+// Calibration safely reads the calibration data. Callers must use this rather than touching
+// the field directly: UpdateCalibration can run concurrently from another resource sharing
+// this bus, so an unguarded read races it.
+func (cs *CalibratedServo) Calibration() *MotorCalibration {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return cs.calibration
+}
