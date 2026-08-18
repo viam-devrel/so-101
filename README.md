@@ -169,7 +169,7 @@ While manual mode is active, it also reports live per-joint telemetry (`actual_d
 
 ### Communication
 
-The SO-101 uses serial communication over USB with Feetech STS3215 servos. The module uses a shared controller architecture to manage all 6 servos while preventing resource conflicts when both arm and gripper components are used.
+The SO-101 uses serial communication over USB with Feetech STS3215 servos. All 6 servos share one bus, and the arm component owns that connection: it drives servos 1-5 itself and exposes the remaining servo to a gripper component through its [`servo_*` commands](#servo-commands). The gripper therefore configures an `arm` rather than a `port`, and only one component ever holds the serial connection.
 
 You can use the included [discovery service](#model-devrelso101discovery) or find the available serial port options from your machine's command line.
 
@@ -382,6 +382,98 @@ Response:
 }
 ```
 
+### Servo commands
+
+The arm owns the serial bus for all 6 servos, so a [`devrel:so101:gripper`](#model-devrelso101gripper) on the same SO-101 drives its servo by sending these commands to the arm rather than opening its own connection. They are documented because they are a normal part of the arm's `DoCommand` surface — you can call them directly — but in ordinary use the gripper component issues them for you.
+
+Every command takes a `servo_id`. The arm **rejects any `servo_id` in its own `servo_ids`** list, so these cannot be used to fight the arm for one of its own joints.
+
+#### Servo Capabilities
+
+Report which servos on this bus are available to another component, and confirm this arm speaks the protocol. The gripper calls this once at startup so a misconfigured `arm` reference fails at configuration time rather than on the first move.
+
+```json
+{
+  "command": "servo_capabilities"
+}
+```
+
+Response on a standard 5-DOF arm:
+
+```json
+{
+  "servo_commands": true,
+  "servo_ids": [6]
+}
+```
+
+#### Move Servo
+
+Move one servo to a percentage of its calibrated range:
+
+```json
+{
+  "command": "servo_move",
+  "servo_id": 6,
+  "percent": 95
+}
+```
+
+Or to a raw encoder value, clamped to the servo's calibrated range:
+
+```json
+{
+  "command": "servo_move",
+  "servo_id": 6,
+  "raw": 2000
+}
+```
+
+`percent` is converted using that servo's own calibration and normalization mode, so this works for a gripper on servo 6 (percentage-normalized) and for a servo 5 gripper on a 4-DOF build (degree-normalized) alike.
+
+#### Servo Position
+
+Read one servo's position as both a percentage of its calibrated range and the underlying raw value:
+
+```json
+{
+  "command": "servo_position",
+  "servo_id": 6
+}
+```
+
+Response:
+
+```json
+{
+  "percent": 42.5,
+  "raw": 1834
+}
+```
+
+#### Stop Servo
+
+Halt a single servo, leaving every other servo on the bus untouched:
+
+```json
+{
+  "command": "servo_stop",
+  "servo_id": 6
+}
+```
+
+#### Wait For Servo To Stop
+
+Block until a servo reports it has stopped moving, or the timeout elapses. Scoped to the one servo, so it will not block on arm motion. `timeout_ms` is optional and defaults to `3000`.
+
+```json
+{
+  "command": "servo_wait_stop",
+  "servo_id": 6,
+  "timeout_ms": 2000
+}
+```
+
 ## Model devrel:so101:simulated
 
 The simulated arm component emulates the SO-101 arm entirely in software, with **no hardware required**. It shares the same kinematics as the [`devrel:so101:arm`](#model-devrelso101arm) model, so it is useful for developing and testing configs, motion plans, and the 3D scene viewer without a physical robot.
@@ -441,6 +533,8 @@ Retrieve the configured joint speed:
 
 The gripper component controls the 6th servo of the SO-101, which functions as a parallel gripper.
 
+**This component requires an `arm`.** The SO-101 puts all 6 servos on a single serial bus, and the `devrel:so101:arm` component owns that connection. The gripper opens no serial port of its own — it drives its servo by sending [`servo_*` commands](#servo-commands) to the arm it depends on. So the gripper takes an `arm` attribute naming that component, and has no `port`, `baudrate`, `timeout`, or `calibration_file` of its own.
+
 **Use the `devrel:so101:discovery` service to help with configuring this component automatically.**
 
 Follow the [arm setup steps](#first-time-arm-setup) to learn how to set up the arm for the first time.
@@ -449,23 +543,20 @@ Follow the [arm setup steps](#first-time-arm-setup) to learn how to set up the a
 
 ```json
 {
-  "port": "/dev/ttyUSB0"
+  "arm": "arm-1"
 }
 ```
 
-**Use the same `port` and `calibration_file` configuration as the associated arm component.**
+Where `arm-1` is the name of your `devrel:so101:arm` component. Configure the arm first: viam-server builds it before the gripper and will report `dependency not ready` until it exists.
 
 ### Attributes
 
-| Name               | Type     | Inclusion | Description                                                   |
-| ------------------ | -------- | --------- | ------------------------------------------------------------- |
-| `port`             | string   | Required  | The serial port for communication with the SO-101.            |
-| `calibration_file` | string   | Optional  | Path to the calibration file (shared with arm component).     |
-| `baudrate`         | int      | Optional  | The baud rate for serial communication. Default is `1000000`. |
-| `servo_id`         | int      | Optional  | The servo ID for the gripper. Default is `6`.                 |
-| `timeout`          | duration | Optional  | Communication timeout. Default is system default.             |
-| `gripper_type`     | string   | Optional  | Which gripper meshes `Geometries()` serves for the 3D viewer: `follower` (moving jaw, default) or `leader` (thumb-loop handle + trigger). The moving part articulates with the live gripper opening. |
-| `mesh_detail`      | string   | Optional  | Gripper mesh resolution: `low` (decimated, the default) or `high` (full resolution). `Geometries()` is also the motion-planning collision geometry, so `low` keeps planning fast; `high` is mainly for visual comparison. |
+| Name           | Type   | Inclusion    | Description                                                                                                                                                                                                                                          |
+| -------------- | ------ | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `arm`          | string | **Required** | Name of the `devrel:so101:arm` component that owns the serial connection this gripper's servo lives on.                                                                                                                                              |
+| `servo_id`     | int    | Optional     | The servo ID for the gripper. Default is `6`. Must not be a servo the arm drives itself — see [4-DOF variants](#4-dof-variants).                                                                                                                     |
+| `gripper_type` | string | Optional     | Which gripper meshes `Geometries()` serves for the 3D viewer: `follower` (moving jaw, default) or `leader` (thumb-loop handle + trigger). The moving part articulates with the live gripper opening.                                                  |
+| `mesh_detail`  | string | Optional     | Gripper mesh resolution: `low` (decimated, the default) or `high` (full resolution). `Geometries()` is also the motion-planning collision geometry, so `low` keeps planning fast; `high` is mainly for visual comparison.                             |
 
 ### Reference frame (TCP)
 
@@ -498,37 +589,13 @@ with its axes drawn at the grasp point — no extra configuration and no placeho
 
 ### Communication
 
-You can use the included [discovery service](#model-devrelso101discovery) or find the available serial port options from your machine's command line.
+### 4-DOF variants
 
-On MacOS, look for `usbmodem` or `usbserial` in the name:
+`servo_id` may be any servo the arm does not drive itself. The arm rejects a `servo_id` that appears in its own `servo_ids` list, so a 4-DOF build configured with `"servo_ids": [1, 2, 3, 4]` can host a gripper on servo 5. On a standard 5-DOF SO-101 the arm drives servos 1-5, leaving servo 6.
 
-```
-you@machine: ls /dev/tty.*
-/dev/tty.Bluetooth-Incoming-Port
-/dev/tty.debug-console
-/dev/tty.usbmodem58CD1767051
+### When the arm fails to build
 
-you@machine: ls /dev/cu.*
-/dev/cu.Bluetooth-Incoming-Port
-/dev/cu.debug-console
-/dev/cu.usbmodem58CD1767051
-```
-
-On Linux, look for `ACM` or `USB` in the name:
-
-```
-you@machine: ls /dev/tty*
-/dev/ttyACM0
-/dev/ttyUSB0
-```
-
-On Windows, look for `COM` in the name:
-
-```
-you@machine: mode
-COM0
-COM1
-```
+Because the arm is a required dependency, a gripper cannot start unless its arm starts. If the arm fails to configure, the gripper reports `dependency not ready` rather than coming up on its own. Worth knowing when diagnosing: the arm's startup check pings **all six** servos, so a dead *gripper* servo fails the arm, which in turn keeps the gripper down. Check the arm's logs first when a gripper will not configure.
 
 ### DoCommand
 
@@ -544,9 +611,31 @@ Get the current gripper position:
 }
 ```
 
+Response:
+
+```json
+{
+  "position_percentage": 42.5,
+  "position_radians": -0.47,
+  "open_position": 95,
+  "closed_position": 0
+}
+```
+
+`position_radians` is derived from the percentage and exists so single-key get/set round-trips keep working.
+
 #### Set Gripper Position
 
-Set the gripper to a specific servo position:
+Set the gripper opening as a percentage of its calibrated range:
+
+```json
+{
+  "command": "set_position",
+  "percentage": 50
+}
+```
+
+A raw servo position is also accepted, and is forwarded to the arm — which owns the calibration needed to interpret it — clamped to the servo's calibrated range:
 
 ```json
 {
@@ -557,7 +646,7 @@ Set the gripper to a specific servo position:
 
 #### Controller Status
 
-Check the shared controller status:
+Check the status of the serial controller, forwarded from the arm that owns it:
 
 ```json
 {
@@ -842,7 +931,7 @@ Leader and follower must be separate SO-101 arm components, typically on separat
 | `leader_gripper`         | string | Optional     | Name of the leader gripper component. When both `leader_gripper` and `follower_gripper` are set, gripper opening is mirrored in addition to joint positions.                         |
 | `follower_gripper`       | string | Optional     | Name of the follower gripper component.                                                                                                                                              |
 | `rate_hz`                | number | Optional     | Mirror loop frequency in Hz. Default `20`. Must be > 0 and ≤ 1000.                                                                                                                  |
-| `manage_leader_torque`   | bool   | Optional     | When `true` (default), disables leader arm torque on start so the arm can be back-driven by hand, and restores torque on stop. Because the leader arm and gripper share one servo bus, this also frees the leader gripper servo. |
+| `manage_leader_torque`   | bool   | Optional     | When `true` (default), disables leader arm torque on start so the arm can be back-driven by hand, and restores torque on stop. The torque command covers every servo on the leader's bus, so this also frees the leader gripper servo. |
 | `auto_start`             | bool   | Optional     | When `true`, starts the mirror loop immediately when the service is configured. Default `false`.                                                                                     |
 | `max_consecutive_errors` | int    | Optional     | Number of consecutive read/write failures after which the loop stops automatically and reports the error via `status`. Default `10`.                                                 |
 
