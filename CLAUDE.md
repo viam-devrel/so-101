@@ -136,6 +136,53 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
 - Leader gripper meshes are printable STLs with no assembly transforms (the SO-ARM100
   repo ships only a *follower* URDF/sim model), so leader placement is best-effort. The
   follower gripper meshes come from the SO-ARM100 simulation assets + URDF and are accurate.
+- **A gripper's `Geometries()` is NOT its frame-system geometry, and `Kinematics()` is not
+  optional.** In `robot/impl/local_robot.go`'s `getLocalFrameSystemParts`, the
+  `arm`/`gantry`/`gripper` subtypes take a dedicated branch that reads `Kinematics()` and then
+  `continue`s — the `Geometries()` query below it is reached only by *other* subtypes. So a
+  gripper's meshes become collision geometry only by riding on its kinematic model. Worse, on
+  **viam-server >= 1.0.0 a `Kinematics()` error drops the gripper from the frame system entirely**
+  (`continue`); on <= 0.13x it was added with a nil `ModelFrame`, i.e. a zero static frame at the
+  configured offset. Both grippers here therefore return a model from `buildGripperModel`
+  (`gripper.go`) rather than `errors.ErrUnsupported`.
+- `buildGripperModel` builds that model as **SVA JSON round-tripped through
+  `referenceframe.UnmarshalModelJSON`**, not as an in-memory `SimpleModel` — same module-boundary
+  reason as the arm (`KinematicModelToProtobuf` transmits `ModelConfig().OriginalFile.Bytes`, and a
+  hand-assembled model has none, so it ships as `UNSPECIFIED` while every in-process test stays
+  green). `TestGripperModelSurvivesSerialization` guards it. Shape constraints worth knowing:
+  a `LinkConfig` carries **at most one geometry**, so each mesh needs its own link; and
+  `ParseConfig` requires **exactly one leaf** unless `output_frames` is set, so the links form a
+  chain. All the mesh links have identity transforms (the pose lives in the geometry offset), and
+  the leaf is the `tcp` link — which is what makes the model's `Transform` the TCP.
+- The gripper's frame is its **TCP between the jaw tips** (`gripperTCPPose`, `(6.835, 0, 99.9)` mm
+  from the arm's `tool` frame, pure translation so `+Z` stays the approach axis the goal cloud
+  assumes). Measured off the follower meshes with the jaws closed; `TestGripperTCPLiesBetweenTheJawTips`
+  re-derives the jaw bounds from the meshes so regenerating them can't strand the TCP inside a
+  finger. The `leader` gripper has no jaws, so its leaf offset is zero. The model is **0-DoF on
+  purpose**: a jaw DoF would become a variable the motion planner may drive, and it means the
+  frame-system collision meshes are frozen closed while `Geometries()` keeps serving the live
+  articulating jaw to the 3D viewer. `TestGripperFrameResolvesToTCPInFrameSystem` asserts the
+  end-to-end contract (gripper parented to the arm at zero offset → gripper frame lands at the TCP),
+  which is also why users must **not** add a compensating `translation` to the gripper's `frame`.
+- **A part's `frame` config and its `kinematics` are two independent things**, and the 3D viewer reads
+  frames from the kinematics. Verified against a live machine: `RobotService.FrameSystemConfig` reports
+  `follower-gripper`'s `frame.poseInObserverFrame` as a *zero* pose relative to `follower-arm` (the
+  mount, on the arm's `tool` frame) while the TCP lives only in `kinematics` as the `tcp` link's
+  +99.9mm. The viewer draws a `<gripper>:tcp` node with axes at the grasp point from that link alone —
+  no geometry required. (It did not always: an earlier viewer drew frames only where geometry existed,
+  which briefly motivated a `visualize_tcp_frame` placeholder-box attribute. That was reverted once
+  the viewer was fixed; don't re-add it.) The module cannot move the mount marker anyway — only the
+  machine config's `frame.translation` can, and pushing the TCP there would make the module
+  wrong-by-default whenever a user omits it. Note also that `Get3DModels` is on the **arm API only**,
+  so the gripper cannot serve the colored `ee_frame.glb` marker the arm uses.
+- **In SVA, a link's `geometry` offset is relative to the link's *input* (parent) frame, not its
+  output.** Empirically: a geometry on a link with a non-zero `translation` renders at the parent
+  pose, not the link's own pose (this is also what `referenceframe`'s `tailGeometryStaticFrame`
+  exists to flip for a *part's* `frame.geometry`). so101.json follows the same convention — the
+  `base` link translates to `z=62.4` but its box offset `z=33.6` is measured from world. Hence every
+  mesh link in `buildGripperModel` carries an identity transform with the full mesh pose in the
+  geometry offset; the `tcp` link is the only one with a real `translation`, and it carries no
+  geometry at all.
 - pnpm 11 approves dependency install-scripts via `allowBuilds` (a map of dependency
   name to true/false) in `setup-app/pnpm-workspace.yaml` — not the older
   `onlyBuiltDependencies` list, and not `package.json`'s `pnpm` field. `setup.sh` pins

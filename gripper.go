@@ -2,6 +2,7 @@ package so_arm
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -98,6 +99,7 @@ type so101Gripper struct {
 	gripperType string
 	meshDetail  string
 	servoID     int
+	model       referenceframe.Model
 
 	mu       sync.Mutex
 	isMoving atomic.Bool
@@ -168,6 +170,12 @@ func newSO101Gripper(ctx context.Context, deps resource.Dependencies, conf resou
 		meshDetail = lowDetail
 	}
 
+	model, err := buildGripperModel(gripperType, meshDetail, conf.ResourceName().ShortName())
+	if err != nil {
+		ReleaseSharedController()
+		return nil, fmt.Errorf("failed to build gripper kinematic model: %w", err)
+	}
+
 	g := &so101Gripper{
 		name:           conf.ResourceName(),
 		logger:         logger,
@@ -175,6 +183,7 @@ func newSO101Gripper(ctx context.Context, deps resource.Dependencies, conf resou
 		gripperType:    gripperType,
 		meshDetail:     meshDetail,
 		servoID:        cfg.ServoID,
+		model:          model,
 		speed:          30,
 		acceleration:   50,
 		openPosition:   95.0,
@@ -278,6 +287,19 @@ var (
 	// correction the gripper renders facing backwards.
 	toolFromGripperLink = spatialmath.PoseInverse(
 		spatialmath.NewPose(r3.Vector{}, &spatialmath.EulerAngles{Pitch: math.Pi, Yaw: 0.0486795}))
+	// gripperTCPPose is the follower gripper's tool center point: the grasp point between
+	// the tips of the two jaws, expressed in the same frame as the poses above (the arm's
+	// "tool" frame). Measured off the follower meshes as buildGripperMeshes poses them, with
+	// the jaws closed (see TestGripperTCPLiesBetweenTheJawTips, which re-derives these bounds
+	// from the meshes so a mesh regeneration cannot silently strand the TCP inside a finger):
+	//
+	//	static finger contact face  X = 7.67   -- the jaws meet at X = 6.8
+	//	moving jaw contact face     X = 5.92
+	//	contact pads span           Z = 94.4 .. 104.3, center 99.9
+	//
+	// It is a pure translation: the TCP keeps the tool frame's axes, so +Z remains the
+	// approach axis that the arm's goal-cloud orientation planning is built around.
+	gripperTCPPose = spatialmath.NewPoseFromPoint(r3.Vector{X: 6.835, Y: 0, Z: 99.9})
 )
 
 // Gripper joint limits from the SO-101 URDF, in radians.
@@ -334,6 +356,74 @@ func buildGripperMeshes(gripperType, meshDetail string, jawAngle float64) ([]spa
 	}
 
 	return append(geoms, moving), nil
+}
+
+// gripperTCPFrame is the leaf link of the gripper's kinematic model -- the frame the whole
+// model resolves to, and therefore the pose viam-server reports for the gripper component.
+const gripperTCPFrame = "tcp"
+
+// buildGripperModel builds the gripper's kinematic model: a zero-DoF chain of static links
+// carrying the gripper meshes, ending at gripperTCPPose. Two things hang off this:
+//
+//   - The model's leaf is what the frame system calls "the gripper", so GetPose and any motion
+//     request targeting the gripper resolve to the TCP between the jaw tips instead of the arm's
+//     wrist, where the meshes are anchored.
+//   - The frame system takes an arm/gantry/gripper part's collision geometry from its kinematic
+//     model and never calls Geometries() for those subtypes, so attaching the meshes here is what
+//     makes the gripper a real obstacle to motion planning. On viam-server >= 1.0.0 a gripper
+//     whose Kinematics() errors is dropped from the frame system outright, so returning a model
+//     is also what keeps the gripper on the robot at all.
+//
+// The model is static, so the meshes are frozen at the closed jaw pose (gripperJointMin). A DoF
+// here would instead become a variable the motion planner is free to drive, and freezing the jaw
+// open would inflate the swept volume enough to block otherwise-valid plans. Geometries() still
+// serves the live, articulating jaw for the 3D viewer.
+//
+// The result is round-tripped through SVA JSON rather than assembled in memory: a component ships
+// its kinematics to viam-server as ModelConfig().OriginalFile.Bytes, and a model without those
+// bytes transmits as UNSPECIFIED (see TestGripperModelSurvivesSerialization). SVA JSON carries the
+// meshes across the boundary in GeometryConfig.MeshData.
+func buildGripperModel(gripperType, meshDetail, name string) (referenceframe.Model, error) {
+	meshes, err := buildGripperMeshes(gripperType, meshDetail, gripperJointMin)
+	if err != nil {
+		return nil, err
+	}
+
+	cfg := &referenceframe.ModelConfigJSON{Name: name, KinParamType: "SVA"}
+	// Each mesh gets its own link because a link carries at most one geometry. The links are
+	// chained (SVA models must have exactly one leaf) but all have identity transforms, so the
+	// full mesh pose lives in the geometry offset and every link sits at the gripper's mount.
+	parent := referenceframe.World
+	for _, mesh := range meshes {
+		geomCfg, err := spatialmath.NewGeometryConfig(mesh)
+		if err != nil {
+			return nil, fmt.Errorf("converting gripper mesh %q to a geometry config: %w", mesh.Label(), err)
+		}
+		cfg.Links = append(cfg.Links, referenceframe.LinkConfig{
+			ID:       mesh.Label(),
+			Parent:   parent,
+			Geometry: geomCfg,
+		})
+		parent = mesh.Label()
+	}
+
+	// The leader gripper is a hand-held trigger, not a pair of jaws, so it has no grasp point:
+	// its frame stays at the mount.
+	tcp := gripperTCPPose
+	if gripperType == leaderGripper {
+		tcp = spatialmath.NewZeroPose()
+	}
+	cfg.Links = append(cfg.Links, referenceframe.LinkConfig{
+		ID:          gripperTCPFrame,
+		Parent:      parent,
+		Translation: tcp.Point(),
+	})
+
+	jsonBytes, err := json.Marshal(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("serializing the %s gripper model: %w", gripperType, err)
+	}
+	return referenceframe.UnmarshalModelJSON(jsonBytes, name)
 }
 
 // jawAngle maps the gripper's current open percentage onto the URDF gripper-joint
@@ -533,8 +623,10 @@ func (g *so101Gripper) GoToInputs(ctx context.Context, inputs ...[]referencefram
 	return errors.ErrUnsupported
 }
 
+// Kinematics returns the gripper's static model, whose leaf frame is the TCP between the jaw
+// tips. See buildGripperModel for why the gripper needs one at all.
 func (g *so101Gripper) Kinematics(ctx context.Context) (referenceframe.Model, error) {
-	return nil, errors.ErrUnsupported
+	return g.model, nil
 }
 
 func (g *so101Gripper) IsHoldingSomething(ctx context.Context, extra map[string]interface{}) (gripper.HoldingStatus, error) {
