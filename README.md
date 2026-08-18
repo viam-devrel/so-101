@@ -429,7 +429,7 @@ Or to a raw encoder value, clamped to the servo's calibrated range:
 }
 ```
 
-`percent` is converted using that servo's own calibration and normalization mode, so this works for a gripper on servo 6 (percentage-normalized) and for a servo 5 gripper on a 4-DOF build (degree-normalized) alike.
+`percent` is converted using that servo's own calibration and normalization mode.
 
 #### Servo Position
 
@@ -554,7 +554,7 @@ Where `arm-1` is the name of your `devrel:so101:arm` component. Configure the ar
 | Name           | Type   | Inclusion    | Description                                                                                                                                                                                                                                          |
 | -------------- | ------ | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `arm`          | string | **Required** | Name of the `devrel:so101:arm` component that owns the serial connection this gripper's servo lives on.                                                                                                                                              |
-| `servo_id`     | int    | Optional     | The servo ID for the gripper. Default is `6`. Must not be a servo the arm drives itself — see [4-DOF variants](#4-dof-variants).                                                                                                                     |
+| `servo_id`     | int    | Optional     | The servo ID for the gripper. Default is `6`.                                                                                                                      |
 | `gripper_type` | string | Optional     | Which gripper meshes `Geometries()` serves for the 3D viewer: `follower` (moving jaw, default) or `leader` (thumb-loop handle + trigger). The moving part articulates with the live gripper opening.                                                  |
 | `mesh_detail`  | string | Optional     | Gripper mesh resolution: `low` (decimated, the default) or `high` (full resolution). `Geometries()` is also the motion-planning collision geometry, so `low` keeps planning fast; `high` is mainly for visual comparison.                             |
 
@@ -588,10 +588,6 @@ The 3D viewer reads the model's frames directly, so a `<gripper>:tcp` node appea
 with its axes drawn at the grasp point — no extra configuration and no placeholder geometry needed.
 
 ### Communication
-
-### 4-DOF variants
-
-`servo_id` may be any servo the arm does not drive itself. The arm rejects a `servo_id` that appears in its own `servo_ids` list, so a 4-DOF build configured with `"servo_ids": [1, 2, 3, 4]` can host a gripper on servo 5. On a standard 5-DOF SO-101 the arm drives servos 1-5, leaving servo 6.
 
 ### When the arm fails to build
 
