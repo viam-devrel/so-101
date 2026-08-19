@@ -631,11 +631,15 @@ func (p moveProfile) impliedAccel() float64 {
 
 // clipped reports whether the servo could not honor a commanded GoalTime. The 1.15x + 20ms
 // allowance absorbs sampling granularity and the servo's own settling.
+//
+// Integer math, deliberately: time.Duration(float64(commanded)*1.15) truncates and lands a
+// nanosecond short for several round values (450ms yields 537.499999ms, not 537.5ms), which
+// makes exact-boundary reasoning wrong in a way that only shows up at the boundary.
 func (p moveProfile) clipped(commanded time.Duration) bool {
 	if !p.moved || commanded <= 0 {
 		return false
 	}
-	allowed := time.Duration(float64(commanded)*1.15) + 20*time.Millisecond
+	allowed := commanded*115/100 + 20*time.Millisecond
 	return p.duration > allowed
 }
 
@@ -734,6 +738,145 @@ func init() {
 			// Just inside the allowance: 500ms vs commanded 450ms -> 450*1.15+20 = 537ms.
 			if p.clipped(450 * time.Millisecond) {
 				return fmt.Errorf("clipped = true, want false at the allowance boundary")
+			}
+			return nil
+		}},
+	)
+}
+
+func init() {
+	selftests = append(selftests,
+		selftestCase{"analyzeMove/reverse-motion", func() error {
+			// Reverse move: negative velocities, overshooting a target of 100 by 5.
+			s := []sample{
+				{t: 0, pos: 200, vel: 0},
+				{t: 10 * time.Millisecond, pos: 150, vel: -500},
+				{t: 20 * time.Millisecond, pos: 95, vel: -500},
+				{t: 30 * time.Millisecond, pos: 100, vel: 10},
+				{t: 40 * time.Millisecond, pos: 100, vel: 0},
+			}
+			p := analyzeMove(s, 100)
+			if !p.moved {
+				return fmt.Errorf("moved = false, want true (negative velocities are motion)")
+			}
+			if p.peakVel != 500 {
+				return fmt.Errorf("peakVel = %d, want 500", p.peakVel)
+			}
+			if want := 20 * time.Millisecond; p.duration != want {
+				return fmt.Errorf("duration = %v, want %v", p.duration, want)
+			}
+			if p.overshootSteps != 5 {
+				return fmt.Errorf("overshootSteps = %d, want 5 (reverse overshoot)", p.overshootSteps)
+			}
+			// Peak reached on the first moving sample: instantaneous ramp -> 0, not +Inf.
+			if got := p.impliedAccel(); got != 0 {
+				return fmt.Errorf("impliedAccel = %v, want 0 for an instantaneous ramp", got)
+			}
+			return nil
+		}},
+		selftestCase{"analyzeMove/velEpsilon-boundary", func() error {
+			// |vel| == velEpsilon is motion, so the move spans t=10ms..30ms.
+			s := []sample{
+				{t: 0, pos: 0, vel: 0},
+				{t: 10 * time.Millisecond, pos: 0, vel: 1},
+				{t: 20 * time.Millisecond, pos: 5, vel: 500},
+				{t: 30 * time.Millisecond, pos: 10, vel: 1},
+				{t: 40 * time.Millisecond, pos: 10, vel: 0},
+			}
+			p := analyzeMove(s, 1<<30)
+			if want := 20 * time.Millisecond; p.duration != want {
+				return fmt.Errorf("duration = %v, want %v", p.duration, want)
+			}
+			return nil
+		}},
+		selftestCase{"analyzeMove/95-percent-band", func() error {
+			// 95% of 1000 is 950, met at t=20ms by vel=960 -- one sample before the peak.
+			s := []sample{
+				{t: 0, pos: 0, vel: 0},
+				{t: 10 * time.Millisecond, pos: 0, vel: 500},
+				{t: 20 * time.Millisecond, pos: 5, vel: 960},
+				{t: 30 * time.Millisecond, pos: 15, vel: 1000},
+				{t: 40 * time.Millisecond, pos: 25, vel: 0},
+			}
+			p := analyzeMove(s, 1<<30)
+			if want := 10 * time.Millisecond; p.timeToPeak != want {
+				return fmt.Errorf("timeToPeak = %v, want %v", p.timeToPeak, want)
+			}
+			return nil
+		}},
+		selftestCase{"analyzeMove/peak-at-last-moving-sample", func() error {
+			// The 95% band is first met by the final moving sample.
+			s := []sample{
+				{t: 0, pos: 0, vel: 0},
+				{t: 10 * time.Millisecond, pos: 0, vel: 100},
+				{t: 20 * time.Millisecond, pos: 1, vel: 500},
+				{t: 30 * time.Millisecond, pos: 6, vel: 1000},
+				{t: 40 * time.Millisecond, pos: 16, vel: 0},
+			}
+			p := analyzeMove(s, 1<<30)
+			if want := 20 * time.Millisecond; p.timeToPeak != want {
+				return fmt.Errorf("timeToPeak = %v, want %v", p.timeToPeak, want)
+			}
+			if got := p.impliedAccel(); math.Abs(got-50000) > 1 {
+				return fmt.Errorf("impliedAccel = %v, want ~50000", got)
+			}
+			return nil
+		}},
+		selftestCase{"analyzeMove/overshoot-after-motion-ends", func() error {
+			// The furthest travel past target lands in a sample already reading vel=0.
+			s := []sample{
+				{t: 0, pos: 0, vel: 0},
+				{t: 10 * time.Millisecond, pos: 50, vel: 500},
+				{t: 20 * time.Millisecond, pos: 98, vel: 500},
+				{t: 30 * time.Millisecond, pos: 103, vel: 0},
+				{t: 40 * time.Millisecond, pos: 103, vel: 0},
+			}
+			p := analyzeMove(s, 100)
+			if p.overshootSteps != 3 {
+				return fmt.Errorf("overshootSteps = %d, want 3", p.overshootSteps)
+			}
+			return nil
+		}},
+		selftestCase{"analyzeMove/bounds-indices", func() error {
+			s := []sample{
+				{t: 0, pos: 0, vel: 0},
+				{t: 10 * time.Millisecond, pos: 5, vel: 500},
+				{t: 20 * time.Millisecond, pos: 10, vel: 500},
+				{t: 30 * time.Millisecond, pos: 10, vel: 0},
+			}
+			p := analyzeMove(s, 10)
+			if p.startIdx != 1 || p.endIdx != 2 {
+				return fmt.Errorf("startIdx,endIdx = %d,%d; want 1,2", p.startIdx, p.endIdx)
+			}
+			return nil
+		}},
+		selftestCase{"moveProfile/clipped-allowance", func() error {
+			p := moveProfile{moved: true, duration: 500 * time.Millisecond}
+			// 400*1.15+20 = 480ms < 500ms -> clipped. Pins the 1.15 factor from above.
+			if !p.clipped(400 * time.Millisecond) {
+				return fmt.Errorf("clipped = false, want true for 500ms vs commanded 400ms")
+			}
+			// 420*1.15 = 483ms, +20ms = 503ms > 500ms -> honored. Pins the +20ms.
+			if p.clipped(420 * time.Millisecond) {
+				return fmt.Errorf("clipped = true, want false for 500ms vs commanded 420ms")
+			}
+			// Exactly at the allowance (300*1.15+20 = 365ms) is not clipped.
+			if (moveProfile{moved: true, duration: 365 * time.Millisecond}).clipped(300 * time.Millisecond) {
+				return fmt.Errorf("clipped = true, want false exactly at the allowance")
+			}
+			// No GoalTime commanded -> nothing to clip.
+			if p.clipped(0) {
+				return fmt.Errorf("clipped = true, want false for commanded 0")
+			}
+			// A profile that never moved is never clipped, whatever its duration.
+			if (moveProfile{moved: false, duration: 500 * time.Millisecond}).clipped(200 * time.Millisecond) {
+				return fmt.Errorf("clipped = true, want false when moved = false")
+			}
+			return nil
+		}},
+		selftestCase{"analyzeMove/empty", func() error {
+			if p := analyzeMove(nil, 0); p.moved {
+				return fmt.Errorf("moved = true for an empty series")
 			}
 			return nil
 		}},
