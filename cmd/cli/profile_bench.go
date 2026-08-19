@@ -57,7 +57,7 @@ func main() {
 	flag.Float64Var(&cfg.travelDeg, "travel", 20, "degrees of travel per trial (accel only; goaltime uses its own 10/20/40 sweep)")
 	flag.BoolVar(&cfg.move, "move", false, "REQUIRED to allow any test that moves the arm")
 	flag.BoolVar(&cfg.fullArm, "full-arm", false, "coordinated 5-joint goaltime run (needs -move)")
-	flag.StringVar(&cfg.assumeLimits, "assume-limits", "", "<min>:<max> raw-tick bounds, for arms whose angle-limit registers read invalid")
+	flag.StringVar(&cfg.assumeLimits, "assume-limits", "", "<min>:<max> raw encoder-step bounds, for arms whose angle-limit registers read invalid")
 	flag.StringVar(&cfg.outDir, "out", ".", "directory for CSV output")
 	flag.BoolVar(&cfg.selftest, "selftest", false, "run built-in checks of the pure functions and exit (no hardware)")
 	flag.Parse()
@@ -76,9 +76,16 @@ func run(cfg config) error {
 		return fmt.Errorf("-port is required (or use -selftest)")
 	}
 
-	tests, err := selectTests(cfg.test, cfg.move)
+	if err := validateConfig(cfg); err != nil {
+		return err
+	}
+
+	tests, skipped, err := selectTests(cfg.test, cfg.move)
 	if err != nil {
 		return err
+	}
+	if len(skipped) > 0 {
+		fmt.Printf("skipping %s (motion tests require -move)\n", strings.Join(skipped, ", "))
 	}
 	if len(tests) == 0 {
 		return fmt.Errorf("no tests to run: %q requires -move", cfg.test)
@@ -90,7 +97,7 @@ func run(cfg config) error {
 // selectTests resolves the -test flag into the list that will actually run. Motion tests
 // are dropped without -move; "all" without -move degrades to writerate only and says so,
 // rather than erroring, so "all" stays useful as a first run.
-func selectTests(name string, move bool) ([]string, error) {
+func selectTests(name string, move bool) (run, skipped []string, err error) {
 	motion := map[string]bool{"goaltime": true, "accel": true}
 	var requested []string
 	switch name {
@@ -99,21 +106,41 @@ func selectTests(name string, move bool) ([]string, error) {
 	case "writerate", "goaltime", "accel":
 		requested = []string{name}
 	default:
-		return nil, fmt.Errorf("unknown -test %q (want writerate|goaltime|accel|all)", name)
+		return nil, nil, fmt.Errorf("unknown -test %q (want writerate|goaltime|accel|all)", name)
 	}
 
-	var out, skipped []string
 	for _, t := range requested {
 		if motion[t] && !move {
 			skipped = append(skipped, t)
 			continue
 		}
-		out = append(out, t)
+		run = append(run, t)
 	}
-	if len(skipped) > 0 {
-		fmt.Printf("skipping %s (motion tests require -move)\n", strings.Join(skipped, ", "))
+	return run, skipped, nil
+}
+
+// isArmServo reports whether id is part of the 5-DOF arm chain. Servo 6 is the gripper.
+func isArmServo(id int) bool {
+	for _, a := range armServoIDs {
+		if a == id {
+			return true
+		}
 	}
-	return out, nil
+	return false
+}
+
+// validateConfig rejects flag combinations that would run to completion and produce a
+// confidently wrong result rather than an error.
+func validateConfig(cfg config) error {
+	if !isArmServo(cfg.servo) {
+		return fmt.Errorf("-servo %d is not an arm servo %v (servo 6 is the gripper, and an "+
+			"acceleration sweep would drive its jaws into their stop)", cfg.servo, armServoIDs)
+	}
+	if degToSteps(cfg.travelDeg) == 0 {
+		return fmt.Errorf("-travel %g deg rounds to 0 encoder steps; every trial would "+
+			"complete without moving and report a CSV of zeros", cfg.travelDeg)
+	}
+	return nil
 }
 
 // selftestCase is one hardware-free check of a pure function.
@@ -266,7 +293,7 @@ func init() {
 // sample is one timestamped reading of a servo's position and velocity.
 type sample struct {
 	t   time.Duration // since the start of the trial
-	pos int           // raw encoder ticks
+	pos int           // raw encoder steps
 	vel int           // raw steps/sec, signed
 }
 
@@ -409,6 +436,27 @@ func (r *rig) disableTorque(ctx context.Context) {
 	}
 }
 
+// holdPose enables torque on every servo in the rig so the arm holds its posture while a
+// single joint is exercised. Without it the untested joints hang limp and the joint under
+// test accelerates a collapsing chain -- which corrupts exactly the gravity-loaded
+// measurement the acceleration sweep exists to make, with no visible symptom in the data.
+//
+// It also warns that torque is released on exit: withSafeShutdown drops it on the normal
+// return path too, so a gravity-loaded arm falls the moment the summary finishes printing.
+func (r *rig) holdPose(ctx context.Context) error {
+	for _, id := range r.ids {
+		s := r.group.ServoByID(id)
+		if s == nil {
+			return fmt.Errorf("servo %d not in group", id)
+		}
+		if err := s.SetTorqueEnabled(ctx, true); err != nil {
+			return fmt.Errorf("enable torque on servo %d: %w", id, err)
+		}
+	}
+	fmt.Printf("torque ON for servos %v -- RELEASED when this run ends, so support the arm\n", r.ids)
+	return nil
+}
+
 // withSafeShutdown runs fn with a context cancelled on SIGINT/SIGTERM, and guarantees
 // torque is dropped on every exit path — normal return, error, or signal.
 func (r *rig) withSafeShutdown(fn func(ctx context.Context) error) error {
@@ -427,8 +475,8 @@ func (r *rig) withSafeShutdown(fn func(ctx context.Context) error) error {
 // travelPlan is a validated out-and-back move for one servo.
 type travelPlan struct {
 	id     int
-	start  int // raw ticks, read at startup
-	target int // raw ticks
+	start  int // raw encoder steps, read at startup
+	target int // raw encoder steps
 }
 
 // limitsValid mirrors the guard at config.go:424. Angle limits can legitimately read 0/0
@@ -567,7 +615,7 @@ type moveProfile struct {
 }
 
 // analyzeMove recovers the motion profile from a sample series. target is the commanded
-// position in raw ticks; direction is inferred from the first and last positions.
+// position in raw encoder steps; direction is inferred from the first and last positions.
 func analyzeMove(samples []sample, target int) moveProfile {
 	var p moveProfile
 	if len(samples) == 0 {
@@ -631,13 +679,21 @@ func (p moveProfile) impliedAccel() float64 {
 	return float64(p.peakVel) / p.timeToPeak.Seconds()
 }
 
-// clipped reports whether the servo could not honor a commanded GoalTime. The 1.15x + 20ms
+// rampBelowSamplingResolution reports that peak velocity was reached within a single
+// sample period, so impliedAccel has no ramp to measure and returns 0. That zero means
+// "faster than we can see", not "no acceleration" -- without this flag the fastest Acc rows
+// plot at the bottom of the axis, indistinguishable from a move that never happened.
+func (p moveProfile) rampBelowSamplingResolution() bool {
+	return p.moved && p.timeToPeak <= 0
+}
+
+// exceededGoalTime reports whether the servo could not honor a commanded GoalTime. The 1.15x + 20ms
 // allowance absorbs sampling granularity and the servo's own settling.
 //
 // Integer math, deliberately: time.Duration(float64(commanded)*1.15) truncates and lands a
 // nanosecond short for several round values (450ms yields 537.499999ms, not 537.5ms), which
 // makes exact-boundary reasoning wrong in a way that only shows up at the boundary.
-func (p moveProfile) clipped(commanded time.Duration) bool {
+func (p moveProfile) exceededGoalTime(commanded time.Duration) bool {
 	if !p.moved || commanded <= 0 {
 		return false
 	}
@@ -707,7 +763,7 @@ func init() {
 			if p.impliedAccel() != 0 {
 				return fmt.Errorf("impliedAccel = %v, want 0", p.impliedAccel())
 			}
-			if p.clipped(time.Second) {
+			if p.exceededGoalTime(time.Second) {
 				return fmt.Errorf("clipped = true for a move that never happened")
 			}
 			return nil
@@ -727,18 +783,18 @@ func init() {
 			}
 			return nil
 		}},
-		selftestCase{"moveProfile/clipped", func() error {
+		selftestCase{"moveProfile/exceededGoalTime", func() error {
 			p := moveProfile{moved: true, duration: 500 * time.Millisecond}
 			// Commanded 200ms, took 500ms -> clipped.
-			if !p.clipped(200 * time.Millisecond) {
+			if !p.exceededGoalTime(200 * time.Millisecond) {
 				return fmt.Errorf("clipped = false, want true for 500ms vs commanded 200ms")
 			}
 			// Commanded 800ms, took 500ms -> honored.
-			if p.clipped(800 * time.Millisecond) {
+			if p.exceededGoalTime(800 * time.Millisecond) {
 				return fmt.Errorf("clipped = true, want false for 500ms vs commanded 800ms")
 			}
 			// Just inside the allowance: 500ms vs commanded 450ms -> 450*1.15+20 = 537ms.
-			if p.clipped(450 * time.Millisecond) {
+			if p.exceededGoalTime(450 * time.Millisecond) {
 				return fmt.Errorf("clipped = true, want false at the allowance boundary")
 			}
 			return nil
@@ -852,26 +908,26 @@ func init() {
 			}
 			return nil
 		}},
-		selftestCase{"moveProfile/clipped-allowance", func() error {
+		selftestCase{"moveProfile/exceededGoalTime-allowance", func() error {
 			p := moveProfile{moved: true, duration: 500 * time.Millisecond}
 			// 400*1.15+20 = 480ms < 500ms -> clipped. Pins the 1.15 factor from above.
-			if !p.clipped(400 * time.Millisecond) {
+			if !p.exceededGoalTime(400 * time.Millisecond) {
 				return fmt.Errorf("clipped = false, want true for 500ms vs commanded 400ms")
 			}
 			// 420*1.15 = 483ms, +20ms = 503ms > 500ms -> honored. Pins the +20ms.
-			if p.clipped(420 * time.Millisecond) {
+			if p.exceededGoalTime(420 * time.Millisecond) {
 				return fmt.Errorf("clipped = true, want false for 500ms vs commanded 420ms")
 			}
 			// Exactly at the allowance (300*1.15+20 = 365ms) is not clipped.
-			if (moveProfile{moved: true, duration: 365 * time.Millisecond}).clipped(300 * time.Millisecond) {
+			if (moveProfile{moved: true, duration: 365 * time.Millisecond}).exceededGoalTime(300 * time.Millisecond) {
 				return fmt.Errorf("clipped = true, want false exactly at the allowance")
 			}
 			// No GoalTime commanded -> nothing to clip.
-			if p.clipped(0) {
+			if p.exceededGoalTime(0) {
 				return fmt.Errorf("clipped = true, want false for commanded 0")
 			}
 			// A profile that never moved is never clipped, whatever its duration.
-			if (moveProfile{moved: false, duration: 500 * time.Millisecond}).clipped(200 * time.Millisecond) {
+			if (moveProfile{moved: false, duration: 500 * time.Millisecond}).exceededGoalTime(200 * time.Millisecond) {
 				return fmt.Errorf("clipped = true, want false when moved = false")
 			}
 			return nil
@@ -901,7 +957,15 @@ func newCSV(dir, name string, header []string) (*csvWriter, error) {
 		return nil, fmt.Errorf("create out dir %s: %w", dir, err)
 	}
 	path := filepath.Join(dir, name)
-	f, err := os.Create(path)
+	// O_EXCL rather than os.Create, which truncates. These files ARE the deliverable, and
+	// the file is opened before the serial port is, so a mistyped -port would otherwise
+	// destroy a good prior run before failing. Refusing here matches planTravel: this
+	// harness does not silently discard data to keep going.
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if os.IsExist(err) {
+		return nil, fmt.Errorf("%s already exists; refusing to overwrite bench data "+
+			"(move it aside, or pass a different -out)", path)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("create %s: %w", path, err)
 	}
@@ -944,12 +1008,27 @@ func writeSamples(c *csvWriter, trial string, servoID int, samples []sample) {
 			strconv.Itoa(servoID),
 			strconv.FormatFloat(s.t.Seconds(), 'f', 6, 64),
 			strconv.Itoa(s.pos),
+			strconv.FormatFloat(stepsToDeg(s.pos), 'f', 4, 64),
 			strconv.Itoa(s.vel),
 		})
 	}
 }
 
-var sampleHeader = []string{"trial", "servo_id", "t_sec", "pos_ticks", "vel_steps_per_sec"}
+var sampleHeader = []string{"trial", "servo_id", "t_sec", "pos_steps", "pos_deg", "vel_steps_per_sec"}
+
+// csvName builds a per-run filename. Task 12 sweeps several servos into a single -out
+// directory, so the servo and mode must appear in the name or each run would collide with
+// the one before it.
+func csvName(test, suffix string, servo int, fullArm bool) string {
+	switch {
+	case fullArm:
+		return fmt.Sprintf("%s_fullarm%s.csv", test, suffix)
+	case servo > 0:
+		return fmt.Sprintf("%s_servo%d%s.csv", test, servo, suffix)
+	default:
+		return fmt.Sprintf("%s%s.csv", test, suffix)
+	}
+}
 
 func init() {
 	selftests = append(selftests,
@@ -975,9 +1054,9 @@ func init() {
 			if err != nil {
 				return err
 			}
-			want := "trial,servo_id,t_sec,pos_ticks,vel_steps_per_sec\n" +
-				"trial1,3,1.500000,-42,7\n" +
-				"trial1,3,2.000000,100,-8\n"
+			want := "trial,servo_id,t_sec,pos_steps,pos_deg,vel_steps_per_sec\n" +
+				"trial1,3,1.500000,-42,-3.6914,7\n" +
+				"trial1,3,2.000000,100,8.7891,-8\n"
 			if string(got) != want {
 				return fmt.Errorf("file =\n%q\nwant\n%q", got, want)
 			}
@@ -1121,6 +1200,130 @@ func init() {
 			}
 			if _, err := os.Stat(filepath.Join(dir, "t.csv")); err != nil {
 				return fmt.Errorf("file not created: %w", err)
+			}
+			return nil
+		}},
+	)
+}
+
+func init() {
+	selftests = append(selftests,
+		selftestCase{"selectTests", func() error {
+			for _, tc := range []struct {
+				name         string
+				move         bool
+				run, skipped []string
+				wantErr      bool
+			}{
+				{"writerate", false, []string{"writerate"}, nil, false},
+				{"all", false, []string{"writerate"}, []string{"goaltime", "accel"}, false},
+				{"all", true, []string{"writerate", "goaltime", "accel"}, nil, false},
+				{"goaltime", false, nil, []string{"goaltime"}, false},
+				{"goaltime", true, []string{"goaltime"}, nil, false},
+				{"bogus", true, nil, nil, true},
+			} {
+				run, skipped, err := selectTests(tc.name, tc.move)
+				if (err != nil) != tc.wantErr {
+					return fmt.Errorf("selectTests(%q,%v) err = %v, wantErr %v", tc.name, tc.move, err, tc.wantErr)
+				}
+				if strings.Join(run, ",") != strings.Join(tc.run, ",") {
+					return fmt.Errorf("selectTests(%q,%v) run = %v, want %v", tc.name, tc.move, run, tc.run)
+				}
+				if strings.Join(skipped, ",") != strings.Join(tc.skipped, ",") {
+					return fmt.Errorf("selectTests(%q,%v) skipped = %v, want %v", tc.name, tc.move, skipped, tc.skipped)
+				}
+			}
+			return nil
+		}},
+		selftestCase{"validateConfig", func() error {
+			ok := config{servo: 1, travelDeg: 20}
+			if err := validateConfig(ok); err != nil {
+				return fmt.Errorf("valid config rejected: %w", err)
+			}
+			// Servo 6 is the gripper; an Acc sweep would drive its jaws into their stop.
+			if err := validateConfig(config{servo: 6, travelDeg: 20}); err == nil {
+				return fmt.Errorf("-servo 6 (gripper) accepted, want refusal")
+			}
+			if err := validateConfig(config{servo: 0, travelDeg: 20}); err == nil {
+				return fmt.Errorf("-servo 0 accepted, want refusal")
+			}
+			// Travel that rounds to zero steps would report a CSV of zeros, not an error.
+			if err := validateConfig(config{servo: 1, travelDeg: 0}); err == nil {
+				return fmt.Errorf("-travel 0 accepted, want refusal")
+			}
+			if err := validateConfig(config{servo: 1, travelDeg: 0.02}); err == nil {
+				return fmt.Errorf("-travel 0.02 (rounds to 0 steps) accepted, want refusal")
+			}
+			return nil
+		}},
+		selftestCase{"csvName", func() error {
+			for _, tc := range []struct {
+				test, suffix string
+				servo        int
+				fullArm      bool
+				want         string
+			}{
+				{"writerate", "", 0, false, "writerate.csv"},
+				{"accel", "", 2, false, "accel_servo2.csv"},
+				{"accel", "_samples", 2, false, "accel_servo2_samples.csv"},
+				{"goaltime", "", 1, true, "goaltime_fullarm.csv"},
+				{"goaltime", "_samples", 1, true, "goaltime_fullarm_samples.csv"},
+			} {
+				if got := csvName(tc.test, tc.suffix, tc.servo, tc.fullArm); got != tc.want {
+					return fmt.Errorf("csvName(%q,%q,%d,%v) = %q, want %q",
+						tc.test, tc.suffix, tc.servo, tc.fullArm, got, tc.want)
+				}
+			}
+			return nil
+		}},
+		selftestCase{"newCSV/refuses-to-clobber", func() error {
+			dir, err := os.MkdirTemp("", "profile_bench_selftest")
+			if err != nil {
+				return err
+			}
+			defer os.RemoveAll(dir)
+
+			c, err := newCSV(dir, "t.csv", []string{"a"})
+			if err != nil {
+				return err
+			}
+			if err := c.close(); err != nil {
+				return err
+			}
+			// Task 12 sweeps several servos into one -out dir, and the file is opened
+			// before the serial port is -- so a silent truncate here would destroy a good
+			// prior run before the bad one even failed.
+			if _, err := newCSV(dir, "t.csv", []string{"a"}); err == nil {
+				return fmt.Errorf("newCSV overwrote an existing file, want refusal")
+			}
+			return nil
+		}},
+		selftestCase{"rampBelowSamplingResolution", func() error {
+			// Peak on the first moving sample: no ramp visible, impliedAccel is 0.
+			fast := analyzeMove([]sample{
+				{t: 0, pos: 0, vel: 0},
+				{t: 10 * time.Millisecond, pos: 10, vel: 1000},
+				{t: 20 * time.Millisecond, pos: 20, vel: 0},
+			}, 1<<30)
+			if !fast.rampBelowSamplingResolution() {
+				return fmt.Errorf("rampBelowSamplingResolution = false for an instantaneous ramp")
+			}
+			if fast.impliedAccel() != 0 {
+				return fmt.Errorf("impliedAccel = %v, want 0", fast.impliedAccel())
+			}
+			// A measurable ramp must NOT be flagged.
+			slow := analyzeMove([]sample{
+				{t: 0, pos: 0, vel: 0},
+				{t: 10 * time.Millisecond, pos: 1, vel: 100},
+				{t: 20 * time.Millisecond, pos: 6, vel: 1000},
+				{t: 30 * time.Millisecond, pos: 16, vel: 0},
+			}, 1<<30)
+			if slow.rampBelowSamplingResolution() {
+				return fmt.Errorf("rampBelowSamplingResolution = true for a measurable ramp")
+			}
+			// A move that never happened is not a fast ramp.
+			if (moveProfile{}).rampBelowSamplingResolution() {
+				return fmt.Errorf("rampBelowSamplingResolution = true for a move that never happened")
 			}
 			return nil
 		}},

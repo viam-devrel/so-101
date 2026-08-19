@@ -1521,7 +1521,7 @@ Expected: exit 0, no output.
 go run cmd/cli/profile_bench.go -selftest
 ```
 
-Expected: `28/28 passed`, exit 0.
+Expected: `33/33 passed`, exit 0.
 
 - [ ] **Step 3: Commit**
 
@@ -1558,7 +1558,7 @@ var gapSweep = []time.Duration{
 const writeRateIterations = 500
 
 func runWriteRate(cfg config) error {
-	out, err := newCSV(cfg.outDir, "writerate.csv", []string{
+	out, err := newCSV(cfg.outDir, csvName("writerate", "", 0, false), []string{
 		"gap_label", "gap_sec", "n", "mean_sec", "p50_sec", "p95_sec", "p99_sec", "max_sec", "rate_hz",
 	})
 	if err != nil {
@@ -1680,7 +1680,7 @@ gofmt -s -w cmd/cli/profile_bench.go && \
   go run cmd/cli/profile_bench.go -selftest
 ```
 
-Expected: exit 0, no `gofmt` output, `28/28 passed`.
+Expected: exit 0, no `gofmt` output, `33/33 passed`.
 
 - [ ] **Step 4: Commit**
 
@@ -1779,7 +1779,7 @@ gofmt -s -w cmd/cli/profile_bench.go && \
   go run cmd/cli/profile_bench.go -selftest
 ```
 
-Expected: exit 0, no `gofmt` output, `28/28 passed`.
+Expected: exit 0, no `gofmt` output, `33/33 passed`.
 
 - [ ] **Step 3: Commit**
 
@@ -1866,27 +1866,31 @@ var goalTimeTravelDeg = []float64{10, 20, 40}
 const goalTimeAcc = 20
 
 func runGoalTime(cfg config) error {
-	ids := []int{cfg.servo}
+	// commanded is the set this test actually drives; the rig always contains the whole
+	// arm so holdPose can keep the untested joints powered. Without that, a single-joint
+	// accel run measures a collapsing chain rather than a posed arm.
+	commanded := []int{cfg.servo}
 	if cfg.fullArm {
-		ids = armServoIDs
+		commanded = armServoIDs
 	}
+	ids := commanded
 
-	r, err := openRig(cfg.port, noGap, ids)
+	r, err := openRig(cfg.port, noGap, armServoIDs)
 	if err != nil {
 		return err
 	}
 	defer r.close()
 
-	summary, err := newCSV(cfg.outDir, "goaltime.csv", []string{
+	summary, err := newCSV(cfg.outDir, csvName("goaltime", "", cfg.servo, cfg.fullArm), []string{
 		"trial", "servo_id", "commanded_ms", "travel_deg", "measured_ms",
-		"ratio", "clipped", "peak_vel", "overshoot_ticks",
+		"ratio_measured_over_commanded", "goal_time_exceeded", "peak_vel", "overshoot_steps",
 	})
 	if err != nil {
 		return err
 	}
 	defer summary.close()
 
-	samplesCSV, err := newCSV(cfg.outDir, "goaltime_samples.csv", sampleHeader)
+	samplesCSV, err := newCSV(cfg.outDir, csvName("goaltime", "_samples", cfg.servo, cfg.fullArm), sampleHeader)
 	if err != nil {
 		return err
 	}
@@ -1895,12 +1899,8 @@ func runGoalTime(cfg config) error {
 	fmt.Printf("\n%-22s %10s %10s %8s %8s\n", "trial", "commanded", "measured", "ratio", "clipped")
 
 	runErr := r.withSafeShutdown(func(ctx context.Context) error {
-		for _, id := range ids {
-			if s := r.group.ServoByID(id); s != nil {
-				if err := s.SetTorqueEnabled(ctx, true); err != nil {
-					return fmt.Errorf("enable torque on servo %d: %w", id, err)
-				}
-			}
+		if err := r.holdPose(ctx); err != nil {
+			return err
 		}
 
 		for _, travelDeg := range goalTimeTravelDeg {
@@ -2007,13 +2007,13 @@ func goalTimeTrial(
 			strconv.FormatFloat(travelDeg, 'f', 1, 64),
 			strconv.FormatFloat(prof.duration.Seconds()*1000, 'f', 1, 64),
 			strconv.FormatFloat(ratio, 'f', 3, 64),
-			strconv.FormatBool(prof.clipped(commanded)),
+			strconv.FormatBool(prof.exceededGoalTime(commanded)),
 			strconv.Itoa(prof.peakVel),
 			strconv.Itoa(prof.overshootSteps),
 		})
 		if len(ids) == 1 {
 			fmt.Printf("%-22s %10v %10v %8.3f %8v\n",
-				trial, commanded, prof.duration, ratio, prof.clipped(commanded))
+				trial, commanded, prof.duration, ratio, prof.exceededGoalTime(commanded))
 		}
 	}
 
@@ -2066,7 +2066,7 @@ gofmt -s -w cmd/cli/profile_bench.go && \
   go run cmd/cli/profile_bench.go -selftest
 ```
 
-Expected: exit 0, no `gofmt` output, `28/28 passed`.
+Expected: exit 0, no `gofmt` output, `33/33 passed`.
 
 - [ ] **Step 4: Commit**
 
@@ -2097,24 +2097,27 @@ var accSweep = []int{0, 1, 2, 5, 10, 20, 50, 100, 200, 255}
 const accelSpeedSteps = 1000
 
 func runAccel(cfg config) error {
+	// Only cfg.servo is commanded, but the rig holds the whole arm so holdPose can keep
+	// the other joints powered -- otherwise this sweep measures a sagging chain, which is
+	// exactly wrong for the gravity-loaded joints the mapping depends on.
 	ids := []int{cfg.servo}
-	r, err := openRig(cfg.port, noGap, ids)
+	r, err := openRig(cfg.port, noGap, armServoIDs)
 	if err != nil {
 		return err
 	}
 	defer r.close()
 
-	summary, err := newCSV(cfg.outDir, "accel.csv", []string{
+	summary, err := newCSV(cfg.outDir, csvName("accel", "", cfg.servo, false), []string{
 		"trial", "servo_id", "acc_units", "travel_deg", "peak_vel_steps_per_sec",
 		"time_to_peak_sec", "implied_accel_steps_per_sec2", "steps_per_sec2_per_unit",
-		"duration_sec", "overshoot_ticks",
+		"ramp_below_sampling_resolution", "duration_sec", "overshoot_steps",
 	})
 	if err != nil {
 		return err
 	}
 	defer summary.close()
 
-	samplesCSV, err := newCSV(cfg.outDir, "accel_samples.csv", sampleHeader)
+	samplesCSV, err := newCSV(cfg.outDir, csvName("accel", "_samples", cfg.servo, false), sampleHeader)
 	if err != nil {
 		return err
 	}
@@ -2124,10 +2127,8 @@ func runAccel(cfg config) error {
 		"acc", "peak_vel", "time_to_peak", "implied_a", "a_per_unit")
 
 	runErr := r.withSafeShutdown(func(ctx context.Context) error {
-		if s := r.group.ServoByID(cfg.servo); s != nil {
-			if err := s.SetTorqueEnabled(ctx, true); err != nil {
-				return fmt.Errorf("enable torque on servo %d: %w", cfg.servo, err)
-			}
+		if err := r.holdPose(ctx); err != nil {
+			return err
 		}
 
 		steps := degToSteps(cfg.travelDeg)
@@ -2171,6 +2172,7 @@ func runAccel(cfg config) error {
 				strconv.FormatFloat(prof.timeToPeak.Seconds(), 'f', 6, 64),
 				strconv.FormatFloat(implied, 'f', 1, 64),
 				strconv.FormatFloat(perUnit, 'f', 1, 64),
+				strconv.FormatBool(prof.rampBelowSamplingResolution()),
 				strconv.FormatFloat(prof.duration.Seconds(), 'f', 6, 64),
 				strconv.Itoa(prof.overshootSteps),
 			})
@@ -2190,6 +2192,9 @@ func runAccel(cfg config) error {
 
 		fmt.Printf("\nthe library documents Acc as ~100 steps/s^2 per unit; " +
 			"compare the a_per_unit column and note where it saturates.\n")
+		fmt.Printf("rows with ramp_below_sampling_resolution=true reached peak within one " +
+			"sample: implied_accel reads 0 because it was too fast to measure, NOT because " +
+			"there was no acceleration. Read peak_vel for those.\n")
 		return nil
 	})
 
@@ -2209,7 +2214,7 @@ gofmt -s -w cmd/cli/profile_bench.go && \
   go run cmd/cli/profile_bench.go -selftest
 ```
 
-Expected: exit 0, no `gofmt` output, `28/28 passed`.
+Expected: exit 0, no `gofmt` output, `33/33 passed`.
 
 - [ ] **Step 3: Confirm the module's tests still pass**
 
@@ -2251,6 +2256,18 @@ Verify before trusting anything: `gap=1ms` reads ~1000 Hz, `gap=2ms` reads ~500 
 
 - [ ] **Step 3: Clear the workspace and position the joint, then run the motion tests**
 
+Two things to know before the motion runs:
+
+- **The harness refuses to overwrite CSVs.** Filenames carry the servo and mode
+  (`accel_servo2.csv`, `goaltime_fullarm_samples.csv`), so the servo 1/2/3 sweep below no
+  longer collides with itself — but re-running the *same* configuration into the same
+  `-out` will fail rather than clobber. Move the old files aside or pass a new `-out`.
+- **Torque is released when each run ends**, on the normal path as well as on Ctrl-C. For
+  the gravity-loaded joints below the arm will drop the moment the summary finishes
+  printing, so support it. The harness prints a reminder when it powers up. Note also that
+  a second Ctrl-C does nothing while a run is shutting down; if it wedges on a serial read,
+  use `kill`.
+
 Before running `goaltime`, position the tested joint with at least **40° of positive
 headroom** inside its angle limits. The sweep runs 10°, 20°, and 40° travels and the harness
 **refuses rather than clamps** (by design), so a joint parked near its upper limit completes
@@ -2288,7 +2305,7 @@ Write `docs/superpowers/results/2026-08-19-bench-run.md` covering:
 - Hardware and host: arm (leader/follower), USB adapter, OS, port.
 - **Write rate:** the table, and the achievable setpoint rate with jitter. p95/p99 matter more than the mean.
 - **GoalTime:** over which (time, travel) combinations it was honored, where it clipped, and the per-joint arrival spread from the `-full-arm` run. This decides whether coordinated arrival is viable.
-- **Acceleration:** measured steps/s² per `Acc` unit for servos 1, 2, and 3; whether the ~100 figure holds; where it saturates; and **whether the mapping is per-joint or global** — this is the open question the spec flagged.
+- **Acceleration:** measured steps/s² per `Acc` unit for servos 1, 2, and 3; whether the ~100 figure holds; where it saturates; and **whether the mapping is per-joint or global** — this is the open question the spec flagged. Ignore `implied_accel` on rows where `ramp_below_sampling_resolution` is true: those reached peak within one sample, so the 0 means "too fast to measure", not "no acceleration" — read `peak_vel` instead.
 - **Scope recommendation:** which of the three follow-on stages the numbers support (coordinated arrival, acceleration enforcement, trajectory execution), and what each would cost.
 
 - [ ] **Step 6: Commit**
@@ -2305,7 +2322,7 @@ git commit -m "docs: recorded servo motion-profile bench measurements"
 - [ ] `go build -o /dev/null cmd/cli/profile_bench.go` exits 0
 - [ ] `go vet cmd/cli/profile_bench.go` exits 0
 - [ ] `gofmt -l cmd/cli/profile_bench.go` prints nothing
-- [ ] `go run cmd/cli/profile_bench.go -selftest` reports `28/28 passed`
+- [ ] `go run cmd/cli/profile_bench.go -selftest` reports `33/33 passed`
 - [ ] `go test ./cmd/module/ .` passes (modulo `TestEnumerateSerialPorts` without serial hardware)
 - [ ] All three tests have been run against real hardware and their CSVs exist
 - [ ] `docs/superpowers/results/2026-08-19-bench-run.md` records the numbers and a scope recommendation
