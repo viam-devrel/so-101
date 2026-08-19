@@ -13,11 +13,13 @@ package main
 
 import (
 	"context"
+	"encoding/csv"
 	"flag"
 	"fmt"
 	"math"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -877,6 +879,126 @@ func init() {
 		selftestCase{"analyzeMove/empty", func() error {
 			if p := analyzeMove(nil, 0); p.moved {
 				return fmt.Errorf("moved = true for an empty series")
+			}
+			return nil
+		}},
+	)
+}
+
+// --- CSV output ---
+
+// csvWriter wraps a file and encoding/csv, accumulating the first error so callers can
+// write a whole table and check once at the end.
+type csvWriter struct {
+	f      *os.File
+	w      *csv.Writer
+	err    error
+	closed bool
+}
+
+func newCSV(dir, name string, header []string) (*csvWriter, error) {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, fmt.Errorf("create out dir %s: %w", dir, err)
+	}
+	path := filepath.Join(dir, name)
+	f, err := os.Create(path)
+	if err != nil {
+		return nil, fmt.Errorf("create %s: %w", path, err)
+	}
+	c := &csvWriter{f: f, w: csv.NewWriter(f)}
+	c.write(header)
+	fmt.Printf("writing %s\n", path)
+	return c, nil
+}
+
+func (c *csvWriter) write(row []string) {
+	if c.err != nil {
+		return
+	}
+	c.err = c.w.Write(row)
+}
+
+// close is idempotent, so callers can both `defer c.close()` as a leak guard and call it
+// explicitly to check the accumulated error. A CSV write failure must not be silent — the
+// files are the durable artifact of this whole harness.
+func (c *csvWriter) close() error {
+	if c.closed {
+		return c.err
+	}
+	c.closed = true
+	c.w.Flush()
+	if c.err == nil {
+		c.err = c.w.Error()
+	}
+	if cerr := c.f.Close(); c.err == nil {
+		c.err = cerr
+	}
+	return c.err
+}
+
+// writeSamples dumps a sample series with a trial label, for plotting.
+func writeSamples(c *csvWriter, trial string, servoID int, samples []sample) {
+	for _, s := range samples {
+		c.write([]string{
+			trial,
+			strconv.Itoa(servoID),
+			strconv.FormatFloat(s.t.Seconds(), 'f', 6, 64),
+			strconv.Itoa(s.pos),
+			strconv.Itoa(s.vel),
+		})
+	}
+}
+
+var sampleHeader = []string{"trial", "servo_id", "t_sec", "pos_ticks", "vel_steps_per_sec"}
+
+func init() {
+	selftests = append(selftests,
+		selftestCase{"csvWriter/roundtrip", func() error {
+			dir, err := os.MkdirTemp("", "profile_bench_selftest")
+			if err != nil {
+				return err
+			}
+			defer os.RemoveAll(dir)
+
+			c, err := newCSV(dir, "t.csv", sampleHeader)
+			if err != nil {
+				return err
+			}
+			writeSamples(c, "trial1", 3, []sample{
+				{t: 1500 * time.Millisecond, pos: -42, vel: 7},
+			})
+			if err := c.close(); err != nil {
+				return fmt.Errorf("close: %w", err)
+			}
+			got, err := os.ReadFile(filepath.Join(dir, "t.csv"))
+			if err != nil {
+				return err
+			}
+			want := "trial,servo_id,t_sec,pos_ticks,vel_steps_per_sec\n" +
+				"trial1,3,1.500000,-42,7\n"
+			if string(got) != want {
+				return fmt.Errorf("file =\n%q\nwant\n%q", got, want)
+			}
+			return nil
+		}},
+		selftestCase{"csvWriter/close-is-idempotent", func() error {
+			dir, err := os.MkdirTemp("", "profile_bench_selftest")
+			if err != nil {
+				return err
+			}
+			defer os.RemoveAll(dir)
+
+			c, err := newCSV(dir, "t.csv", []string{"a"})
+			if err != nil {
+				return err
+			}
+			if err := c.close(); err != nil {
+				return fmt.Errorf("first close: %w", err)
+			}
+			// Tasks 10 and 11 both defer close() AND call it explicitly to check the
+			// accumulated error, so a second close must not invent a failure.
+			if err := c.close(); err != nil {
+				return fmt.Errorf("second close: %w", err)
 			}
 			return nil
 		}},
