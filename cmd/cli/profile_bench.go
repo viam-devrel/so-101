@@ -547,3 +547,195 @@ func init() {
 		}},
 	)
 }
+
+// --- profile recovery ---
+
+// velEpsilon is the |velocity| below which a servo is considered stopped. The STS3215
+// reports velocity in whole steps/sec, so anything non-zero is real motion.
+const velEpsilon = 1
+
+// moveProfile is what one commanded move looks like after the fact.
+type moveProfile struct {
+	startIdx, endIdx int           // sample indices bounding the motion
+	duration         time.Duration // motion start to motion end
+	peakVel          int           // max |velocity| observed, steps/sec
+	timeToPeak       time.Duration // motion start to first sample within 95% of peak
+	overshootSteps   int           // furthest travel beyond target, 0 if none
+	moved            bool          // false if the servo never moved at all
+}
+
+// analyzeMove recovers the motion profile from a sample series. target is the commanded
+// position in raw ticks; direction is inferred from the first and last positions.
+func analyzeMove(samples []sample, target int) moveProfile {
+	var p moveProfile
+	if len(samples) == 0 {
+		return p
+	}
+
+	first, last := -1, -1
+	for i, s := range samples {
+		if abs(s.vel) >= velEpsilon {
+			if first < 0 {
+				first = i
+			}
+			last = i
+		}
+	}
+	if first < 0 {
+		return p // never moved
+	}
+	p.moved = true
+	p.startIdx, p.endIdx = first, last
+	p.duration = samples[last].t - samples[first].t
+
+	for _, s := range samples {
+		if v := abs(s.vel); v > p.peakVel {
+			p.peakVel = v
+		}
+	}
+
+	// Time to reach 95% of peak, measured from motion start.
+	threshold := p.peakVel * 95 / 100
+	for i := first; i <= last; i++ {
+		if abs(samples[i].vel) >= threshold {
+			p.timeToPeak = samples[i].t - samples[first].t
+			break
+		}
+	}
+
+	// Overshoot is travel past the target in the direction of motion.
+	forward := samples[last].pos >= samples[first].pos
+	for _, s := range samples {
+		var over int
+		if forward {
+			over = s.pos - target
+		} else {
+			over = target - s.pos
+		}
+		if over > p.overshootSteps {
+			p.overshootSteps = over
+		}
+	}
+	return p
+}
+
+// impliedAccel returns the implied acceleration in steps/sec^2 from the ramp to peak
+// velocity. Returns 0 when the ramp was instantaneous (below sampling resolution), which
+// is itself the finding for Acc=0.
+func (p moveProfile) impliedAccel() float64 {
+	if p.timeToPeak <= 0 {
+		return 0
+	}
+	return float64(p.peakVel) / p.timeToPeak.Seconds()
+}
+
+// clipped reports whether the servo could not honor a commanded GoalTime. The 1.15x + 20ms
+// allowance absorbs sampling granularity and the servo's own settling.
+func (p moveProfile) clipped(commanded time.Duration) bool {
+	if !p.moved || commanded <= 0 {
+		return false
+	}
+	allowed := time.Duration(float64(commanded)*1.15) + 20*time.Millisecond
+	return p.duration > allowed
+}
+
+func abs(v int) int {
+	if v < 0 {
+		return -v
+	}
+	return v
+}
+
+func init() {
+	// synthProfile builds a trapezoidal series: 10ms sampling, ramp 0->1000 steps/s over
+	// samples 1..10, cruise, then stop. Hand-computed expectations below.
+	synthProfile := func() []sample {
+		var out []sample
+		pos := 0
+		add := func(i, vel int) {
+			out = append(out, sample{t: time.Duration(i) * 10 * time.Millisecond, pos: pos, vel: vel})
+			pos += vel / 100 // 10ms of travel at vel steps/s
+		}
+		add(0, 0) // stopped
+		for i := 1; i <= 10; i++ {
+			add(i, i*100) // ramp: 100..1000
+		}
+		for i := 11; i <= 15; i++ {
+			add(i, 1000) // cruise
+		}
+		add(16, 0) // stopped
+		return out
+	}
+
+	selftests = append(selftests,
+		selftestCase{"analyzeMove/trapezoid", func() error {
+			s := synthProfile()
+			p := analyzeMove(s, 1<<30) // target far away -> no overshoot
+			if !p.moved {
+				return fmt.Errorf("moved = false, want true")
+			}
+			// Motion spans sample 1 (t=10ms) to sample 15 (t=150ms).
+			if want := 140 * time.Millisecond; p.duration != want {
+				return fmt.Errorf("duration = %v, want %v", p.duration, want)
+			}
+			if p.peakVel != 1000 {
+				return fmt.Errorf("peakVel = %d, want 1000", p.peakVel)
+			}
+			// 95% of 1000 = 950; first sample >= 950 is vel=1000 at t=100ms.
+			// Measured from motion start (t=10ms) -> 90ms.
+			if want := 90 * time.Millisecond; p.timeToPeak != want {
+				return fmt.Errorf("timeToPeak = %v, want %v", p.timeToPeak, want)
+			}
+			// 1000 steps/s over 0.09s.
+			if got := p.impliedAccel(); math.Abs(got-11111.11) > 1 {
+				return fmt.Errorf("impliedAccel = %v, want ~11111.11", got)
+			}
+			return nil
+		}},
+		selftestCase{"analyzeMove/never-moved", func() error {
+			s := []sample{{t: 0, pos: 100, vel: 0}, {t: 10 * time.Millisecond, pos: 100, vel: 0}}
+			p := analyzeMove(s, 100)
+			if p.moved {
+				return fmt.Errorf("moved = true, want false")
+			}
+			if p.impliedAccel() != 0 {
+				return fmt.Errorf("impliedAccel = %v, want 0", p.impliedAccel())
+			}
+			if p.clipped(time.Second) {
+				return fmt.Errorf("clipped = true for a move that never happened")
+			}
+			return nil
+		}},
+		selftestCase{"analyzeMove/overshoot", func() error {
+			// Forward motion overshooting a target of 100 by 5.
+			s := []sample{
+				{t: 0, pos: 0, vel: 0},
+				{t: 10 * time.Millisecond, pos: 50, vel: 500},
+				{t: 20 * time.Millisecond, pos: 105, vel: 500},
+				{t: 30 * time.Millisecond, pos: 100, vel: -10},
+				{t: 40 * time.Millisecond, pos: 100, vel: 0},
+			}
+			p := analyzeMove(s, 100)
+			if p.overshootSteps != 5 {
+				return fmt.Errorf("overshootSteps = %d, want 5", p.overshootSteps)
+			}
+			return nil
+		}},
+		selftestCase{"moveProfile/clipped", func() error {
+			p := moveProfile{moved: true, duration: 500 * time.Millisecond}
+			// Commanded 200ms, took 500ms -> clipped.
+			if !p.clipped(200 * time.Millisecond) {
+				return fmt.Errorf("clipped = false, want true for 500ms vs commanded 200ms")
+			}
+			// Commanded 800ms, took 500ms -> honored.
+			if p.clipped(800 * time.Millisecond) {
+				return fmt.Errorf("clipped = true, want false for 500ms vs commanded 800ms")
+			}
+			// Just inside the allowance: 500ms vs commanded 450ms -> 450*1.15+20 = 537ms.
+			if p.clipped(450 * time.Millisecond) {
+				return fmt.Errorf("clipped = true, want false at the allowance boundary")
+			}
+			return nil
+		}},
+	)
+}
