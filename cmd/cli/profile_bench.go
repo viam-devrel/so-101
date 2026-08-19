@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/signal"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -417,4 +418,126 @@ func (r *rig) withSafeShutdown(fn func(ctx context.Context) error) error {
 		r.disableTorque(context.Background())
 	}()
 	return fn(ctx)
+}
+
+// --- limits and travel planning ---
+
+// travelPlan is a validated out-and-back move for one servo.
+type travelPlan struct {
+	id     int
+	start  int // raw ticks, read at startup
+	target int // raw ticks
+}
+
+// limitsValid mirrors the guard at config.go:424. Angle limits can legitimately read 0/0
+// on a multi-turn servo or one with limits disabled; trusting those would clamp every
+// target to zero.
+func limitsValid(min, max int) bool {
+	return min < max && max <= 4095
+}
+
+// parseAssumeLimits parses the -assume-limits "<min>:<max>" override.
+func parseAssumeLimits(s string) (min, max int, err error) {
+	if s == "" {
+		return 0, 0, fmt.Errorf("empty")
+	}
+	parts := strings.Split(s, ":")
+	if len(parts) != 2 {
+		return 0, 0, fmt.Errorf("want <min>:<max>, got %q", s)
+	}
+	if min, err = strconv.Atoi(strings.TrimSpace(parts[0])); err != nil {
+		return 0, 0, fmt.Errorf("min: %w", err)
+	}
+	if max, err = strconv.Atoi(strings.TrimSpace(parts[1])); err != nil {
+		return 0, 0, fmt.Errorf("max: %w", err)
+	}
+	if !limitsValid(min, max) {
+		return 0, 0, fmt.Errorf("invalid bounds %d:%d (need min < max <= 4095)", min, max)
+	}
+	return min, max, nil
+}
+
+// planTravel validates that start +/- travel fits inside [min,max] and returns the plan.
+// It REFUSES rather than clamping: a silently shortened trial reports a real duration for
+// a move that never happened, which is worse than no measurement.
+func planTravel(id, start, travelSteps, min, max int) (travelPlan, error) {
+	if !limitsValid(min, max) {
+		return travelPlan{}, fmt.Errorf(
+			"servo %d: angle limits read %d/%d, which fail the min<max<=4095 guard; "+
+				"pass -assume-limits=<min>:<max> to proceed", id, min, max)
+	}
+	if start < min || start > max {
+		return travelPlan{}, fmt.Errorf(
+			"servo %d: start position %d is outside limits [%d,%d]", id, start, min, max)
+	}
+	target := start + travelSteps
+	if target < min || target > max {
+		return travelPlan{}, fmt.Errorf(
+			"servo %d: travel of %d steps from %d would reach %d, outside limits [%d,%d]; "+
+				"reduce -travel or reposition the arm", id, travelSteps, start, target, min, max)
+	}
+	return travelPlan{id: id, start: start, target: target}, nil
+}
+
+func init() {
+	selftests = append(selftests,
+		selftestCase{"limitsValid", func() error {
+			for _, tc := range []struct {
+				min, max int
+				want     bool
+			}{
+				{0, 4095, true},
+				{100, 3000, true},
+				{0, 0, false},      // limits disabled / multi-turn
+				{3000, 100, false}, // inverted
+				{0, 4096, false},   // beyond resolution
+				{500, 500, false},  // degenerate
+			} {
+				if got := limitsValid(tc.min, tc.max); got != tc.want {
+					return fmt.Errorf("limitsValid(%d,%d) = %v, want %v",
+						tc.min, tc.max, got, tc.want)
+				}
+			}
+			return nil
+		}},
+		selftestCase{"planTravel/refuses-rather-than-clamps", func() error {
+			// Fits: 2048 + 228 = 2276, inside [0,4095].
+			p, err := planTravel(1, 2048, 228, 0, 4095)
+			if err != nil {
+				return fmt.Errorf("valid plan rejected: %w", err)
+			}
+			if p.target != 2276 {
+				return fmt.Errorf("target = %d, want 2276", p.target)
+			}
+			// Would clip: must error, NOT clamp to 4095.
+			if _, err := planTravel(1, 4000, 228, 0, 4095); err == nil {
+				return fmt.Errorf("clipping travel accepted, want refusal")
+			}
+			// Negative direction clips low.
+			if _, err := planTravel(1, 100, -228, 0, 4095); err == nil {
+				return fmt.Errorf("negative clipping travel accepted, want refusal")
+			}
+			// Invalid limits (0/0) must be reported as such, not clamp everything to 0.
+			_, err = planTravel(1, 2048, 228, 0, 0)
+			if err == nil {
+				return fmt.Errorf("invalid limits accepted, want refusal")
+			}
+			if !strings.Contains(err.Error(), "assume-limits") {
+				return fmt.Errorf("invalid-limits error should name -assume-limits, got: %v", err)
+			}
+			return nil
+		}},
+		selftestCase{"parseAssumeLimits", func() error {
+			min, max, err := parseAssumeLimits("100:3000")
+			if err != nil || min != 100 || max != 3000 {
+				return fmt.Errorf("got (%d,%d,%v), want (100,3000,nil)", min, max, err)
+			}
+			for _, bad := range []string{"", "100", "100:50", "a:b", "0:5000"} {
+				if _, _, err := parseAssumeLimits(bad); err == nil {
+					return fmt.Errorf("parseAssumeLimits(%q) accepted, want error", bad)
+				}
+			}
+			return nil
+		}},
+	)
 }
