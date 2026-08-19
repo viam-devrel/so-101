@@ -19,6 +19,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/hipsterbrown/feetech-servo/feetech"
 )
 
 // noGap is the "no command gap" sentinel. feetech.NewBus coerces a zero MinCommandGap
@@ -247,6 +249,97 @@ func init() {
 		selftestCase{"summarize/empty", func() error {
 			if got := summarize(nil); got.n != 0 {
 				return fmt.Errorf("n = %d, want 0", got.n)
+			}
+			return nil
+		}},
+	)
+}
+
+// --- sample decoding ---
+
+// sample is one timestamped reading of a servo's position and velocity.
+type sample struct {
+	t   time.Duration // since the start of the trial
+	pos int           // raw encoder ticks
+	vel int           // raw steps/sec, signed
+}
+
+// decodeSignMagnitude mirrors feetech's unexported helper (servo.go:390). The high bit at
+// signBit is a sign flag, not a two's-complement extension: the remaining bits are the
+// magnitude.
+func decodeSignMagnitude(value, signBit int) int {
+	if signBit == 0 {
+		return value
+	}
+	signMask := 1 << signBit
+	if value&signMask != 0 {
+		return -(value & (signMask - 1))
+	}
+	return value
+}
+
+// decodePosVel splits the 4-byte payload of a SyncRead at RegPresentPosition into
+// position and velocity. Returns an error rather than silently decoding garbage if the
+// servo returned a short payload.
+func decodePosVel(proto *feetech.Protocol, data []byte) (pos, vel int, err error) {
+	if len(data) < 4 {
+		return 0, 0, fmt.Errorf("short payload: %d bytes, want 4", len(data))
+	}
+	pos = decodeSignMagnitude(int(proto.DecodeWord(data[0:2])), feetech.RegPresentPosition.SignBit)
+	vel = decodeSignMagnitude(int(proto.DecodeWord(data[2:4])), feetech.RegPresentVelocity.SignBit)
+	return pos, vel, nil
+}
+
+func degToSteps(deg float64) int   { return int(math.Round(deg * stepsPerDegree)) }
+func stepsToDeg(steps int) float64 { return float64(steps) / stepsPerDegree }
+
+func init() {
+	selftests = append(selftests,
+		selftestCase{"decodeSignMagnitude", func() error {
+			for _, tc := range []struct{ in, bit, want int }{
+				{100, 15, 100},     // positive
+				{0x8064, 15, -100}, // sign bit set -> negative magnitude
+				{0, 15, 0},         // zero
+				{0x8000, 15, 0},    // negative zero decodes to 0
+				{2048, 15, 2048},   // mid-range positive
+				{42, 0, 42},        // signBit 0 -> passthrough
+			} {
+				if got := decodeSignMagnitude(tc.in, tc.bit); got != tc.want {
+					return fmt.Errorf("decodeSignMagnitude(%#x, %d) = %d, want %d",
+						tc.in, tc.bit, got, tc.want)
+				}
+			}
+			return nil
+		}},
+		selftestCase{"decodePosVel", func() error {
+			proto := feetech.NewProtocol(feetech.ProtocolSTS)
+			// STS is little-endian: pos = 0x0064 = 100, vel = 0x8064 = -100.
+			data := []byte{0x64, 0x00, 0x64, 0x80}
+			pos, vel, err := decodePosVel(proto, data)
+			if err != nil {
+				return err
+			}
+			if pos != 100 {
+				return fmt.Errorf("pos = %d, want 100", pos)
+			}
+			if vel != -100 {
+				return fmt.Errorf("vel = %d, want -100", vel)
+			}
+			if _, _, err := decodePosVel(proto, []byte{0x00, 0x01}); err == nil {
+				return fmt.Errorf("short payload accepted, want error")
+			}
+			return nil
+		}},
+		selftestCase{"degToSteps roundtrip", func() error {
+			// 360 deg = 4096 steps exactly.
+			if got := degToSteps(360); got != 4096 {
+				return fmt.Errorf("degToSteps(360) = %d, want 4096", got)
+			}
+			if got := degToSteps(20); got != 228 { // 20 * 11.3777... = 227.55 -> 228
+				return fmt.Errorf("degToSteps(20) = %d, want 228", got)
+			}
+			if d := stepsToDeg(4096); math.Abs(d-360) > 1e-9 {
+				return fmt.Errorf("stepsToDeg(4096) = %v, want 360", d)
 			}
 			return nil
 		}},
