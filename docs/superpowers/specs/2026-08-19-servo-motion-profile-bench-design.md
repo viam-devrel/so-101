@@ -16,9 +16,12 @@ Two consequences motivate this work:
 
 1. `acceleration_degs_per_sec_per_sec` is validated, stored, and settable via the
    `set_acceleration` DoCommand, but **never written to servo hardware**
-   (`README.md:104` calls it a planned follow-up). `SafeSoArmController.MoveToJointPositions`
-   accepts an `acc int` parameter and drops it on the floor (`manager.go:46`); `arm.go:626`
-   passes `0`.
+   (`README.md:104` calls it a planned follow-up). Both
+   `SafeSoArmController.MoveToJointPositions` (`manager.go:47`) and
+   `MoveServosToPositions` (`manager.go:75`) accept an `acc int` parameter and drop it on
+   the floor — they delegate to `writePositions` (`manager.go:36`), which takes only
+   `speed`. The arm's move path goes through the latter: `arm.go:626` calls
+   `MoveServosToPositions(..., speedSteps, 0)`.
 2. Recent RDK work adds trajectory generation to the builtin motion planner, also available
    as the `viam-modules/trajex` modular resource. trajex is a Kunz–Stilman time-optimal path
    parameterizer: given waypoints plus per-joint velocity/acceleration limits it returns
@@ -65,9 +68,21 @@ Wire cost is effectively unchanged from today: 7 bytes/servo vs 6. A 5-servo syn
 
 **Software rate floor.** `feetech.Bus` enforces `MinCommandGap` (default **1 ms**,
 `bus.go:465`) plus a fixed **100 µs** half-duplex turnaround sleep in `sendPacketLocked`
-(`bus.go:472`). `registry.go:126` never overrides it, so every bus transaction costs ≥1.1 ms
-in software before USB latency. That is a ~900 Hz ceiling — not limiting for 50–100 Hz
+(`bus.go:472`). `registry.go:126` never overrides it, so every bus transaction costs ≥1 ms
+in software before USB latency — a **~1000 Hz** ceiling. Not limiting for 50–100 Hz
 streaming, but it is a knob the harness sweeps rather than assumes.
+
+The 100 µs turnaround is **not additive** to the gap: `sendPacketLocked` stamps
+`b.lastCmdTime = time.Now()` at `bus.go:486`, *before* the `time.Sleep(100 * time.Microsecond)`
+at `bus.go:489`. The next call's `enforceCommandGap` therefore measures elapsed time that
+already contains the sleep, so back-to-back transactions period at ~1 ms, not ~1.1 ms.
+
+**`MinCommandGap: 0` is not settable.** `NewBus` coerces a zero value back to 1 ms
+(`bus.go:63-64`), silently and with no error. Anywhere this design says "no gap" the
+implementation MUST pass a smallest-non-zero sentinel — **`1 * time.Nanosecond`** — and never
+the literal `0`. Passing `0` would make the sweep's fastest row a mislabeled duplicate of the
+1 ms row, and would cap motion sampling at ~1 kHz rather than at the link rate, in both cases
+producing a plausible-looking wrong number rather than a visible failure.
 
 **Half-duplex contention.** Reads and writes share one bus and one mutex. Sampling position
 to recover a velocity profile costs a round trip per sample and serializes against setpoint
@@ -107,7 +122,12 @@ go run cmd/cli/profile_bench.go -port=/dev/tty.usbmodemXXXX -test=writerate
 | `-travel` | `20` | degrees of travel per trial |
 | `-move` | `false` | **required** for any test that moves the arm |
 | `-full-arm` | `false` | coordinated 5-joint `goaltime` run (needs `-move`) |
+| `-assume-limits` | *(unset)* | `<min>:<max>` raw-tick bounds, for arms whose angle-limit registers read invalid |
 | `-out` | `.` | directory for CSV output |
+
+`-test=all` without `-move` runs `writerate` only and logs a line naming the tests it
+skipped and why, rather than erroring. That keeps `all` useful as a default first run while
+leaving no ambiguity about what did not execute.
 
 `-servo 1` (base rotation) is the default because it is gravity-unloaded and moves in a
 horizontal plane, making it the safest default. Gravity-loaded joints 2 and 3 will behave
@@ -122,6 +142,13 @@ differently under the same `Acc`; characterizing them is a matter of re-running 
 - Before any motion, read each servo's `RegMinAngleLimit`/`RegMaxAngleLimit`, clamp every
   target into it, and **refuse to run** if the requested travel would clip — rather than
   silently shortening a trial and reporting a bad duration.
+- Those limits are **not always valid**. They can legitimately read `0/0` on a multi-turn
+  servo or one with limits disabled, which is why `config.go:424` guards them with
+  `minLimit < maxLimit && maxLimit <= 4095` before trusting them. The harness applies the
+  same guard. If the limits fail it, the harness **refuses to move** and reports the servo
+  ID and the raw values read, rather than clamping every target to zero and silently
+  refusing every trial. An explicit `-assume-limits=<min>:<max>` flag lets the operator
+  supply bounds and proceed on such an arm.
 - Travel is always relative to the position read at startup, so there is no move-to-home
   step.
 - `Speed` is capped during the acceleration sweep. `Acc: 0` means an unlimited ramp, and
@@ -137,14 +164,16 @@ t := time.Now()   // stamped immediately after the read returns
 // data[id][2:4] = velocity (signed, SignBit 15)
 ```
 
-Motion tests run with `MinCommandGap: 0` to sample as fast as the link allows. Every sample
-carries its own measured timestamp, so sampling jitter appears **in the data** rather than
-being assumed uniform.
+Motion tests run with `MinCommandGap: 1 * time.Nanosecond` — the "no gap" sentinel, never a
+literal `0`, per the coercion noted above — to sample as fast as the link allows. Every
+sample carries its own measured timestamp, so sampling jitter appears **in the data** rather
+than being assumed uniform.
 
 ### Test: `writerate` (no motion)
 
-For each `MinCommandGap` in {0, 250 µs, 500 µs, 1 ms, 2 ms}, open a fresh bus and issue 500
-`SetGoals` writes commanding the *current* position.
+For each `MinCommandGap` in {1 ns, 250 µs, 500 µs, 1 ms, 2 ms}, open a fresh bus and issue 500
+`SetGoals` writes commanding the *current* position. The 1 ns row is the "no gap" sentinel —
+reported as such — because a literal `0` is coerced to 1 ms and would duplicate that row.
 
 Reports achieved Hz and inter-write latency **p50 / p95 / p99 / max**. The tail matters more
 than the mean: timed streaming breaks on jitter, not on average throughput.
@@ -182,8 +211,10 @@ on the spot.
 
 The harness is hardware-driving throwaway code in `cmd/cli/`, which CI neither compiles nor
 tests. Its correctness is established by running it against a physical arm and sanity-checking
-that the measured numbers are physically plausible (e.g. `writerate` at `MinCommandGap: 2ms`
-must report ≈500 Hz or the timing path is wrong).
+that the measured numbers are physically plausible. Two checks the `writerate` output must
+pass before any of it is trusted: `MinCommandGap: 2ms` must report ≈500 Hz, and `1ms` must
+report ≈1000 Hz. If the 1 ns sentinel row reports the same rate as the 1 ms row, the zero
+coercion described above has been reintroduced.
 
 This was a deliberate trade-off. The alternative considered — putting profile recovery,
 latency statistics, and unit conversion in the root package with unit tests against synthetic
