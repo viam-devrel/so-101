@@ -489,7 +489,7 @@ func init() {
 				{0, 15, 0},              // zero
 				{0x8000, 15, 0},         // negative zero decodes to 0
 				{2048, 15, 2048},        // mid-range positive
-				{42, 0, 42},             // signBit 0 -> passthrough
+				{43, 0, 43},             // signBit 0 -> passthrough (odd: also detects a missing guard)
 			} {
 				if got := decodeSignMagnitude(tc.in, tc.bit); got != tc.want {
 					return fmt.Errorf("decodeSignMagnitude(%#x, %d) = %d, want %d",
