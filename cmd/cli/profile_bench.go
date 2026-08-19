@@ -966,6 +966,7 @@ func init() {
 			}
 			writeSamples(c, "trial1", 3, []sample{
 				{t: 1500 * time.Millisecond, pos: -42, vel: 7},
+				{t: 2 * time.Second, pos: 100, vel: -8},
 			})
 			if err := c.close(); err != nil {
 				return fmt.Errorf("close: %w", err)
@@ -975,7 +976,8 @@ func init() {
 				return err
 			}
 			want := "trial,servo_id,t_sec,pos_ticks,vel_steps_per_sec\n" +
-				"trial1,3,1.500000,-42,7\n"
+				"trial1,3,1.500000,-42,7\n" +
+				"trial1,3,2.000000,100,-8\n"
 			if string(got) != want {
 				return fmt.Errorf("file =\n%q\nwant\n%q", got, want)
 			}
@@ -995,10 +997,130 @@ func init() {
 			if err := c.close(); err != nil {
 				return fmt.Errorf("first close: %w", err)
 			}
-			// Tasks 10 and 11 both defer close() AND call it explicitly to check the
-			// accumulated error, so a second close must not invent a failure.
+			// Tasks 10 and 11 both defer close() AND call it explicitly inside
+			// firstErr(...). The explicit call is evaluated first as a return argument,
+			// so the deferred one's value is discarded -- the guard's real jobs are not
+			// double-closing the fd, and returning the SAME stored error on a repeat
+			// call, which csvWriter/flush-failure-surfaces pins.
 			if err := c.close(); err != nil {
 				return fmt.Errorf("second close: %w", err)
+			}
+			return nil
+		}},
+	)
+}
+
+func init() {
+	selftests = append(selftests,
+		selftestCase{"csvWriter/close-reports-write-failure", func() error {
+			dir, err := os.MkdirTemp("", "profile_bench_selftest")
+			if err != nil {
+				return err
+			}
+			defer os.RemoveAll(dir)
+
+			c, err := newCSV(dir, "t.csv", []string{"a"})
+			if err != nil {
+				return err
+			}
+			// Close the file out from under the writer, then write. A silent CSV failure
+			// would look like a successful run that happened to produce no data.
+			if err := c.f.Close(); err != nil {
+				return err
+			}
+			c.write([]string{"b"})
+			if err := c.close(); err == nil {
+				return fmt.Errorf("close() = nil, want the underlying write failure")
+			}
+			return nil
+		}},
+		selftestCase{"csvWriter/first-error-wins", func() error {
+			dir, err := os.MkdirTemp("", "profile_bench_selftest")
+			if err != nil {
+				return err
+			}
+			defer os.RemoveAll(dir)
+
+			c, err := newCSV(dir, "t.csv", []string{"a"})
+			if err != nil {
+				return err
+			}
+			boom := fmt.Errorf("boom")
+			c.err = boom
+			c.write([]string{"b"}) // must be dropped, not masked by succeeding
+			if got := c.close(); got != boom {
+				return fmt.Errorf("close() = %v, want the first error (%v)", got, boom)
+			}
+			got, err := os.ReadFile(filepath.Join(dir, "t.csv"))
+			if err != nil {
+				return err
+			}
+			if string(got) != "a\n" {
+				return fmt.Errorf("file = %q, want %q (a row written after an error must be dropped)", got, "a\n")
+			}
+			return nil
+		}},
+		selftestCase{"csvWriter/flush-failure-surfaces", func() error {
+			// A pipe with the read end closed: writes fail with EPIPE while Close() on
+			// the write end still succeeds, which isolates a flush error from a close error.
+			r, w, err := os.Pipe()
+			if err != nil {
+				return err
+			}
+			if err := r.Close(); err != nil {
+				return err
+			}
+			c := &csvWriter{f: w, w: csv.NewWriter(w)}
+			c.write([]string{"a"}) // buffered; the failure only appears at flush
+			first := c.close()
+			if first == nil {
+				return fmt.Errorf("close() = nil, want the flush failure")
+			}
+			// An idempotent close must REPORT the stored error again, not swallow it.
+			if second := c.close(); second != first {
+				return fmt.Errorf("second close() = %v, want the same error (%v)", second, first)
+			}
+			return nil
+		}},
+		selftestCase{"csvWriter/write-error-is-recorded", func() error {
+			dir, err := os.MkdirTemp("", "profile_bench_selftest")
+			if err != nil {
+				return err
+			}
+			defer os.RemoveAll(dir)
+
+			c, err := newCSV(dir, "t.csv", []string{"a"})
+			if err != nil {
+				return err
+			}
+			// An invalid delimiter makes csv.Writer.Write fail without touching the file,
+			// so this is the one path where write() recording the error is what surfaces it.
+			c.w.Comma = 0
+			c.write([]string{"b"})
+			c.w.Comma = ','
+			if err := c.close(); err == nil {
+				return fmt.Errorf("close() = nil, want the recorded write error")
+			}
+			return nil
+		}},
+		selftestCase{"newCSV/creates-missing-dir", func() error {
+			root, err := os.MkdirTemp("", "profile_bench_selftest")
+			if err != nil {
+				return err
+			}
+			defer os.RemoveAll(root)
+
+			// -out may name a directory that does not exist yet; newCSV must create it.
+			dir := filepath.Join(root, "nested", "out")
+			c, err := newCSV(dir, "t.csv", []string{"a"})
+			if err != nil {
+				return fmt.Errorf("newCSV into a missing dir: %w", err)
+			}
+			if err := c.close(); err != nil {
+				return err
+			}
+			if _, err := os.Stat(filepath.Join(dir, "t.csv")); err != nil {
+				return fmt.Errorf("file not created: %w", err)
 			}
 			return nil
 		}},

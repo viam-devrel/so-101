@@ -1309,12 +1309,22 @@ Add `"encoding/csv"` and `"path/filepath"` to the imports.
 
 - [ ] **Step 1b: Add the selftest cases**
 
-Two properties here are load-bearing and would otherwise ship untested. `close()`
-idempotency matters because Tasks 10 and 11 both `defer c.close()` AND call `close()`
-explicitly to check the accumulated error — if a second close invented a "file already
-closed" failure, a good bench run would report as failed. The round-trip pins the exact
-`writeSamples` formatting that the CSVs (the harness's durable artifact) depend on.
-Both run on a temp dir, no hardware.
+These cases pin two things that would otherwise ship untested.
+
+`close()` idempotency: Tasks 10 and 11 both `defer c.close()` AND call `close()`
+explicitly inside `firstErr(...)`. Note the explicit call is evaluated first as a return
+argument and the deferred one's value is discarded, so a second close's error is never
+observed — the guard's real jobs are avoiding a double `f.Close()` and returning the
+**same stored error** on a repeat call.
+
+Error paths: `close()`'s doc comment promises a CSV write failure is never silent, since
+these files are the harness's durable artifact. Four separate mutants (close returning
+nil, `write()` losing its short-circuit, the dropped `w.Error()` capture, and an ignored
+`Write` error) all survive unless something actually puts the writer into a failed state.
+
+The round-trip additionally pins the exact `writeSamples` byte format, using two samples
+so the loop's multiplicity is covered. All cases run on a temp dir or an `os.Pipe`, no
+hardware.
 
 ```go
 func init() {
@@ -1332,6 +1342,7 @@ func init() {
 			}
 			writeSamples(c, "trial1", 3, []sample{
 				{t: 1500 * time.Millisecond, pos: -42, vel: 7},
+				{t: 2 * time.Second, pos: 100, vel: -8},
 			})
 			if err := c.close(); err != nil {
 				return fmt.Errorf("close: %w", err)
@@ -1341,7 +1352,8 @@ func init() {
 				return err
 			}
 			want := "trial,servo_id,t_sec,pos_ticks,vel_steps_per_sec\n" +
-				"trial1,3,1.500000,-42,7\n"
+				"trial1,3,1.500000,-42,7\n" +
+				"trial1,3,2.000000,100,-8\n"
 			if string(got) != want {
 				return fmt.Errorf("file =\n%q\nwant\n%q", got, want)
 			}
@@ -1361,10 +1373,130 @@ func init() {
 			if err := c.close(); err != nil {
 				return fmt.Errorf("first close: %w", err)
 			}
-			// Tasks 10 and 11 both defer close() AND call it explicitly to check the
-			// accumulated error, so a second close must not invent a failure.
+			// Tasks 10 and 11 both defer close() AND call it explicitly inside
+			// firstErr(...). The explicit call is evaluated first as a return argument,
+			// so the deferred one's value is discarded -- the guard's real jobs are not
+			// double-closing the fd, and returning the SAME stored error on a repeat
+			// call, which csvWriter/flush-failure-surfaces pins.
 			if err := c.close(); err != nil {
 				return fmt.Errorf("second close: %w", err)
+			}
+			return nil
+		}},
+	)
+}
+
+func init() {
+	selftests = append(selftests,
+		selftestCase{"csvWriter/close-reports-write-failure", func() error {
+			dir, err := os.MkdirTemp("", "profile_bench_selftest")
+			if err != nil {
+				return err
+			}
+			defer os.RemoveAll(dir)
+
+			c, err := newCSV(dir, "t.csv", []string{"a"})
+			if err != nil {
+				return err
+			}
+			// Close the file out from under the writer, then write. A silent CSV failure
+			// would look like a successful run that happened to produce no data.
+			if err := c.f.Close(); err != nil {
+				return err
+			}
+			c.write([]string{"b"})
+			if err := c.close(); err == nil {
+				return fmt.Errorf("close() = nil, want the underlying write failure")
+			}
+			return nil
+		}},
+		selftestCase{"csvWriter/first-error-wins", func() error {
+			dir, err := os.MkdirTemp("", "profile_bench_selftest")
+			if err != nil {
+				return err
+			}
+			defer os.RemoveAll(dir)
+
+			c, err := newCSV(dir, "t.csv", []string{"a"})
+			if err != nil {
+				return err
+			}
+			boom := fmt.Errorf("boom")
+			c.err = boom
+			c.write([]string{"b"}) // must be dropped, not masked by succeeding
+			if got := c.close(); got != boom {
+				return fmt.Errorf("close() = %v, want the first error (%v)", got, boom)
+			}
+			got, err := os.ReadFile(filepath.Join(dir, "t.csv"))
+			if err != nil {
+				return err
+			}
+			if string(got) != "a\n" {
+				return fmt.Errorf("file = %q, want %q (a row written after an error must be dropped)", got, "a\n")
+			}
+			return nil
+		}},
+		selftestCase{"csvWriter/flush-failure-surfaces", func() error {
+			// A pipe with the read end closed: writes fail with EPIPE while Close() on
+			// the write end still succeeds, which isolates a flush error from a close error.
+			r, w, err := os.Pipe()
+			if err != nil {
+				return err
+			}
+			if err := r.Close(); err != nil {
+				return err
+			}
+			c := &csvWriter{f: w, w: csv.NewWriter(w)}
+			c.write([]string{"a"}) // buffered; the failure only appears at flush
+			first := c.close()
+			if first == nil {
+				return fmt.Errorf("close() = nil, want the flush failure")
+			}
+			// An idempotent close must REPORT the stored error again, not swallow it.
+			if second := c.close(); second != first {
+				return fmt.Errorf("second close() = %v, want the same error (%v)", second, first)
+			}
+			return nil
+		}},
+		selftestCase{"csvWriter/write-error-is-recorded", func() error {
+			dir, err := os.MkdirTemp("", "profile_bench_selftest")
+			if err != nil {
+				return err
+			}
+			defer os.RemoveAll(dir)
+
+			c, err := newCSV(dir, "t.csv", []string{"a"})
+			if err != nil {
+				return err
+			}
+			// An invalid delimiter makes csv.Writer.Write fail without touching the file,
+			// so this is the one path where write() recording the error is what surfaces it.
+			c.w.Comma = 0
+			c.write([]string{"b"})
+			c.w.Comma = ','
+			if err := c.close(); err == nil {
+				return fmt.Errorf("close() = nil, want the recorded write error")
+			}
+			return nil
+		}},
+		selftestCase{"newCSV/creates-missing-dir", func() error {
+			root, err := os.MkdirTemp("", "profile_bench_selftest")
+			if err != nil {
+				return err
+			}
+			defer os.RemoveAll(root)
+
+			// -out may name a directory that does not exist yet; newCSV must create it.
+			dir := filepath.Join(root, "nested", "out")
+			c, err := newCSV(dir, "t.csv", []string{"a"})
+			if err != nil {
+				return fmt.Errorf("newCSV into a missing dir: %w", err)
+			}
+			if err := c.close(); err != nil {
+				return err
+			}
+			if _, err := os.Stat(filepath.Join(dir, "t.csv")); err != nil {
+				return fmt.Errorf("file not created: %w", err)
 			}
 			return nil
 		}},
@@ -1389,7 +1521,7 @@ Expected: exit 0, no output.
 go run cmd/cli/profile_bench.go -selftest
 ```
 
-Expected: `23/23 passed`, exit 0.
+Expected: `28/28 passed`, exit 0.
 
 - [ ] **Step 3: Commit**
 
@@ -1548,7 +1680,7 @@ gofmt -s -w cmd/cli/profile_bench.go && \
   go run cmd/cli/profile_bench.go -selftest
 ```
 
-Expected: exit 0, no `gofmt` output, `23/23 passed`.
+Expected: exit 0, no `gofmt` output, `28/28 passed`.
 
 - [ ] **Step 4: Commit**
 
@@ -1647,7 +1779,7 @@ gofmt -s -w cmd/cli/profile_bench.go && \
   go run cmd/cli/profile_bench.go -selftest
 ```
 
-Expected: exit 0, no `gofmt` output, `23/23 passed`.
+Expected: exit 0, no `gofmt` output, `28/28 passed`.
 
 - [ ] **Step 3: Commit**
 
@@ -1934,7 +2066,7 @@ gofmt -s -w cmd/cli/profile_bench.go && \
   go run cmd/cli/profile_bench.go -selftest
 ```
 
-Expected: exit 0, no `gofmt` output, `23/23 passed`.
+Expected: exit 0, no `gofmt` output, `28/28 passed`.
 
 - [ ] **Step 4: Commit**
 
@@ -2077,7 +2209,7 @@ gofmt -s -w cmd/cli/profile_bench.go && \
   go run cmd/cli/profile_bench.go -selftest
 ```
 
-Expected: exit 0, no `gofmt` output, `23/23 passed`.
+Expected: exit 0, no `gofmt` output, `28/28 passed`.
 
 - [ ] **Step 3: Confirm the module's tests still pass**
 
@@ -2173,7 +2305,7 @@ git commit -m "docs: recorded servo motion-profile bench measurements"
 - [ ] `go build -o /dev/null cmd/cli/profile_bench.go` exits 0
 - [ ] `go vet cmd/cli/profile_bench.go` exits 0
 - [ ] `gofmt -l cmd/cli/profile_bench.go` prints nothing
-- [ ] `go run cmd/cli/profile_bench.go -selftest` reports `23/23 passed`
+- [ ] `go run cmd/cli/profile_bench.go -selftest` reports `28/28 passed`
 - [ ] `go test ./cmd/module/ .` passes (modulo `TestEnumerateSerialPorts` without serial hardware)
 - [ ] All three tests have been run against real hardware and their CSVs exist
 - [ ] `docs/superpowers/results/2026-08-19-bench-run.md` records the numbers and a scope recommendation
