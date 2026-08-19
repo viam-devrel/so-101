@@ -513,6 +513,12 @@ func init() {
 			if _, err := planTravel(1, 4000, 228, 0, 4095); err == nil {
 				return fmt.Errorf("clipping travel accepted, want refusal")
 			}
+			// Start outside the limits must be refused even when the target lands
+			// back inside: -100 + 228 = 128, which looks valid. Only the start guard
+			// catches this, so this case is what keeps that guard honest.
+			if _, err := planTravel(1, -100, 228, 0, 4095); err == nil {
+				return fmt.Errorf("start outside limits accepted, want refusal")
+			}
 			// Negative direction clips low.
 			if _, err := planTravel(1, 100, -228, 0, 4095); err == nil {
 				return fmt.Errorf("negative clipping travel accepted, want refusal")
@@ -532,7 +538,7 @@ func init() {
 			if err != nil || min != 100 || max != 3000 {
 				return fmt.Errorf("got (%d,%d,%v), want (100,3000,nil)", min, max, err)
 			}
-			for _, bad := range []string{"", "100", "100:50", "a:b", "0:5000"} {
+			for _, bad := range []string{"", "100", "100:200:300", "100:50", "a:b", "0:5000"} {
 				if _, _, err := parseAssumeLimits(bad); err == nil {
 					return fmt.Errorf("parseAssumeLimits(%q) accepted, want error", bad)
 				}
