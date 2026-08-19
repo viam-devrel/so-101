@@ -1307,6 +1307,71 @@ var sampleHeader = []string{"trial", "servo_id", "t_sec", "pos_ticks", "vel_step
 
 Add `"encoding/csv"` and `"path/filepath"` to the imports.
 
+- [ ] **Step 1b: Add the selftest cases**
+
+Two properties here are load-bearing and would otherwise ship untested. `close()`
+idempotency matters because Tasks 10 and 11 both `defer c.close()` AND call `close()`
+explicitly to check the accumulated error — if a second close invented a "file already
+closed" failure, a good bench run would report as failed. The round-trip pins the exact
+`writeSamples` formatting that the CSVs (the harness's durable artifact) depend on.
+Both run on a temp dir, no hardware.
+
+```go
+func init() {
+	selftests = append(selftests,
+		selftestCase{"csvWriter/roundtrip", func() error {
+			dir, err := os.MkdirTemp("", "profile_bench_selftest")
+			if err != nil {
+				return err
+			}
+			defer os.RemoveAll(dir)
+
+			c, err := newCSV(dir, "t.csv", sampleHeader)
+			if err != nil {
+				return err
+			}
+			writeSamples(c, "trial1", 3, []sample{
+				{t: 1500 * time.Millisecond, pos: -42, vel: 7},
+			})
+			if err := c.close(); err != nil {
+				return fmt.Errorf("close: %w", err)
+			}
+			got, err := os.ReadFile(filepath.Join(dir, "t.csv"))
+			if err != nil {
+				return err
+			}
+			want := "trial,servo_id,t_sec,pos_ticks,vel_steps_per_sec\n" +
+				"trial1,3,1.500000,-42,7\n"
+			if string(got) != want {
+				return fmt.Errorf("file =\n%q\nwant\n%q", got, want)
+			}
+			return nil
+		}},
+		selftestCase{"csvWriter/close-is-idempotent", func() error {
+			dir, err := os.MkdirTemp("", "profile_bench_selftest")
+			if err != nil {
+				return err
+			}
+			defer os.RemoveAll(dir)
+
+			c, err := newCSV(dir, "t.csv", []string{"a"})
+			if err != nil {
+				return err
+			}
+			if err := c.close(); err != nil {
+				return fmt.Errorf("first close: %w", err)
+			}
+			// Tasks 10 and 11 both defer close() AND call it explicitly to check the
+			// accumulated error, so a second close must not invent a failure.
+			if err := c.close(); err != nil {
+				return fmt.Errorf("second close: %w", err)
+			}
+			return nil
+		}},
+	)
+}
+```
+
 - [ ] **Step 2: Verify build, vet, format**
 
 ```bash
@@ -1317,6 +1382,14 @@ gofmt -s -w cmd/cli/profile_bench.go && \
 ```
 
 Expected: exit 0, no output.
+
+- [ ] **Step 2b: Run the selftests**
+
+```bash
+go run cmd/cli/profile_bench.go -selftest
+```
+
+Expected: `23/23 passed`, exit 0.
 
 - [ ] **Step 3: Commit**
 
@@ -1475,7 +1548,7 @@ gofmt -s -w cmd/cli/profile_bench.go && \
   go run cmd/cli/profile_bench.go -selftest
 ```
 
-Expected: exit 0, no `gofmt` output, `21/21 passed`.
+Expected: exit 0, no `gofmt` output, `23/23 passed`.
 
 - [ ] **Step 4: Commit**
 
@@ -1574,7 +1647,7 @@ gofmt -s -w cmd/cli/profile_bench.go && \
   go run cmd/cli/profile_bench.go -selftest
 ```
 
-Expected: exit 0, no `gofmt` output, `21/21 passed`.
+Expected: exit 0, no `gofmt` output, `23/23 passed`.
 
 - [ ] **Step 3: Commit**
 
@@ -1861,7 +1934,7 @@ gofmt -s -w cmd/cli/profile_bench.go && \
   go run cmd/cli/profile_bench.go -selftest
 ```
 
-Expected: exit 0, no `gofmt` output, `21/21 passed`.
+Expected: exit 0, no `gofmt` output, `23/23 passed`.
 
 - [ ] **Step 4: Commit**
 
@@ -2004,7 +2077,7 @@ gofmt -s -w cmd/cli/profile_bench.go && \
   go run cmd/cli/profile_bench.go -selftest
 ```
 
-Expected: exit 0, no `gofmt` output, `21/21 passed`.
+Expected: exit 0, no `gofmt` output, `23/23 passed`.
 
 - [ ] **Step 3: Confirm the module's tests still pass**
 
@@ -2100,7 +2173,7 @@ git commit -m "docs: recorded servo motion-profile bench measurements"
 - [ ] `go build -o /dev/null cmd/cli/profile_bench.go` exits 0
 - [ ] `go vet cmd/cli/profile_bench.go` exits 0
 - [ ] `gofmt -l cmd/cli/profile_bench.go` prints nothing
-- [ ] `go run cmd/cli/profile_bench.go -selftest` reports `21/21 passed`
+- [ ] `go run cmd/cli/profile_bench.go -selftest` reports `23/23 passed`
 - [ ] `go test ./cmd/module/ .` passes (modulo `TestEnumerateSerialPorts` without serial hardware)
 - [ ] All three tests have been run against real hardware and their CSVs exist
 - [ ] `docs/superpowers/results/2026-08-19-bench-run.md` records the numbers and a scope recommendation
