@@ -14,7 +14,9 @@ package main
 import (
 	"flag"
 	"fmt"
+	"math"
 	"os"
+	"sort"
 	"strings"
 	"time"
 )
@@ -130,4 +132,123 @@ func runSelftests() error {
 		return fmt.Errorf("%d selftest(s) failed", failed)
 	}
 	return nil
+}
+
+// --- statistics ---
+
+// latencyStats summarizes a set of durations. Nearest-rank percentiles, so every reported
+// value is an actually-observed sample rather than an interpolation between two.
+type latencyStats struct {
+	n      int
+	mean   time.Duration
+	p50    time.Duration
+	p95    time.Duration
+	p99    time.Duration
+	max    time.Duration
+	rateHz float64 // 1/mean
+}
+
+// percentile returns the nearest-rank pth percentile of an already-sorted slice.
+// p is in [0,100]. Panics on an empty slice, which is a programming error here.
+func percentile(sorted []time.Duration, p float64) time.Duration {
+	if len(sorted) == 0 {
+		panic("percentile: empty slice")
+	}
+	idx := int(math.Ceil(p/100*float64(len(sorted)))) - 1
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= len(sorted) {
+		idx = len(sorted) - 1
+	}
+	return sorted[idx]
+}
+
+func summarize(d []time.Duration) latencyStats {
+	if len(d) == 0 {
+		return latencyStats{}
+	}
+	sorted := append([]time.Duration(nil), d...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+
+	var total time.Duration
+	for _, v := range sorted {
+		total += v
+	}
+	mean := total / time.Duration(len(sorted))
+
+	st := latencyStats{
+		n:    len(sorted),
+		mean: mean,
+		p50:  percentile(sorted, 50),
+		p95:  percentile(sorted, 95),
+		p99:  percentile(sorted, 99),
+		max:  sorted[len(sorted)-1],
+	}
+	if mean > 0 {
+		st.rateHz = float64(time.Second) / float64(mean)
+	}
+	return st
+}
+
+func init() {
+	selftests = append(selftests,
+		selftestCase{"percentile/nearest-rank", func() error {
+			// 1..100 ms. Nearest-rank: p50 -> ceil(50)=50 -> idx 49 -> 50ms.
+			var d []time.Duration
+			for i := 1; i <= 100; i++ {
+				d = append(d, time.Duration(i)*time.Millisecond)
+			}
+			for _, tc := range []struct {
+				p    float64
+				want time.Duration
+			}{
+				{50, 50 * time.Millisecond},
+				{95, 95 * time.Millisecond},
+				{99, 99 * time.Millisecond},
+				{100, 100 * time.Millisecond},
+				{0, 1 * time.Millisecond},
+			} {
+				if got := percentile(d, tc.p); got != tc.want {
+					return fmt.Errorf("p%v = %v, want %v", tc.p, got, tc.want)
+				}
+			}
+			return nil
+		}},
+		selftestCase{"summarize/unsorted-input", func() error {
+			// Deliberately unsorted: summarize must sort its own copy and must not
+			// mutate the caller's slice.
+			in := []time.Duration{
+				5 * time.Millisecond, 1 * time.Millisecond, 3 * time.Millisecond,
+				2 * time.Millisecond, 4 * time.Millisecond,
+			}
+			orig := append([]time.Duration(nil), in...)
+			st := summarize(in)
+			for i := range in {
+				if in[i] != orig[i] {
+					return fmt.Errorf("summarize mutated its input at %d", i)
+				}
+			}
+			if st.n != 5 {
+				return fmt.Errorf("n = %d, want 5", st.n)
+			}
+			if st.mean != 3*time.Millisecond {
+				return fmt.Errorf("mean = %v, want 3ms", st.mean)
+			}
+			if st.max != 5*time.Millisecond {
+				return fmt.Errorf("max = %v, want 5ms", st.max)
+			}
+			// mean 3ms -> 333.33Hz
+			if st.rateHz < 333.0 || st.rateHz > 334.0 {
+				return fmt.Errorf("rateHz = %v, want ~333.3", st.rateHz)
+			}
+			return nil
+		}},
+		selftestCase{"summarize/empty", func() error {
+			if got := summarize(nil); got.n != 0 {
+				return fmt.Errorf("n = %d, want 0", got.n)
+			}
+			return nil
+		}},
+	)
 }
