@@ -237,3 +237,17 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
   every move silently. `TestSimulatedConstructorWiresGoalCloud` covers the equivalent line
   in `newSimulatedSO101` and the shared `resolveGoalCloudConfig` contract, but the hardware
   constructor's line is guarded only by review.
+- **The gripper's calibrated range is a scale factor; the arm's is only a center point.**
+  `NormModeRange100` (servo 6) maps 0-100% linearly onto `[RangeMin, RangeMax]`, so a wrong
+  range rescales every command. `NormModeDegrees` (servos 1-5) takes only
+  `center = (min+max)/2` and then clamps, so the same wrong range costs ~4°. This is why an
+  uncalibrated servo is survivable for the arm and drives the jaw into its stops. `HomingOffset`
+  is stored but never used in `Normalize`/`Denormalize` — the servo firmware applies it itself
+  (`Present_Position = Actual_Position - Homing_Offset`).
+- **`0`/`4095` position limits mean "unset", not "calibrated".** `ReadCalibrationFromServos`
+  accepts them (`min < max && max <= 4095`), so kits that ship with a homing offset but no
+  limits read as calibrated. `guardGripperTravel` (`gripper_range.go`) narrows the gripper's
+  range when it is too wide to be real, keeping the offset's implied center. It runs inside
+  `ReadCalibrationFromServos`, so a calibration file bypasses it entirely. Note
+  `resetCalibrationRegisters` writes `0`/`4095` at calibration *start*, so an abandoned
+  calibration leaves servos in the same state.

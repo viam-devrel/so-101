@@ -403,7 +403,8 @@ func ReadCalibrationFromServos(
 		if logger != nil {
 			logger.Warn("Cannot read servo calibration: bus is nil")
 		}
-		return DefaultSO101FullCalibration
+		guarded, _ := guardGripperTravel(DefaultSO101FullCalibration, logger)
+		return guarded
 	}
 
 	successCount := 0
@@ -454,5 +455,8 @@ func ReadCalibrationFromServos(
 		logger.Debugf("Calibration loaded from servos: %d/%d successful", successCount, len(servoIDs))
 	}
 
-	return FromFeetechCalibrationMap(calibrations)
+	// Registers can report a range the jaw cannot reach; narrow it before anyone maps
+	// percentages onto it. Callers with a calibration file never reach here.
+	guarded, _ := guardGripperTravel(FromFeetechCalibrationMap(calibrations), logger)
+	return guarded
 }

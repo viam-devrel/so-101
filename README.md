@@ -89,6 +89,24 @@ The servo register fallback provides better out-of-box experience by using actua
 
 **Note:** Calibration read from servos is used in-memory only and not automatically saved. To persist servo-read calibration, use the calibration sensor component's workflow.
 
+#### Gripper travel guard
+
+Steps 2 and 3 above can both hand the gripper a range far wider than its jaw can move, so the module narrows it before use.
+
+Some kits ship "pre-calibrated" with each servo's homing offset set but its position limits left at the factory `0`-`4095`. That reads as a valid calibration, and it is harmless for the arm — those joints take only a center point from the range. The gripper is different: its range is a linear scale factor, so `0`-`4095` stretches 0-100% across a full encoder revolution, roughly three times the jaw's real travel. Commanding either end drives the jaw into its mechanical stop, which stalls the servo and latches its overload protection; the usual symptom is position reads failing until the servos are power-cycled. Starting the calibration workflow and abandoning it leaves the servos the same way, since it widens the limits to `0`-`4095` before recording.
+
+When the gripper's range is too wide to be real, the module keeps the homing offset's mid-travel point and substitutes a conservative window around it (`1548`-`2548`), and warns:
+
+```
+gripper servo 6 reports a 4095-tick range (0-4095), wider than the jaw can move (~1251 ticks): it has
+a homing offset but no real position limits. Using 1548-2548 instead, centered on mid-travel. The jaw
+will not open fully; run the calibration workflow to record its range.
+```
+
+**The jaw will not reach its full open or closed position in this mode.** It is a safe fallback, not a substitute for calibration. Run the [calibration sensor's](#model-devrelso101calibration) workflow to record the real range — that writes the limits back to the servos and saves a file, after which the guard no longer applies.
+
+A range that could plausibly be real is never overridden, so this cannot interfere with a gripper you have actually calibrated.
+
 ### Motion and speed
 
 The hardware arm enforces a real per-joint speed cap on the Feetech servos: each joint moves at the configured `speed_degs_per_sec` (or the per-move override, see below). Because joints move independently rather than coordinating arrival times, a joint with a larger travel angle will take longer to reach its target than one with smaller travel. For RDK motion-planned paths this remains smooth in practice because the planner generates many fine-grained waypoints, keeping per-waypoint joint displacements small.
