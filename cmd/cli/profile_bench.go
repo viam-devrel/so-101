@@ -12,12 +12,15 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"math"
 	"os"
+	"os/signal"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/hipsterbrown/feetech-servo/feetech"
@@ -344,4 +347,74 @@ func init() {
 			return nil
 		}},
 	)
+}
+
+// --- bus lifecycle ---
+
+// armServoIDs is the arm chain. Servo 6 is the gripper and is never commanded here.
+var armServoIDs = []int{1, 2, 3, 4, 5}
+
+type rig struct {
+	bus   *feetech.Bus
+	group *feetech.ServoGroup
+	proto *feetech.Protocol
+	ids   []int
+}
+
+// openRig connects to the bus with an explicit command gap. Pass noGap, never 0 — a zero
+// value is silently coerced to 1ms by feetech.NewBus (bus.go:63).
+func openRig(port string, gap time.Duration, ids []int) (*rig, error) {
+	if gap == 0 {
+		return nil, fmt.Errorf("internal error: MinCommandGap 0 is coerced to 1ms; pass noGap")
+	}
+	bus, err := feetech.NewBus(feetech.BusConfig{
+		Port:          port,
+		BaudRate:      1000000,
+		Protocol:      feetech.ProtocolSTS,
+		Timeout:       time.Second,
+		MinCommandGap: gap,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("open bus on %s: %w", port, err)
+	}
+
+	servos := make([]*feetech.Servo, 0, len(ids))
+	for _, id := range ids {
+		servos = append(servos, feetech.NewServo(bus, id, &feetech.ModelSTS3215))
+	}
+	return &rig{
+		bus:   bus,
+		group: feetech.NewServoGroup(bus, servos...),
+		proto: bus.Protocol(),
+		ids:   ids,
+	}, nil
+}
+
+func (r *rig) close() error { return r.bus.Close() }
+
+// disableTorque drops torque on every servo in the rig, best-effort. Used both as the
+// deliberate resting state for writerate and as the teardown for motion tests.
+func (r *rig) disableTorque(ctx context.Context) {
+	for _, id := range r.ids {
+		s := r.group.ServoByID(id)
+		if s == nil {
+			continue
+		}
+		if err := s.SetTorqueEnabled(ctx, false); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: disable torque on servo %d: %v\n", id, err)
+		}
+	}
+}
+
+// withSafeShutdown runs fn with a context cancelled on SIGINT/SIGTERM, and guarantees
+// torque is dropped on every exit path — normal return, error, or signal.
+func (r *rig) withSafeShutdown(fn func(ctx context.Context) error) error {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	defer func() {
+		// A fresh context: the shutdown context may already be cancelled, and the
+		// torque-off write must still go out.
+		r.disableTorque(context.Background())
+	}()
+	return fn(ctx)
 }
