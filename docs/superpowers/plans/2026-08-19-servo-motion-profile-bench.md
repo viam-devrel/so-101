@@ -131,7 +131,7 @@ func main() {
 	flag.StringVar(&cfg.port, "port", "", "serial port (e.g. /dev/tty.usbmodem1101)")
 	flag.StringVar(&cfg.test, "test", "writerate", "writerate|goaltime|accel|all")
 	flag.IntVar(&cfg.servo, "servo", 1, "servo ID for single-joint tests")
-	flag.Float64Var(&cfg.travelDeg, "travel", 20, "degrees of travel per trial")
+	flag.Float64Var(&cfg.travelDeg, "travel", 20, "degrees of travel per trial (accel only; goaltime uses its own 10/20/40 sweep)")
 	flag.BoolVar(&cfg.move, "move", false, "REQUIRED to allow any test that moves the arm")
 	flag.BoolVar(&cfg.fullArm, "full-arm", false, "coordinated 5-joint goaltime run (needs -move)")
 	flag.StringVar(&cfg.assumeLimits, "assume-limits", "", "<min>:<max> raw-tick bounds, for arms whose angle-limit registers read invalid")
@@ -223,7 +223,8 @@ func runSelftests() error {
 - [ ] **Step 2: Verify it builds, vets, and is formatted**
 
 ```bash
-go build -o /dev/null cmd/cli/profile_bench.go && \
+gofmt -s -w cmd/cli/profile_bench.go && \
+  go build -o /dev/null cmd/cli/profile_bench.go && \
   go vet cmd/cli/profile_bench.go && \
   gofmt -l cmd/cli/profile_bench.go
 ```
@@ -408,7 +409,8 @@ Expected: three `PASS` lines and `3/3 passed`, exit 0.
 - [ ] **Step 4: Verify build, vet, format**
 
 ```bash
-go build -o /dev/null cmd/cli/profile_bench.go && \
+gofmt -s -w cmd/cli/profile_bench.go && \
+  go build -o /dev/null cmd/cli/profile_bench.go && \
   go vet cmd/cli/profile_bench.go && \
   gofmt -l cmd/cli/profile_bench.go
 ```
@@ -545,7 +547,8 @@ Expected: six `PASS` lines, `6/6 passed`, exit 0.
 - [ ] **Step 4: Verify build, vet, format**
 
 ```bash
-go build -o /dev/null cmd/cli/profile_bench.go && \
+gofmt -s -w cmd/cli/profile_bench.go && \
+  go build -o /dev/null cmd/cli/profile_bench.go && \
   go vet cmd/cli/profile_bench.go && \
   gofmt -l cmd/cli/profile_bench.go
 ```
@@ -645,7 +648,8 @@ Add `"context"`, `"os/signal"`, and `"syscall"` to the imports.
 - [ ] **Step 2: Verify build, vet, format**
 
 ```bash
-go build -o /dev/null cmd/cli/profile_bench.go && \
+gofmt -s -w cmd/cli/profile_bench.go && \
+  go build -o /dev/null cmd/cli/profile_bench.go && \
   go vet cmd/cli/profile_bench.go && \
   gofmt -l cmd/cli/profile_bench.go
 ```
@@ -815,7 +819,8 @@ Expected: nine `PASS` lines, `9/9 passed`, exit 0.
 - [ ] **Step 4: Verify build, vet, format**
 
 ```bash
-go build -o /dev/null cmd/cli/profile_bench.go && \
+gofmt -s -w cmd/cli/profile_bench.go && \
+  go build -o /dev/null cmd/cli/profile_bench.go && \
   go vet cmd/cli/profile_bench.go && \
   gofmt -l cmd/cli/profile_bench.go
 ```
@@ -1049,7 +1054,8 @@ Expected: thirteen `PASS` lines, `13/13 passed`, exit 0.
 - [ ] **Step 4: Verify build, vet, format**
 
 ```bash
-go build -o /dev/null cmd/cli/profile_bench.go && \
+gofmt -s -w cmd/cli/profile_bench.go && \
+  go build -o /dev/null cmd/cli/profile_bench.go && \
   go vet cmd/cli/profile_bench.go && \
   gofmt -l cmd/cli/profile_bench.go
 ```
@@ -1078,9 +1084,10 @@ git commit -m "feat(bench): motion profile recovery with synthetic-profile check
 // csvWriter wraps a file and encoding/csv, accumulating the first error so callers can
 // write a whole table and check once at the end.
 type csvWriter struct {
-	f   *os.File
-	w   *csv.Writer
-	err error
+	f      *os.File
+	w      *csv.Writer
+	err    error
+	closed bool
 }
 
 func newCSV(dir, name string, header []string) (*csvWriter, error) {
@@ -1105,11 +1112,14 @@ func (c *csvWriter) write(row []string) {
 	c.err = c.w.Write(row)
 }
 
-func (c *csvWriter) writef(format string, args ...any) {
-	c.write(strings.Split(fmt.Sprintf(format, args...), "\x1f"))
-}
-
+// close is idempotent, so callers can both `defer c.close()` as a leak guard and call it
+// explicitly to check the accumulated error. A CSV write failure must not be silent — the
+// files are the durable artifact of this whole harness.
 func (c *csvWriter) close() error {
+	if c.closed {
+		return c.err
+	}
+	c.closed = true
 	c.w.Flush()
 	if c.err == nil {
 		c.err = c.w.Error()
@@ -1136,17 +1146,18 @@ func writeSamples(c *csvWriter, trial string, servoID int, samples []sample) {
 var sampleHeader = []string{"trial", "servo_id", "t_sec", "pos_ticks", "vel_steps_per_sec"}
 ```
 
-Add `"encoding/csv"` and `"path/filepath"` to the imports. Drop `writef` if no call site needs it by Task 11 — it exists only if a caller wants the terser form.
+Add `"encoding/csv"` and `"path/filepath"` to the imports.
 
 - [ ] **Step 2: Verify build, vet, format**
 
 ```bash
-go build -o /dev/null cmd/cli/profile_bench.go && \
+gofmt -s -w cmd/cli/profile_bench.go && \
+  go build -o /dev/null cmd/cli/profile_bench.go && \
   go vet cmd/cli/profile_bench.go && \
   gofmt -l cmd/cli/profile_bench.go
 ```
 
-Expected: exit 0, no output. If `writef` is unused, Go will not error (it is a method, not a local), but remove it if nothing calls it by Task 11.
+Expected: exit 0, no output.
 
 - [ ] **Step 3: Commit**
 
@@ -1298,7 +1309,8 @@ Replace the `return fmt.Errorf("not yet implemented")` line in `run` with a disp
 - [ ] **Step 3: Verify build, vet, format, and that selftests still pass**
 
 ```bash
-go build -o /dev/null cmd/cli/profile_bench.go && \
+gofmt -s -w cmd/cli/profile_bench.go && \
+  go build -o /dev/null cmd/cli/profile_bench.go && \
   go vet cmd/cli/profile_bench.go && \
   gofmt -l cmd/cli/profile_bench.go && \
   go run cmd/cli/profile_bench.go -selftest
@@ -1396,7 +1408,8 @@ const settleReads = 5
 - [ ] **Step 2: Verify build, vet, format, selftests**
 
 ```bash
-go build -o /dev/null cmd/cli/profile_bench.go && \
+gofmt -s -w cmd/cli/profile_bench.go && \
+  go build -o /dev/null cmd/cli/profile_bench.go && \
   go vet cmd/cli/profile_bench.go && \
   gofmt -l cmd/cli/profile_bench.go && \
   go run cmd/cli/profile_bench.go -selftest
@@ -1517,7 +1530,7 @@ func runGoalTime(cfg config) error {
 
 	fmt.Printf("\n%-22s %10s %10s %8s %8s\n", "trial", "commanded", "measured", "ratio", "clipped")
 
-	return r.withSafeShutdown(func(ctx context.Context) error {
+	runErr := r.withSafeShutdown(func(ctx context.Context) error {
 		for _, id := range ids {
 			if s := r.group.ServoByID(id); s != nil {
 				if err := s.SetTorqueEnabled(ctx, true); err != nil {
@@ -1539,6 +1552,21 @@ func runGoalTime(cfg config) error {
 		}
 		return nil
 	})
+
+	// Surface CSV write failures: the files are this harness's durable artifact, so a
+	// silent failure would look like a successful run with no data.
+	return firstErr(runErr, summary.close(), samplesCSV.close())
+}
+
+// firstErr returns the first non-nil error, so a run error is not masked by a close error
+// and vice versa.
+func firstErr(errs ...error) error {
+	for _, e := range errs {
+		if e != nil {
+			return e
+		}
+	}
+	return nil
 }
 
 // goalTimeTrial runs one out-and-back at a commanded time. In -full-arm mode each joint
@@ -1567,11 +1595,16 @@ func goalTimeTrial(
 		if cfg.fullArm {
 			// Stagger travel per joint so arrival spread is observable: joint i travels
 			// (i+1)/len of the nominal distance, all under the same commanded time.
+			//
+			// No re-validation needed, and deliberately no second planTravel call: Go
+			// truncates integer division toward zero, so scaled is bounded by steps with
+			// a matching sign, putting p.start+scaled inside (p.start, p.target] — a
+			// range planTravel already validated above. A second call with its own limits
+			// could fail and silently fall back to the un-staggered target, collapsing the
+			// spread to ~0 and reporting perfect coordinated arrival from a test that
+			// never staggered anything.
 			scaled := steps * (i + 1) / len(plans)
-			alt, err := planTravel(p.id, p.start, scaled, 0, 4095)
-			if err == nil {
-				target = alt.target
-			}
+			target = p.start + scaled
 		}
 		targets[p.id] = target
 		goals[p.id] = feetech.GoalRequest{Position: target, Time: ms, Acc: goalTimeAcc}
@@ -1595,7 +1628,16 @@ func goalTimeTrial(
 		if commanded > 0 {
 			ratio = prof.duration.Seconds() / commanded.Seconds()
 		}
-		arrivals = append(arrivals, prof.duration)
+		// Arrival spread must be measured in ABSOLUTE time, not per-joint duration.
+		// Every joint shares this trial's sampling t0, so the coordinated-arrival
+		// question is "did they all finish at the same moment", which is the spread of
+		// end timestamps. prof.duration subtracts each joint's own motion-onset
+		// detection latency, and under -full-arm that latency is systematically
+		// joint-dependent (same commanded time, different travel -> gentler ramps cross
+		// velEpsilon later), so a duration spread is biased.
+		if prof.moved {
+			arrivals = append(arrivals, s[prof.endIdx].t)
+		}
 		summary.write([]string{
 			trial, strconv.Itoa(p.id), strconv.Itoa(ms),
 			strconv.FormatFloat(travelDeg, 'f', 1, 64),
@@ -1611,18 +1653,25 @@ func goalTimeTrial(
 		}
 	}
 
-	if len(arrivals) > 1 {
-		min, max := arrivals[0], arrivals[0]
-		for _, a := range arrivals[1:] {
-			if a < min {
-				min = a
+	if len(ids) > 1 {
+		if len(arrivals) < len(plans) {
+			// Never report a spread over a subset: a joint that did not move at all
+			// would silently tighten the number that decides coordinated arrival.
+			fmt.Printf("%-22s %10v arrival spread: UNRELIABLE, only %d of %d joints moved\n",
+				trial, commanded, len(arrivals), len(plans))
+		} else {
+			min, max := arrivals[0], arrivals[0]
+			for _, a := range arrivals[1:] {
+				if a < min {
+					min = a
+				}
+				if a > max {
+					max = a
+				}
 			}
-			if a > max {
-				max = a
-			}
+			fmt.Printf("%-22s %10v arrival spread across %d joints: %v (absolute)\n",
+				trial, commanded, len(arrivals), max-min)
 		}
-		fmt.Printf("%-22s %10v arrival spread across %d joints: %v\n",
-			trial, commanded, len(arrivals), max-min)
 	}
 
 	// Return to start under the same commanded time, so the next trial begins where this
@@ -1646,7 +1695,8 @@ Remove the `runGoalTime` stub added in Task 8.
 - [ ] **Step 3: Verify build, vet, format, selftests**
 
 ```bash
-go build -o /dev/null cmd/cli/profile_bench.go && \
+gofmt -s -w cmd/cli/profile_bench.go && \
+  go build -o /dev/null cmd/cli/profile_bench.go && \
   go vet cmd/cli/profile_bench.go && \
   gofmt -l cmd/cli/profile_bench.go && \
   go run cmd/cli/profile_bench.go -selftest
@@ -1709,7 +1759,7 @@ func runAccel(cfg config) error {
 	fmt.Printf("\n%-10s %10s %12s %14s %12s\n",
 		"acc", "peak_vel", "time_to_peak", "implied_a", "a_per_unit")
 
-	return r.withSafeShutdown(func(ctx context.Context) error {
+	runErr := r.withSafeShutdown(func(ctx context.Context) error {
 		if s := r.group.ServoByID(cfg.servo); s != nil {
 			if err := s.SetTorqueEnabled(ctx, true); err != nil {
 				return fmt.Errorf("enable torque on servo %d: %w", cfg.servo, err)
@@ -1778,6 +1828,8 @@ func runAccel(cfg config) error {
 			"compare the a_per_unit column and note where it saturates.\n")
 		return nil
 	})
+
+	return firstErr(runErr, summary.close(), samplesCSV.close())
 }
 ```
 
@@ -1786,7 +1838,8 @@ Remove the `runAccel` stub added in Task 8.
 - [ ] **Step 2: Verify build, vet, format, selftests**
 
 ```bash
-go build -o /dev/null cmd/cli/profile_bench.go && \
+gofmt -s -w cmd/cli/profile_bench.go && \
+  go build -o /dev/null cmd/cli/profile_bench.go && \
   go vet cmd/cli/profile_bench.go && \
   gofmt -l cmd/cli/profile_bench.go && \
   go run cmd/cli/profile_bench.go -selftest
@@ -1832,7 +1885,13 @@ go run cmd/cli/profile_bench.go -port=<PORT> -test=writerate -out=./bench-out
 
 Verify before trusting anything: `gap=1ms` reads ~1000 Hz, `gap=2ms` reads ~500 Hz, and **`gap=none` does not read the same rate as `gap=1ms`**. If that last check fails, the zero-coercion bug (fact 3) has been reintroduced — stop and fix it.
 
-- [ ] **Step 3: Clear the workspace, then run the motion tests**
+- [ ] **Step 3: Clear the workspace and position the joint, then run the motion tests**
+
+Before running `goaltime`, position the tested joint with at least **40° of positive
+headroom** inside its angle limits. The sweep runs 10°, 20°, and 40° travels and the harness
+**refuses rather than clamps** (by design), so a joint parked near its upper limit completes
+the 10° and 20° trials and then aborts partway through the run.
+
 
 ```bash
 go run cmd/cli/profile_bench.go -port=<PORT> -test=goaltime -move -servo=1 -out=./bench-out
@@ -1853,6 +1912,12 @@ go run cmd/cli/profile_bench.go -port=<PORT> -test=goaltime -move -full-arm -out
 ```
 
 - [ ] **Step 5: Record the results**
+
+The directory does not exist yet:
+
+```bash
+mkdir -p docs/superpowers/results
+```
 
 Write `docs/superpowers/results/2026-08-19-bench-run.md` covering:
 

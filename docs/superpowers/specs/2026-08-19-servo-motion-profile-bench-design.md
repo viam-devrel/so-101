@@ -119,7 +119,7 @@ go run cmd/cli/profile_bench.go -port=/dev/tty.usbmodemXXXX -test=writerate
 | `-port` | *(required)* | serial port |
 | `-test` | `writerate` | `writerate` \| `goaltime` \| `accel` \| `all` |
 | `-servo` | `1` | servo for single-joint tests |
-| `-travel` | `20` | degrees of travel per trial |
+| `-travel` | `20` | degrees of travel per trial. `accel` only — `goaltime` uses the fixed 10/20/40 sweep below |
 | `-move` | `false` | **required** for any test that moves the arm |
 | `-full-arm` | `false` | coordinated 5-joint `goaltime` run (needs `-move`) |
 | `-assume-limits` | *(unset)* | `<min>:<max>` raw-tick bounds, for arms whose angle-limit registers read invalid |
