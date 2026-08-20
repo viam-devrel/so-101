@@ -307,9 +307,118 @@ func goalTimeTrial(
 	return nil
 }
 
-// runAccel is implemented in Task 11; this stub keeps the file building meanwhile.
+// --- test: accel ---
+
+var accSweep = []int{0, 1, 2, 5, 10, 20, 50, 100, 200, 255}
+
+// accelSpeedSteps caps the velocity target during the acceleration sweep. Acc=0 means an
+// unlimited ramp; pairing that with a high velocity target is the one genuinely jerky
+// combination in this harness, so the ceiling stays modest.
+const accelSpeedSteps = 1000
+
 func runAccel(cfg config) error {
-	return fmt.Errorf("not yet implemented")
+	// Only cfg.servo is commanded, but the rig holds the whole arm so holdPose can keep
+	// the other joints powered -- otherwise this sweep measures a sagging chain, which is
+	// exactly wrong for the gravity-loaded joints the mapping depends on.
+	ids := []int{cfg.servo}
+	r, err := openRig(cfg.port, noGap, armServoIDs, !cfg.stockTransport) // fast-flush samples ~10x faster
+	if err != nil {
+		return err
+	}
+	defer r.close()
+
+	summary, err := newCSV(cfg.outDir, csvName("accel", "", cfg.servo, false), []string{
+		"trial", "servo_id", "acc_units", "travel_deg", "peak_vel_steps_per_sec",
+		"time_to_peak_sec", "implied_accel_steps_per_sec2", "steps_per_sec2_per_unit",
+		"ramp_below_sampling_resolution", "duration_sec", "overshoot_steps",
+	})
+	if err != nil {
+		return err
+	}
+	defer summary.close()
+
+	samplesCSV, err := newCSV(cfg.outDir, csvName("accel", "_samples", cfg.servo, false), sampleHeader)
+	if err != nil {
+		return err
+	}
+	defer samplesCSV.close()
+
+	fmt.Printf("\n%-10s %10s %12s %14s %12s\n",
+		"acc", "peak_vel", "time_to_peak", "implied_a", "a_per_unit")
+
+	runErr := r.withSafeShutdown(func(ctx context.Context) error {
+		if err := r.holdPose(ctx); err != nil {
+			return err
+		}
+
+		steps := degToSteps(cfg.travelDeg)
+		for _, acc := range accSweep {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			trial := fmt.Sprintf("acc%d", acc)
+
+			plans, err := prepareTravel(ctx, r, ids, steps, cfg.assumeLimits)
+			if err != nil {
+				return err
+			}
+			p := plans[0]
+
+			goal := map[int]feetech.GoalRequest{
+				p.id: {Position: p.target, Speed: accelSpeedSteps, Acc: acc},
+			}
+			if err := r.group.SetGoals(ctx, goal); err != nil {
+				return fmt.Errorf("%s: SetGoals: %w", trial, err)
+			}
+			series, err := sampleUntilStopped(ctx, r, ids, 10*time.Second)
+			if err != nil {
+				return fmt.Errorf("%s: %w", trial, err)
+			}
+
+			s := series[p.id]
+			writeSamples(samplesCSV, trial, p.id, s)
+			prof := analyzeMove(s, p.target)
+			implied := prof.impliedAccel()
+			perUnit := 0.0
+			if acc > 0 {
+				perUnit = implied / float64(acc)
+			}
+			fmt.Printf("%-10d %10d %12v %14.1f %12.1f\n",
+				acc, prof.peakVel, prof.timeToPeak, implied, perUnit)
+			summary.write([]string{
+				trial, strconv.Itoa(p.id), strconv.Itoa(acc),
+				strconv.FormatFloat(cfg.travelDeg, 'f', 1, 64),
+				strconv.Itoa(prof.peakVel),
+				strconv.FormatFloat(prof.timeToPeak.Seconds(), 'f', 6, 64),
+				strconv.FormatFloat(implied, 'f', 1, 64),
+				strconv.FormatFloat(perUnit, 'f', 1, 64),
+				strconv.FormatBool(prof.rampBelowSamplingResolution()),
+				strconv.FormatFloat(prof.duration.Seconds(), 'f', 6, 64),
+				strconv.Itoa(prof.overshootSteps),
+			})
+
+			// Return to start at a fixed, gentle profile so the return leg does not
+			// contaminate the next trial.
+			back := map[int]feetech.GoalRequest{
+				p.id: {Position: p.start, Speed: 500, Acc: 20},
+			}
+			if err := r.group.SetGoals(ctx, back); err != nil {
+				return fmt.Errorf("%s: return SetGoals: %w", trial, err)
+			}
+			if _, err := sampleUntilStopped(ctx, r, ids, 10*time.Second); err != nil {
+				return fmt.Errorf("%s: return: %w", trial, err)
+			}
+		}
+
+		fmt.Printf("\nthe library documents Acc as ~100 steps/s^2 per unit; " +
+			"compare the a_per_unit column and note where it saturates.\n")
+		fmt.Printf("rows with ramp_below_sampling_resolution=true reached peak within one " +
+			"sample: implied_accel reads 0 because it was too fast to measure, NOT because " +
+			"there was no acceleration. Read peak_vel for those.\n")
+		return nil
+	})
+
+	return firstErr(runErr, summary.close(), samplesCSV.close())
 }
 
 // selectTests resolves the -test flag into the list that will actually run. Motion tests
