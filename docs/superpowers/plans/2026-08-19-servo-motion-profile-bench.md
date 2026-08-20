@@ -1875,7 +1875,7 @@ func runGoalTime(cfg config) error {
 	}
 	ids := commanded
 
-	r, err := openRig(cfg.port, noGap, armServoIDs)
+	r, err := openRig(cfg.port, noGap, armServoIDs, !cfg.stockTransport) // fast-flush samples ~10x faster
 	if err != nil {
 		return err
 	}
@@ -2101,7 +2101,7 @@ func runAccel(cfg config) error {
 	// the other joints powered -- otherwise this sweep measures a sagging chain, which is
 	// exactly wrong for the gravity-loaded joints the mapping depends on.
 	ids := []int{cfg.servo}
-	r, err := openRig(cfg.port, noGap, armServoIDs)
+	r, err := openRig(cfg.port, noGap, armServoIDs, !cfg.stockTransport) // fast-flush samples ~10x faster
 	if err != nil {
 		return err
 	}

@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/hipsterbrown/feetech-servo/feetech"
+	"go.bug.st/serial"
 )
 
 // noGap is the "no command gap" sentinel. feetech.NewBus coerces a zero MinCommandGap
@@ -38,15 +39,16 @@ const noGap = time.Nanosecond
 const stepsPerDegree = 4096.0 / 360.0
 
 type config struct {
-	port         string
-	test         string
-	servo        int
-	travelDeg    float64
-	move         bool
-	fullArm      bool
-	assumeLimits string
-	outDir       string
-	selftest     bool
+	port           string
+	test           string
+	servo          int
+	travelDeg      float64
+	move           bool
+	fullArm        bool
+	assumeLimits   string
+	outDir         string
+	stockTransport bool
+	selftest       bool
 }
 
 func main() {
@@ -59,6 +61,7 @@ func main() {
 	flag.BoolVar(&cfg.fullArm, "full-arm", false, "coordinated 5-joint goaltime run (needs -move)")
 	flag.StringVar(&cfg.assumeLimits, "assume-limits", "", "<min>:<max> raw encoder-step bounds, for arms whose angle-limit registers read invalid")
 	flag.StringVar(&cfg.outDir, "out", ".", "directory for CSV output")
+	flag.BoolVar(&cfg.stockTransport, "stock-transport", false, "force feetech's own transport for the motion tests (they default to the fast-flush one for ~10x the sampling rate)")
 	flag.BoolVar(&cfg.selftest, "selftest", false, "run built-in checks of the pure functions and exit (no hardware)")
 	flag.Parse()
 
@@ -403,6 +406,48 @@ func init() {
 	)
 }
 
+// --- transport ---
+
+// fastFlushTransport implements feetech.Transport over go.bug.st/serial, differing from the
+// library's own transport in exactly one respect: Flush uses ResetInputBuffer, an ioctl that
+// returns immediately, instead of a read-and-discard loop that waits out a read timeout.
+//
+// This matters more than it sounds. feetech v0.6.0's SerialTransport.Flush
+// (transports/serial_os.go:82) loops on Read until it returns 0, and go.bug.st/serial's
+// unixPort.Read blocks in Select and returns 0 only once the deadline expires
+// (serial_unix.go:59) -- so on an idle bus every flush costs the full 10ms. sendPacketLocked
+// calls Flush before EVERY packet, which puts a ~95Hz floor on all bus traffic regardless of
+// MinCommandGap. Sweeping both transports is what separates "this bus is slow" from "this
+// library's flush is slow".
+type fastFlushTransport struct {
+	port    serial.Port
+	timeout time.Duration
+}
+
+func openFastFlush(portPath string, baud int, timeout time.Duration) (*fastFlushTransport, error) {
+	p, err := serial.Open(portPath, &serial.Mode{BaudRate: baud})
+	if err != nil {
+		return nil, fmt.Errorf("open %s: %w", portPath, err)
+	}
+	if err := p.SetReadTimeout(timeout); err != nil {
+		p.Close()
+		return nil, fmt.Errorf("set read timeout on %s: %w", portPath, err)
+	}
+	return &fastFlushTransport{port: p, timeout: timeout}, nil
+}
+
+func (t *fastFlushTransport) Read(b []byte) (int, error)  { return t.port.Read(b) }
+func (t *fastFlushTransport) Write(b []byte) (int, error) { return t.port.Write(b) }
+func (t *fastFlushTransport) Close() error                { return t.port.Close() }
+
+func (t *fastFlushTransport) SetReadTimeout(d time.Duration) error {
+	t.timeout = d
+	return t.port.SetReadTimeout(d)
+}
+
+// Flush discards buffered input with an ioctl, returning immediately.
+func (t *fastFlushTransport) Flush() error { return t.port.ResetInputBuffer() }
+
 // --- bus lifecycle ---
 
 // armServoIDs is the arm chain. Servo 6 is the gripper and is never commanded here.
@@ -417,17 +462,26 @@ type rig struct {
 
 // openRig connects to the bus with an explicit command gap. Pass noGap, never 0 — a zero
 // value is silently coerced to 1ms by feetech.NewBus (bus.go:63).
-func openRig(port string, gap time.Duration, ids []int) (*rig, error) {
+func openRig(port string, gap time.Duration, ids []int, fastFlush bool) (*rig, error) {
 	if gap == 0 {
 		return nil, fmt.Errorf("internal error: MinCommandGap 0 is coerced to 1ms; pass noGap")
 	}
-	bus, err := feetech.NewBus(feetech.BusConfig{
+	cfg := feetech.BusConfig{
 		Port:          port,
 		BaudRate:      1000000,
 		Protocol:      feetech.ProtocolSTS,
 		Timeout:       time.Second,
 		MinCommandGap: gap,
-	})
+	}
+	// A supplied Transport wins over cfg.Port inside NewBus.
+	if fastFlush {
+		tr, err := openFastFlush(port, cfg.BaudRate, cfg.Timeout)
+		if err != nil {
+			return nil, err
+		}
+		cfg.Transport = tr
+	}
+	bus, err := feetech.NewBus(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("open bus on %s: %w", port, err)
 	}
@@ -1371,49 +1425,66 @@ const writeRateIterations = 500
 
 func runWriteRate(cfg config) error {
 	out, err := newCSV(cfg.outDir, csvName("writerate", "", 0, false), []string{
-		"gap_label", "gap_sec", "n", "mean_sec", "p50_sec", "p95_sec", "p99_sec", "max_sec", "rate_hz",
+		"transport", "gap_label", "gap_sec", "n", "mean_sec", "p50_sec", "p95_sec", "p99_sec", "max_sec", "rate_hz",
 	})
 	if err != nil {
 		return err
 	}
 	defer out.close()
 
-	fmt.Printf("\n%-10s %8s %10s %10s %10s %10s %10s\n",
-		"gap", "rate_hz", "mean", "p50", "p95", "p99", "max")
+	fmt.Printf("\n%-10s %-10s %8s %10s %10s %10s %10s %10s\n",
+		"transport", "gap", "rate_hz", "mean", "p50", "p95", "p99", "max")
 
-	for _, gap := range gapSweep {
-		st, err := measureWriteRate(cfg.port, gap)
-		if err != nil {
-			return fmt.Errorf("gap %v: %w", gap, err)
+	type mode struct {
+		name      string
+		fastFlush bool
+	}
+	// Both transports, because the difference between them IS the finding: feetech's own
+	// Flush blocks for 10ms before every packet, so the stock rows measure that floor while
+	// the fastflush rows measure the bus.
+	for _, m := range []mode{{"stock", false}, {"fastflush", true}} {
+		for _, gap := range gapSweep {
+			st, err := measureWriteRate(cfg.port, gap, m.fastFlush)
+			if err != nil {
+				return fmt.Errorf("%s transport, gap %v: %w", m.name, gap, err)
+			}
+			label := gap.String()
+			if gap == noGap {
+				label = "none"
+			}
+			fmt.Printf("%-10s %-10s %8.1f %10v %10v %10v %10v %10v\n",
+				m.name, label, st.rateHz, st.mean, st.p50, st.p95, st.p99, st.max)
+			out.write([]string{
+				m.name,
+				label,
+				strconv.FormatFloat(gap.Seconds(), 'g', -1, 64),
+				strconv.Itoa(st.n),
+				strconv.FormatFloat(st.mean.Seconds(), 'f', 9, 64),
+				strconv.FormatFloat(st.p50.Seconds(), 'f', 9, 64),
+				strconv.FormatFloat(st.p95.Seconds(), 'f', 9, 64),
+				strconv.FormatFloat(st.p99.Seconds(), 'f', 9, 64),
+				strconv.FormatFloat(st.max.Seconds(), 'f', 9, 64),
+				strconv.FormatFloat(st.rateHz, 'f', 2, 64),
+			})
 		}
-		label := gap.String()
-		if gap == noGap {
-			label = "none"
-		}
-		fmt.Printf("%-10s %8.1f %10v %10v %10v %10v %10v\n",
-			label, st.rateHz, st.mean, st.p50, st.p95, st.p99, st.max)
-		out.write([]string{
-			label,
-			strconv.FormatFloat(gap.Seconds(), 'g', -1, 64),
-			strconv.Itoa(st.n),
-			strconv.FormatFloat(st.mean.Seconds(), 'f', 9, 64),
-			strconv.FormatFloat(st.p50.Seconds(), 'f', 9, 64),
-			strconv.FormatFloat(st.p95.Seconds(), 'f', 9, 64),
-			strconv.FormatFloat(st.p99.Seconds(), 'f', 9, 64),
-			strconv.FormatFloat(st.max.Seconds(), 'f', 9, 64),
-			strconv.FormatFloat(st.rateHz, 'f', 2, 64),
-		})
 	}
 
-	fmt.Printf("\nsanity checks: gap=1ms should read ~1000Hz, gap=2ms ~500Hz.\n")
-	fmt.Printf("if gap=none reads the same rate as gap=1ms, the zero-coercion bug is back.\n")
+	fmt.Printf("\ninterpreting this table:\n")
+	fmt.Printf("  stock rows should be FLAT at ~95Hz whatever the gap. feetech's own\n")
+	fmt.Printf("  SerialTransport.Flush waits out a 10ms read timeout before every packet,\n")
+	fmt.Printf("  swamping every swept gap. That floor IS the finding, not a fault here.\n")
+	fmt.Printf("  fastflush rows use ResetInputBuffer instead and should track the gap:\n")
+	fmt.Printf("  ~1000Hz at 1ms, ~500Hz at 2ms. Only if a fastflush 'none' row matches its\n")
+	fmt.Printf("  own 1ms row should you suspect the MinCommandGap zero-coercion.\n")
+	fmt.Printf("  a 5-servo SetGoals is 48 bytes ~= 480us of wire time, so ~2080Hz is the\n")
+	fmt.Printf("  physical ceiling; anything faster is host-side buffering, not the bus.\n")
 	return out.close()
 }
 
 // measureWriteRate opens a fresh bus at the given gap and times back-to-back SetGoals
 // writes that command each servo's current position, with torque off.
-func measureWriteRate(port string, gap time.Duration) (latencyStats, error) {
-	r, err := openRig(port, gap, armServoIDs)
+func measureWriteRate(port string, gap time.Duration, fastFlush bool) (latencyStats, error) {
+	r, err := openRig(port, gap, armServoIDs, fastFlush)
 	if err != nil {
 		return latencyStats{}, err
 	}

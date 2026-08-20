@@ -66,11 +66,24 @@ Wire cost is effectively unchanged from today: 7 bytes/servo vs 6. A 5-servo syn
 
 ## Known constraints
 
-**Software rate floor.** `feetech.Bus` enforces `MinCommandGap` (default **1 ms**,
-`bus.go:465`) plus a fixed **100 µs** half-duplex turnaround sleep in `sendPacketLocked`
-(`bus.go:472`). `registry.go:126` never overrides it, so every bus transaction costs ≥1 ms
-in software before USB latency — a **~1000 Hz** ceiling. Not limiting for 50–100 Hz
-streaming, but it is a knob the harness sweeps rather than assumes.
+**Software rate floor — ~95 Hz, not ~1000 Hz.** This section originally claimed a ~1 ms /
+~1000 Hz floor from `MinCommandGap` (default **1 ms**, `bus.go:465`) plus the **100 µs**
+half-duplex turnaround in `sendPacketLocked` (`bus.go:472`). That was wrong by ~10×, and the
+real cause was found during Task 8 review.
+
+`sendPacketLocked` calls `transport.Flush()` before **every** packet (`bus.go:476`).
+`SerialTransport.Flush` (`transports/serial_os.go:82`) sets a 10 ms read timeout and loops on
+`Read` until it returns 0 — and `go.bug.st/serial`'s `unixPort.Read` blocks in `Select`,
+returning `(0, nil)` only once that deadline expires (`serial_unix.go:59`). On an idle bus
+there is no early return, so **every transaction pays a full 10 ms**, swamping any
+`MinCommandGap` below it. The practical floor is **~95 Hz**.
+
+That is load-bearing for the follow-on work: 100 Hz setpoint streaming sits *at* this
+ceiling, not comfortably beneath it. It is a property of `feetech v0.6.0`'s transport, not of
+the bus — a 5-servo `SetGoals` is 48 bytes ≈ 480 µs of wire time, so the physical ceiling is
+~2080 Hz. The harness therefore ships a `fastFlushTransport` using `ResetInputBuffer` (an
+immediate ioctl) and sweeps **both** transports, so the run measures the gap between what the
+library costs today and what the bus can actually do.
 
 The 100 µs turnaround is **not additive** to the gap: `sendPacketLocked` stamps
 `b.lastCmdTime = time.Now()` at `bus.go:486`, *before* the `time.Sleep(100 * time.Microsecond)`
@@ -89,7 +102,14 @@ to recover a velocity profile costs a round trip per sample and serializes again
 writes. High-rate streaming and high-fidelity sampling cannot be measured simultaneously;
 the harness measures them separately.
 
-**Sampling is cheap-ish.** `RegPresentPosition` (56, 2 bytes) and `RegPresentVelocity`
+**Sampling costs the same 10 ms.** The flush floor above applies to `SyncRead` too, so
+single-servo sampling runs at ~95 Hz on the stock transport rather than the ~200–300 Hz
+originally assumed here — roughly 19 samples across a 200 ms trial. Workable for duration and
+peak velocity, marginal for ramp timing, which is why `moveProfile` carries a
+`rampBelowSamplingResolution` flag. The motion tests default to the fast-flush transport for
+~10× the sampling rate; it changes what the harness can *observe*, not what the servo does.
+
+**Adjacent registers make one read serve for two.** `RegPresentPosition` (56, 2 bytes) and `RegPresentVelocity`
 (58, 2 bytes) are adjacent, so a single `SyncRead(ctx, 56, 4, ids)` returns position *and*
 velocity per servo in one round trip. The harness reads the servo's own velocity rather
 than numerically differentiating noisy position samples. Practical sampling rate is
@@ -211,10 +231,12 @@ on the spot.
 
 The harness is hardware-driving throwaway code in `cmd/cli/`, which CI neither compiles nor
 tests. Its correctness is established by running it against a physical arm and sanity-checking
-that the measured numbers are physically plausible. Two checks the `writerate` output must
-pass before any of it is trusted: `MinCommandGap: 2ms` must report ≈500 Hz, and `1ms` must
-report ≈1000 Hz. If the 1 ns sentinel row reports the same rate as the 1 ms row, the zero
-coercion described above has been reintroduced.
+that the measured numbers are physically plausible. The `writerate` output must pass these
+before any of it is trusted, and note they apply to the **fastflush** rows: `MinCommandGap:
+2ms` must report ≈500 Hz and `1ms` ≈1000 Hz. The **stock** rows are expected to be flat at
+~95 Hz regardless of gap — that is the 10 ms `Flush` floor, not a fault. Only if a *fastflush*
+1 ns row matches its own 1 ms row has the zero coercion been reintroduced; a flat stock sweep
+means the opposite of a bug.
 
 This was a deliberate trade-off. The alternative considered — putting profile recovery,
 latency statistics, and unit conversion in the root package with unit tests against synthetic
