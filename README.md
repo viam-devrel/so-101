@@ -83,7 +83,7 @@ The module uses this calibration priority:
 
 1. **File-based** - If `calibration_file` is configured and exists, load from file
 2. **Servo registers** - If no file configured/found, read homing offset and range limits from servo hardware
-3. **Hardcoded defaults** - If servo reads fail, use default values (offset=0, range=500-3500)
+3. **Hardcoded defaults** - If servo reads fail, use default values (offset=0, range=500-3500 for the arm joints; the gripper defaults to the conservative travel window described below)
 
 The servo register fallback provides better out-of-box experience by using actual hardware settings instead of generic defaults. Each startup without a calibration file will re-read from servos to ensure fresh data.
 
@@ -95,17 +95,21 @@ Steps 2 and 3 above can both hand the gripper a range far wider than its jaw can
 
 Some kits ship "pre-calibrated" with each servo's homing offset set but its position limits left at the factory `0`-`4095`. That reads as a valid calibration, and it is harmless for the arm — those joints take only a center point from the range. The gripper is different: its range is a linear scale factor, so `0`-`4095` stretches 0-100% across a full encoder revolution, roughly three times the jaw's real travel. Commanding either end drives the jaw into its mechanical stop, which stalls the servo and latches its overload protection; the usual symptom is position reads failing until the servos are power-cycled. Starting the calibration workflow and abandoning it leaves the servos the same way, since it widens the limits to `0`-`4095` before recording.
 
-When the gripper's range is too wide to be real, the module keeps the homing offset's mid-travel point and substitutes a conservative window around it (`1548`-`2548`), and warns:
+When the gripper's range is too wide to be real, the module substitutes a conservative window **anchored** at tick `2048` — the jaw's closed stop on a kit homed with the vendor's half-turn convention — and opening `1200` ticks from there, to `3248`. (It is not centered: an earlier version of this guard centered the window on `2048`, putting 0%/grab five hundred ticks past the closed stop.) The module's own default calibration for the gripper is this same window, so a calibration file that simply omits its `gripper` entry is also safe.
+
+Any of the following causes this substitution, and each logs a warning naming the specific cause before the shared remedy:
 
 ```
-gripper servo 6 reports a 4095-tick range (0-4095), wider than the jaw can move (~1251 ticks): it has
-a homing offset but no real position limits. Using 1548-2548 instead, centered on mid-travel. The jaw
-will not open fully; run the calibration workflow to record its range.
+gripper servo 6: its registers report a 4095-tick range (0-4095), wider than the jaw can move (~1251 ticks): it has a homing offset but no real position limits. Using the conservative range 2048-3248 (closed at tick 2048, opening 1200 ticks). The jaw will not open fully; run the calibration workflow to record its real range.
 ```
+
+The other causes substitute a different clause after "gripper servo 6:" — `its registers held no usable range`, `the servo bus is unavailable`, or `<path> has no gripper entry` — and are otherwise identical. The last of those is the one the module default now protects against: a calibration file missing its `gripper` entry never re-reads servo hardware, so neither the guard nor the other two warnings would otherwise fire for it.
 
 **The jaw will not reach its full open or closed position in this mode.** It is a safe fallback, not a substitute for calibration. Run the [calibration sensor's](#model-devrelso101calibration) workflow to record the real range — that writes the limits back to the servos and saves a file, after which the guard no longer applies.
 
 A range that could plausibly be real is never overridden, so this cannot interfere with a gripper you have actually calibrated.
+
+**A known limitation:** the anchor assumes the vendor half-turn convention, where tick `2048` is the closed stop. This module's own calibration workflow asks you to home from a different reference point — the *middle* of the jaw's travel (see the [calibration sensor](#model-devrelso101calibration)) — so a gripper homed that way and then left with factory limits will not open fully under this window and may strain against it. If you started the calibration workflow and stopped before recording ranges, finish it rather than relying on this fallback.
 
 ### Motion and speed
 

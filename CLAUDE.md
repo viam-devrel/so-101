@@ -247,7 +247,22 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
 - **`0`/`4095` position limits mean "unset", not "calibrated".** `ReadCalibrationFromServos`
   accepts them (`min < max && max <= 4095`), so kits that ship with a homing offset but no
   limits read as calibrated. `guardGripperTravel` (`gripper_range.go`) narrows the gripper's
-  range when it is too wide to be real, keeping the offset's implied center. It runs inside
-  `ReadCalibrationFromServos`, so a calibration file bypasses it entirely. Note
-  `resetCalibrationRegisters` writes `0`/`4095` at calibration *start*, so an abandoned
-  calibration leaves servos in the same state.
+  range when it is too wide to be real. The window is **anchored, not centered**: tick 2048
+  (`gripperClosedStopTick`) is the jaw's *closed* stop on a vendor half-turn-homed kit, not
+  its mid-travel, and the window opens `gripperSafeTravelTicks = 1200` ticks from there
+  (`2048..3248`). `DefaultSO101FullCalibration`'s servo-6 entry is this same window, not the
+  arm joints' `500/3500` — because `LoadFullCalibrationFromFile`'s `convertOrDefault` fills a
+  *missing* `gripper` key with the default and returns `fromFile=true`, which makes
+  `registry.go:177` skip both the servo read and the guard, so an unsafe default there would
+  never get caught. The guard itself runs inside `ReadCalibrationFromServos`, so a calibration
+  file with a `gripper` entry bypasses it entirely. Note `resetCalibrationRegisters` writes
+  `0`/`4095` at calibration *start*, so an abandoned calibration leaves servos in the same
+  state.
+- **`Grab()` used to return `true` unconditionally.** Under the old `500/3500` default an
+  empty jaw resting at its closed stop (tick 2048) normalized to 51.6%, clearing the `> 15.0`
+  grasp threshold regardless of whether anything was held. Anyone who wrote code branching on
+  `Grab()`'s return value before this change was reading a constant.
+- **`feetech.BusConfig` takes an exported `Transport`**, so `ReadCalibrationFromServos`'s
+  bus-dependent paths are unit-testable without serial hardware (see `deadTransport` in
+  `gripper_range_test.go`). Worth knowing generally — the repo has other paths written off as
+  hardware-only that may not be.
