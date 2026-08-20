@@ -1712,7 +1712,6 @@ func sampleUntilStopped(
 	r *rig,
 	ids []int,
 	timeout time.Duration,
-	settleReads int,
 ) (map[int][]sample, error) {
 	out := make(map[int][]sample, len(ids))
 	t0 := time.Now()
@@ -1978,7 +1977,7 @@ func goalTimeTrial(
 		return fmt.Errorf("%s: SetGoals: %w", trial, err)
 	}
 	commanded := time.Duration(ms) * time.Millisecond
-	series, err := sampleUntilStopped(ctx, r, ids, moveTimeout(commanded), settleReads)
+	series, err := sampleUntilStopped(ctx, r, ids, moveTimeout(commanded))
 	if err != nil {
 		return fmt.Errorf("%s: %w", trial, err)
 	}
@@ -2047,7 +2046,7 @@ func goalTimeTrial(
 	if err := r.group.SetGoals(ctx, back); err != nil {
 		return fmt.Errorf("%s: return SetGoals: %w", trial, err)
 	}
-	if _, err := sampleUntilStopped(ctx, r, ids, moveTimeout(commanded), settleReads); err != nil {
+	if _, err := sampleUntilStopped(ctx, r, ids, moveTimeout(commanded)); err != nil {
 		return fmt.Errorf("%s: return: %w", trial, err)
 	}
 	return nil
@@ -2150,7 +2149,7 @@ func runAccel(cfg config) error {
 			if err := r.group.SetGoals(ctx, goal); err != nil {
 				return fmt.Errorf("%s: SetGoals: %w", trial, err)
 			}
-			series, err := sampleUntilStopped(ctx, r, ids, 10*time.Second, settleReads)
+			series, err := sampleUntilStopped(ctx, r, ids, 10*time.Second)
 			if err != nil {
 				return fmt.Errorf("%s: %w", trial, err)
 			}
@@ -2185,7 +2184,7 @@ func runAccel(cfg config) error {
 			if err := r.group.SetGoals(ctx, back); err != nil {
 				return fmt.Errorf("%s: return SetGoals: %w", trial, err)
 			}
-			if _, err := sampleUntilStopped(ctx, r, ids, 10*time.Second, settleReads); err != nil {
+			if _, err := sampleUntilStopped(ctx, r, ids, 10*time.Second); err != nil {
 				return fmt.Errorf("%s: return: %w", trial, err)
 			}
 		}

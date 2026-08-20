@@ -1541,7 +1541,6 @@ func sampleUntilStopped(
 	r *rig,
 	ids []int,
 	timeout time.Duration,
-	settleReads int,
 ) (map[int][]sample, error) {
 	out := make(map[int][]sample, len(ids))
 	t0 := time.Now()
