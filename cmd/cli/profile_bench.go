@@ -111,9 +111,200 @@ func run(cfg config) error {
 	return nil
 }
 
-// runGoalTime is implemented in Task 10; this stub keeps the file building meanwhile.
+// --- test: goaltime ---
+
+var goalTimeSweepMs = []int{200, 400, 800, 1600, 3000}
+var goalTimeTravelDeg = []float64{10, 20, 40}
+
+// goalTimeAcc is held fixed across the GoalTime sweep so timing is the only variable.
+const goalTimeAcc = 20
+
 func runGoalTime(cfg config) error {
-	return fmt.Errorf("not yet implemented")
+	// commanded is the set this test actually drives; the rig always contains the whole
+	// arm so holdPose can keep the untested joints powered. Without that, a single-joint
+	// accel run measures a collapsing chain rather than a posed arm.
+	commanded := []int{cfg.servo}
+	if cfg.fullArm {
+		commanded = armServoIDs
+	}
+	ids := commanded
+
+	r, err := openRig(cfg.port, noGap, armServoIDs, !cfg.stockTransport) // fast-flush samples ~10x faster
+	if err != nil {
+		return err
+	}
+	defer r.close()
+
+	summary, err := newCSV(cfg.outDir, csvName("goaltime", "", cfg.servo, cfg.fullArm), []string{
+		"trial", "servo_id", "commanded_ms", "travel_deg", "measured_ms",
+		"ratio_measured_over_commanded", "goal_time_exceeded", "peak_vel", "overshoot_steps",
+	})
+	if err != nil {
+		return err
+	}
+	defer summary.close()
+
+	samplesCSV, err := newCSV(cfg.outDir, csvName("goaltime", "_samples", cfg.servo, cfg.fullArm), sampleHeader)
+	if err != nil {
+		return err
+	}
+	defer samplesCSV.close()
+
+	fmt.Printf("\n%-22s %10s %10s %8s %8s\n", "trial", "commanded", "measured", "ratio", "clipped")
+
+	runErr := r.withSafeShutdown(func(ctx context.Context) error {
+		if err := r.holdPose(ctx); err != nil {
+			return err
+		}
+
+		for _, travelDeg := range goalTimeTravelDeg {
+			for _, ms := range goalTimeSweepMs {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				trial := fmt.Sprintf("t%.0fdeg_%dms", travelDeg, ms)
+				if err := goalTimeTrial(ctx, r, cfg, ids, travelDeg, ms, trial, summary, samplesCSV); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	})
+
+	// Surface CSV write failures: the files are this harness's durable artifact, so a
+	// silent failure would look like a successful run with no data.
+	return firstErr(runErr, summary.close(), samplesCSV.close())
+}
+
+// firstErr returns the first non-nil error, so a run error is not masked by a close error
+// and vice versa.
+func firstErr(errs ...error) error {
+	for _, e := range errs {
+		if e != nil {
+			return e
+		}
+	}
+	return nil
+}
+
+// goalTimeTrial runs one out-and-back at a commanded time. In -full-arm mode each joint
+// gets a DIFFERENT travel under the SAME commanded time, which is what makes per-joint
+// arrival spread meaningful.
+func goalTimeTrial(
+	ctx context.Context,
+	r *rig,
+	cfg config,
+	ids []int,
+	travelDeg float64,
+	ms int,
+	trial string,
+	summary, samplesCSV *csvWriter,
+) error {
+	steps := degToSteps(travelDeg)
+	plans, err := prepareTravel(ctx, r, ids, steps, cfg.assumeLimits)
+	if err != nil {
+		return err
+	}
+
+	goals := make(map[int]feetech.GoalRequest, len(plans))
+	targets := make(map[int]int, len(plans))
+	for i, p := range plans {
+		target := p.target
+		if cfg.fullArm {
+			// Stagger travel per joint so arrival spread is observable: joint i travels
+			// (i+1)/len of the nominal distance, all under the same commanded time.
+			//
+			// No re-validation needed, and deliberately no second planTravel call: Go
+			// truncates integer division toward zero, so scaled is bounded by steps with
+			// a matching sign, putting p.start+scaled inside (p.start, p.target] — a
+			// range planTravel already validated above. A second call with its own limits
+			// could fail and silently fall back to the un-staggered target, collapsing the
+			// spread to ~0 and reporting perfect coordinated arrival from a test that
+			// never staggered anything.
+			scaled := steps * (i + 1) / len(plans)
+			target = p.start + scaled
+		}
+		targets[p.id] = target
+		goals[p.id] = feetech.GoalRequest{Position: target, Time: ms, Acc: goalTimeAcc}
+	}
+
+	if err := r.group.SetGoals(ctx, goals); err != nil {
+		return fmt.Errorf("%s: SetGoals: %w", trial, err)
+	}
+	commanded := time.Duration(ms) * time.Millisecond
+	series, err := sampleUntilStopped(ctx, r, ids, moveTimeout(commanded))
+	if err != nil {
+		return fmt.Errorf("%s: %w", trial, err)
+	}
+
+	var arrivals []time.Duration
+	for _, p := range plans {
+		s := series[p.id]
+		writeSamples(samplesCSV, trial, p.id, s)
+		prof := analyzeMove(s, targets[p.id])
+		ratio := 0.0
+		if commanded > 0 {
+			ratio = prof.duration.Seconds() / commanded.Seconds()
+		}
+		// Arrival spread must be measured in ABSOLUTE time, not per-joint duration.
+		// Every joint shares this trial's sampling t0, so the coordinated-arrival
+		// question is "did they all finish at the same moment", which is the spread of
+		// end timestamps. prof.duration subtracts each joint's own motion-onset
+		// detection latency, and under -full-arm that latency is systematically
+		// joint-dependent (same commanded time, different travel -> gentler ramps cross
+		// velEpsilon later), so a duration spread is biased.
+		if prof.moved {
+			arrivals = append(arrivals, s[prof.endIdx].t)
+		}
+		summary.write([]string{
+			trial, strconv.Itoa(p.id), strconv.Itoa(ms),
+			strconv.FormatFloat(travelDeg, 'f', 1, 64),
+			strconv.FormatFloat(prof.duration.Seconds()*1000, 'f', 1, 64),
+			strconv.FormatFloat(ratio, 'f', 3, 64),
+			strconv.FormatBool(prof.exceededGoalTime(commanded)),
+			strconv.Itoa(prof.peakVel),
+			strconv.Itoa(prof.overshootSteps),
+		})
+		if len(ids) == 1 {
+			fmt.Printf("%-22s %10v %10v %8.3f %8v\n",
+				trial, commanded, prof.duration, ratio, prof.exceededGoalTime(commanded))
+		}
+	}
+
+	if len(ids) > 1 {
+		if len(arrivals) < len(plans) {
+			// Never report a spread over a subset: a joint that did not move at all
+			// would silently tighten the number that decides coordinated arrival.
+			fmt.Printf("%-22s %10v arrival spread: UNRELIABLE, only %d of %d joints moved\n",
+				trial, commanded, len(arrivals), len(plans))
+		} else {
+			min, max := arrivals[0], arrivals[0]
+			for _, a := range arrivals[1:] {
+				if a < min {
+					min = a
+				}
+				if a > max {
+					max = a
+				}
+			}
+			fmt.Printf("%-22s %10v arrival spread across %d joints: %v (absolute)\n",
+				trial, commanded, len(arrivals), max-min)
+		}
+	}
+
+	// Return to start under the same commanded time, so the next trial begins where this
+	// one did.
+	back := make(map[int]feetech.GoalRequest, len(plans))
+	for _, p := range plans {
+		back[p.id] = feetech.GoalRequest{Position: p.start, Time: ms, Acc: goalTimeAcc}
+	}
+	if err := r.group.SetGoals(ctx, back); err != nil {
+		return fmt.Errorf("%s: return SetGoals: %w", trial, err)
+	}
+	if _, err := sampleUntilStopped(ctx, r, ids, moveTimeout(commanded)); err != nil {
+		return fmt.Errorf("%s: return: %w", trial, err)
+	}
+	return nil
 }
 
 // runAccel is implemented in Task 11; this stub keeps the file building meanwhile.
@@ -674,6 +865,61 @@ func init() {
 			return nil
 		}},
 	)
+}
+
+// --- motion setup ---
+
+// prepareTravel reads the start position and angle limits for each servo and validates
+// the requested travel. Returns an error rather than clamping (see planTravel).
+func prepareTravel(ctx context.Context, r *rig, ids []int, travelSteps int, assume string) ([]travelPlan, error) {
+	positions, err := r.group.Positions(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("read positions: %w", err)
+	}
+
+	var overrideMin, overrideMax int
+	haveOverride := false
+	if assume != "" {
+		overrideMin, overrideMax, err = parseAssumeLimits(assume)
+		if err != nil {
+			return nil, fmt.Errorf("-assume-limits: %w", err)
+		}
+		haveOverride = true
+	}
+
+	plans := make([]travelPlan, 0, len(ids))
+	for _, id := range ids {
+		start, ok := positions[id]
+		if !ok {
+			return nil, fmt.Errorf("servo %d did not report a position", id)
+		}
+		min, max := overrideMin, overrideMax
+		if !haveOverride {
+			s := r.group.ServoByID(id)
+			if s == nil {
+				return nil, fmt.Errorf("servo %d not in group", id)
+			}
+			if min, max, err = s.PositionLimits(ctx); err != nil {
+				return nil, fmt.Errorf("read limits for servo %d: %w", id, err)
+			}
+		}
+		p, err := planTravel(id, start, travelSteps, min, max)
+		if err != nil {
+			return nil, err
+		}
+		plans = append(plans, p)
+	}
+	return plans, nil
+}
+
+// moveTimeout bounds a trial generously: commanded time plus slack, floored so that a
+// clipped move still has room to finish and be recognised as clipped.
+func moveTimeout(commanded time.Duration) time.Duration {
+	t := commanded*3 + 2*time.Second
+	if t < 5*time.Second {
+		t = 5 * time.Second
+	}
+	return t
 }
 
 // --- profile recovery ---
