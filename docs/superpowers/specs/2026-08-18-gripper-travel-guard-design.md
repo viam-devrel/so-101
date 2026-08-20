@@ -141,6 +141,27 @@ necessarily a *subset* of it: a partially-calibrated `0/2500` is replaced by `20
 whose max exceeds the recorded one. Containment holds for the two cases that actually occur
 (`0/4095` and `500/3500`), and width is the property the guard is defending.
 
+## Two assumptions the anchored window rests on
+
+Both surfaced in review, neither is a regression, and neither is answerable without a servo.
+
+**`DriveMode` must be 0 on servo 6.** `Denormalize` inverts `NormModeRange100` when
+`DriveMode != 0` (`calibrated_servo.go:83-92`), so on an inverted servo 0%/grab commands
+`RangeMax` — full open — and 100% commands the closed stop. `guardGripperTravel` copies
+`DriveMode` through from the servo read untouched while substituting a window whose entire
+premise is "min is the closed end". This guard is the first code in the module to assert a
+*directional* meaning for the two endpoints, so it is the right place to notice the dependency.
+The pre-existing `0/4095` behavior is equally inverted, so nothing gets worse; the hardware
+pass should simply confirm servo 6 reads `DriveMode: 0` on real kits.
+
+**The plausibility threshold has less headroom than it looks.** `1.25 × 1251 = 1563.75` against
+a genuine calibration measured at 1451 is 7.7% of margin. A kit whose real travel measures
+~1600 would have its *operator-recorded* calibration discarded and replaced by the 1200-tick
+window — a worse outcome than trusting it, and the warning would claim the range is "wider than
+the jaw can move" when it is not. The factor stays at 1.25 because that is what the bench work
+supported; this is recorded so a second datapoint at a wider travel is recognised as a reason
+to revisit it rather than as a mystery.
+
 ## The default: one bypass, and a DRY argument
 
 `DefaultSO101FullCalibration` gave servo 6 `500/3500` — span 3000, 2.4× the jaw travel.

@@ -576,6 +576,9 @@ Then the accepted-risk path, which the spec's "The conflict this design knowingl
 section explains. On a kit where homing was set from **mid-travel** (start the module's own
 calibration, move the jaw to the middle, `set_homing`, then abandon the run):
 
-5. Confirm the failure is what the spec predicts and no worse: grab lands half-open, and
+5. Read servo 6's `DriveMode` and confirm it is 0. `Denormalize` inverts `NormModeRange100`
+   when it is not, which would make 0%/grab command full open — see the spec's "Two assumptions
+   the anchored window rests on".
+6. Confirm the failure is what the spec predicts and no worse: grab lands half-open, and
    `Open()` strains near tick 2773. If it stalls harder than the ~415-tick overshoot predicted,
    the decision to anchor needs revisiting before merge.
