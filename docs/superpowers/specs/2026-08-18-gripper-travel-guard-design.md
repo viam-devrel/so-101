@@ -296,9 +296,12 @@ the only test that would have caught a window centered on the closed stop.
 
 ## Housekeeping this revision implies
 
-- `gripperEncoderCenter`'s comment ("Where a half-turn homing offset puts mid-travel") is now
-  wrong; 2048 is the closed stop. The name is kept because it is still literally the encoder
-  centre and the CLI probe uses the same term.
+- `gripperEncoderCenter` was **renamed to `gripperClosedStopTick`** during implementation,
+  superseding this section's original reasoning that the name should be kept. `min = center`
+  read as a typo at the use site: the old name described the encoder while every use describes
+  the jaw. The half-turn derivation survives as a one-line comment. Note `cmd/cli/gripper_limits.go`
+  still says `encoderCenter`; it is a separate `main` package and should not re-anchor the
+  module's naming when it is committed.
 - `gripperSafeTravelFraction` and `safeGripperRange()` become dead.
 - `guardGripperTravel`'s warning text still says "centered on mid-travel".
 - `cmd/cli/gripper_limits.go`, the probe these measurements came from, is still untracked and

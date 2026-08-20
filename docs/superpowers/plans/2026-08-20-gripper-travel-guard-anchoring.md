@@ -210,7 +210,7 @@ Add to `gripper_test.go` — this one pins the API return value the default chan
 // resting at its closed stop normalized to 51.6%, clearing the 15% threshold, so Grab
 // returned true whether or not it held anything.
 func TestGrabReportsNothingHeldWhenTheJawReachesItsClosedStop(t *testing.T) {
-	restingPercent, err := DefaultSO101FullCalibration.Gripper.Normalize(gripperEncoderCenter)
+	restingPercent, err := DefaultSO101FullCalibration.Gripper.Normalize(gripperClosedStopTick)
 	require.NoError(t, err)
 
 	fake := newFakeServoArm()
