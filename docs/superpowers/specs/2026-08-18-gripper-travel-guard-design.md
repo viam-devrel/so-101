@@ -70,6 +70,42 @@ collision from the open side to the closed side.
 span 1451 against the URDF-derived 1251. The first draft worried the model would *overstate*
 travel and sized its window at 0.8× to compensate. The error runs the other way.
 
+## The conflict this design knowingly accepts
+
+The two paths above reach `0/4095` under **incompatible homing conventions**, and the guard
+cannot tell them apart from the registers.
+
+| Path | Homing convention | What tick 2048 is |
+|---|---|---|
+| Vendor pre-calibrated kit | LeRobot `set_half_turn_homings` | the jaw's **closed stop** |
+| Abandoned module calibration | `calibration.go:375` — "move the robot to the **middle** of its range of motion, then use `set_homing`" | the jaw's **mid-travel** |
+
+Anchoring at 2048 is correct for the first and wrong for the second: on a mid-travel-homed
+servo, 0%/grab lands half-open (it cannot close on anything) and `Open()` at tick 3188 is
+roughly 415 ticks past a real open stop near 2773 — a stall, on the side this design exists to
+protect. Note the first draft's centered `1548..2548` had it exactly backwards: correct for the
+abandoned-calibration path, wrong for the vendor kits.
+
+**Decision: anchor at 2048 and accept the path-2 risk.** The reasoning:
+
+- The measurements this design rests on were taken on vendor kits, which is the state a user
+  arrives in by doing nothing. Path 2 requires starting a calibration, issuing `set_homing`,
+  and then abandoning the run.
+- Even on path 2 the anchored window is a large improvement on the status quo: ~415 ticks of
+  overshoot instead of the ~1100 that raw `0/4095` commands today.
+- The warning's remedy — finish the calibration workflow — is precisely what a path-2 user was
+  already doing.
+
+The alternative considered and rejected was shrinking the span to ~600 ticks, which clears both
+conventions but halves the jaw's usable opening on the common case. Trading a real, permanent
+usability cost for every vendor kit against a transient state on a rarer one is the wrong side
+of the trade.
+
+Anyone revisiting this should know the ambiguity is removable at the source: making
+`calibration.go`'s homing prompt agree with the vendor convention would collapse the two paths
+into one. That was left out of scope because it changes what `set_homing` means for all six
+servos.
+
 ## Design
 
 Do **not** reject an implausible servo. The position offset is real information — it says
@@ -111,8 +147,8 @@ whose max exceeds the recorded one. Containment holds for the two cases that act
 
 Most paths that hand out that default are already guarded, contrary to an earlier draft of
 this section: `config.go:406` *is* the `guardGripperTravel` call, `FromFeetechCalibrationMap`
-(`config.go:318`) is wrapped by the guard at `config.go:460`, and `GetSharedController`
-(`manager.go:513`) passes the raw default in but `registry.go:183` overwrites it with the
+(`config.go:303-320`) is wrapped by the guard at `config.go:460`, and `GetSharedController`
+(`manager.go:512`, which has no non-test callers) passes the raw default in but `registry.go:183` overwrites it with the
 guarded servo read before the controller is built. In those paths the unguarded default is
 transient and never commanded.
 
@@ -121,7 +157,8 @@ fills a *missing* `gripper` key with `DefaultSO101FullCalibration.Gripper`, and
 `LoadCalibration` returns `fromFile = true`. `registry.go:177`'s `if !fromFile` then skips
 `ReadCalibrationFromServos` — and therefore the guard — entirely. A calibration file with no
 gripper entry is not hypothetical: the calibration sensor's `servo_ids` is user-configurable
-(`calibration.go:93`), so a run over servos 1-5 writes exactly such a file. That machine
+(defaulted at `calibration.go:93`, declared at `:77`) and `saveCalibration` (`calibration.go:710-743`)
+only writes a `gripper` entry when servo 6 is among them, so a run over servos 1-5 writes exactly such a file. That machine
 commands `500/3500` on the jaw with nothing to stop it.
 
 Fix: the default *is* the safe window. `RangeMin: gripperSafeRangeMin, RangeMax:
@@ -153,6 +190,13 @@ range. One helper, `warnGripperUsingSafeRange(logger, cause)`, three call sites:
 | Servo 6 reported a range too wide to be real | `guardGripperTravel` — names the reported range, and `0/4095` explicitly as the uncalibrated signature |
 | Servo 6 was requested but produced no calibration | `finalizeCalibration` (below) |
 | Bus unavailable | `finalizeCalibration`, reached from the nil-bus early return with an empty map |
+| A calibration file has no `gripper` entry | `LoadFullCalibrationFromFile`, when `fileFormat.Gripper == nil` |
+
+The fourth row is easy to miss and matters most: that path never calls
+`ReadCalibrationFromServos` at all, so neither the guard nor `finalizeCalibration` runs, and
+nothing else in `LoadFullCalibrationFromFile` or `registry.go` logs when `convertOrDefault`
+substitutes. Without its own call site the change's *motivating* case would be the one case
+nobody is told about.
 
 Both non-guard causes are gated on servo 6 appearing in `servoIDs`, so an arm-only machine
 configured `servo_ids: [1,2,3,4,5]` does not warn about a gripper it does not have — including
@@ -169,15 +213,29 @@ loop — and both must compose the map, warn, and guard identically. Extract tha
 
 ```go
 func finalizeCalibration(
-    calibrations map[int]*MotorCalibration, servoIDs []int, logger logging.Logger,
+    calibrations map[int]*MotorCalibration,
+    servoIDs []int,
+    missingCause string,
+    logger logging.Logger,
 ) SO101FullCalibration
 ```
 
-called from both. This is not only deduplication: it is the only way the wiring stays testable.
+`missingCause` is required, not decorative: an empty map arrives both from the nil-bus early
+return and from a live bus whose servo-6 read failed, and nothing else in the parameters tells
+those apart. The caller names the cause; `finalizeCalibration` uses it only if the gripper was
+in fact not read.
+
+called from both. This is not only deduplication: it is what keeps the wiring testable.
 `TestReadCalibrationFromServosGuardsTheGripper` currently proves the guard is applied by
 driving the nil-bus path and watching the implausible default get replaced — a vehicle that
 stops working the moment the default is plausible. A pure `finalizeCalibration` can be handed
 a map with servo 6 at `0/4095` and asserted directly, with no bus.
+
+One edge stays uncovered and should be understood as such: a test can prove the guard runs
+*inside* `finalizeCalibration`, but nothing proves `ReadCalibrationFromServos`'s loop-end
+return site still calls it — once the default is plausible, a nil-bus test cannot distinguish
+"the guard ran" from "the default came back". That edge is review-guarded, the same category as
+the `NewSO101` `goalCloud` wiring noted in CLAUDE.md.
 
 ## It does not break the workflow it recommends
 
@@ -195,12 +253,13 @@ asserted arithmetic about the window rather than what the window *means*. The lo
 addition is a test that drives `Denormalize` at 0% and 100% and asserts ticks 2048 and 3248 —
 the only test that would have caught a window centered on the closed stop.
 
-**Existing tests that must change** (all three fail otherwise):
+**Existing tests that must change** (all four break otherwise; the first is a compile error, not a failing assertion):
 
 | Test | Why it breaks | Resolution |
 |---|---|---|
 | `TestSafeGripperRangeStaysInsideTheModeledTravel` | asserts `(min+max)/2 == 2048`, the centering this revision removes (new center 2648) | rewrite as `TestSafeGripperRangeClosesAtTheClosedStop`, asserting `min == gripperEncoderCenter`; keep its width and self-plausibility assertions |
 | `TestGuardGripperTravelDoesNotMutateTheSharedDefault` | `require.True(t, replaced, "the placeholder default is itself implausible")` — no longer true | keep the test (it covers pointer aliasing of the package-level `Gripper`, which still matters) but drive it with an explicitly implausible gripper instead of the default |
+| `TestGuardGripperTravelReplacesAnImplausibleRange` | calls `safeGripperRange()`, which becomes dead — a *compile* failure, so it will not show up as a failing assertion alongside the others | switch to the constants; also check its `FilterMessageSnippet("wider than the jaw")` still matches after the warning rewrite |
 | `TestReadCalibrationFromServosGuardsTheGripper` | asserts the "wider than the jaw" warning on the nil-bus path, which now neither fires the guard nor uses that wording | split: a `finalizeCalibration` test for the guard wiring, and a nil-bus test for the bus-unavailable warning |
 
 **New tests:**

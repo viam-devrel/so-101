@@ -440,6 +440,44 @@ and the end of the function:
 		"no calibration was read from its registers", logger)
 ```
 
+- [ ] **Step 5b: Warn on the file path that motivates the whole change**
+
+This is the one path that reaches the jaw with the default *without* calling
+`ReadCalibrationFromServos`, so neither the guard nor `finalizeCalibration` runs and nothing
+logs. Left alone, the motivating case is the one case nobody is told about.
+
+First the test, in `config_test.go` (write a temp calibration JSON with the five arm entries
+and no `gripper` key — copy the shape from any existing calibration-file test in that file):
+
+```go
+// A calibration file written by a servo_ids:[1,2,3,4,5] run has "gripper": null.
+// convertOrDefault fills the default and fromFile=true skips the guard entirely, so this is
+// the one fallback that has to announce itself here.
+func TestLoadFullCalibrationWarnsWhenTheFileHasNoGripperEntry(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cal.json")
+	require.NoError(t, os.WriteFile(path, []byte(`{"shoulder_pan":{"id":1,"range_min":500,"range_max":3500}}`), 0o600))
+
+	logger, logs := logging.NewObservedTestLogger(t)
+	cal, err := LoadFullCalibrationFromFile(path, logger)
+	require.NoError(t, err)
+
+	assert.Equal(t, gripperSafeRangeMin, cal.Gripper.RangeMin)
+	assert.Equal(t, 1, logs.FilterMessageSnippet("run the calibration workflow").Len())
+}
+```
+
+Run it, confirm it fails on the log count being 0, then add to `LoadFullCalibrationFromFile`
+immediately after the `calibration := SO101FullCalibration{...}` literal:
+
+```go
+	if fileFormat.Gripper == nil {
+		warnGripperUsingSafeRange(logger, fmt.Sprintf("%s has no gripper entry", filePath))
+	}
+```
+
+Adjust the JSON literal above if the real `CalibrationEntry` field names differ — check
+`CalibrationFileFormat` and `CalibrationEntry` in `config.go` before writing the fixture.
+
 - [ ] **Step 6: Run the full suite**
 
 Run: `gofmt -s -w . && go vet ./cmd/module/ . && go test ./cmd/module/ .`
@@ -449,7 +487,7 @@ Task 2 is now green.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add gripper_range.go gripper_range_test.go config.go
+git add gripper_range.go gripper_range_test.go config.go config_test.go
 git commit -m "feat(gripper): warn whenever the jaw runs on the substituted window
 
 Making the default safe means guardGripperTravel finds it plausible and returns
@@ -509,3 +547,11 @@ on a kit with servo 6 at the factory `0/4095`:
    an empty jaw returns **false** — the behavior change from Task 2.
 4. `-goto 3248` with `-force` and watch the load reading; confirm the open end is clear of the
    stop rather than merely close to it.
+
+Then the accepted-risk path, which the spec's "The conflict this design knowingly accepts"
+section explains. On a kit where homing was set from **mid-travel** (start the module's own
+calibration, move the jaw to the middle, `set_homing`, then abandon the run):
+
+5. Confirm the failure is what the spec predicts and no worse: grab lands half-open, and
+   `Open()` strains near tick 2773. If it stalls harder than the ~415-tick overshoot predicted,
+   the decision to anchor needs revisiting before merge.
