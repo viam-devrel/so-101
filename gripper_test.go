@@ -300,3 +300,29 @@ func TestGripperDrivesRealDispatcherEndToEnd(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 12.5, got["position_percentage"])
 }
+
+// Grab infers a grasp from position error. Under the old 500/3500 default an *empty* jaw
+// resting at its closed stop normalized to 51.6%, clearing the 15% threshold, so Grab
+// returned true whether or not it held anything.
+func TestGrabReportsNothingHeldWhenTheJawReachesItsClosedStop(t *testing.T) {
+	restingPercent, err := DefaultSO101FullCalibration.Gripper.Normalize(gripperClosedStopTick)
+	require.NoError(t, err)
+
+	fake := newFakeServoArm()
+	fake.percent = restingPercent
+	g := newTestGripper(t, fake)
+
+	grabbed, err := g.Grab(context.Background(), nil)
+	require.NoError(t, err)
+	assert.False(t, grabbed, "an empty jaw at its closed stop is not holding anything")
+}
+
+func TestGrabReportsHeldWhenTheJawStopsShortOfClosed(t *testing.T) {
+	fake := newFakeServoArm()
+	fake.percent = 50
+	g := newTestGripper(t, fake)
+
+	grabbed, err := g.Grab(context.Background(), nil)
+	require.NoError(t, err)
+	assert.True(t, grabbed, "a jaw held open by an object is holding something")
+}

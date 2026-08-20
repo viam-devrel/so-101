@@ -1,7 +1,9 @@
 package so_arm
 
 import (
+	"fmt"
 	"math"
+	"slices"
 
 	"go.viam.com/rdk/logging"
 )
@@ -53,8 +55,9 @@ func gripperRangeIsPlausible(rangeMin, rangeMax int) bool {
 }
 
 // guardGripperTravel narrows the gripper's range when it is too wide to be real, and reports
-// whether it did. Arm servos are left alone: degrees mode takes only a center point from the
-// range, so a wrong one costs them a few degrees rather than a scaled command.
+// whether it did (the bool has no production consumer -- only tests check it -- so do not
+// mistake it for dead code). Arm servos are left alone: degrees mode takes only a center point
+// from the range, so a wrong one costs them a few degrees rather than a scaled command.
 func guardGripperTravel(cal SO101FullCalibration, logger logging.Logger) (SO101FullCalibration, bool) {
 	if cal.Gripper == nil || gripperRangeIsPlausible(cal.Gripper.RangeMin, cal.Gripper.RangeMax) {
 		return cal, false
@@ -66,12 +69,44 @@ func guardGripperTravel(cal SO101FullCalibration, logger logging.Logger) (SO101F
 	guarded.RangeMin, guarded.RangeMax = gripperSafeRangeMin, gripperSafeRangeMax
 	cal.Gripper = &guarded
 
-	if logger != nil {
-		logger.Warnf(
-			"gripper servo %d reports a %d-tick range (%d-%d), wider than the jaw can move (~%d ticks): "+
-				"it has a homing offset but no real position limits. Using %d-%d instead, centered on "+
-				"mid-travel. The jaw will not open fully; run the calibration workflow to record its range.",
-			guarded.ID, oldMax-oldMin, oldMin, oldMax, gripperTravelTicks(), gripperSafeRangeMin, gripperSafeRangeMax)
-	}
+	warnGripperUsingSafeRange(fmt.Sprintf(
+		"its registers report a %d-tick range (%d-%d), wider than the jaw can move (~%d ticks): "+
+			"it has a homing offset but no real position limits",
+		oldMax-oldMin, oldMin, oldMax, gripperTravelTicks()), logger)
 	return cal, true
+}
+
+// warnGripperUsingSafeRange reports that the jaw is running on the substituted window rather
+// than a recorded range. cause must read as a clause completing "gripper servo N: <cause>.";
+// the remedy is the same for every cause, so it lives here rather than at the call sites.
+func warnGripperUsingSafeRange(cause string, logger logging.Logger) {
+	if logger == nil {
+		return
+	}
+	logger.Warnf(
+		"gripper servo %d: %s. Using the conservative range %d-%d (closed at tick %d, "+
+			"opening %d ticks). The jaw will not open fully; run the calibration workflow "+
+			"to record its real range.",
+		gripperServoID, cause, gripperSafeRangeMin, gripperSafeRangeMax, gripperClosedStopTick,
+		gripperSafeTravelTicks)
+}
+
+// finalizeCalibrationFromServos composes what was read off the servo bus into a full
+// calibration, announces a gripper falling back to the safe window, and applies the travel
+// guard. Both of ReadCalibrationFromServos's return paths go through here so they cannot
+// drift, and so the guard's wiring is testable without a bus. missingCause explains why the
+// gripper was not read, and is used only if it in fact was not -- checked the same way
+// FromFeetechCalibrationMap checks it, so the two cannot silently disagree about what counts
+// as "read".
+func finalizeCalibrationFromServos(
+	calibrations map[int]*MotorCalibration,
+	servoIDs []int,
+	missingCause string,
+	logger logging.Logger,
+) SO101FullCalibration {
+	if mc := calibrations[gripperServoID]; mc == nil && slices.Contains(servoIDs, gripperServoID) {
+		warnGripperUsingSafeRange(missingCause, logger)
+	}
+	guarded, _ := guardGripperTravel(FromFeetechCalibrationMap(calibrations), logger)
+	return guarded
 }

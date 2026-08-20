@@ -66,7 +66,8 @@ var DefaultSO101FullCalibration = SO101FullCalibration{
 	},
 	Gripper: &MotorCalibration{
 		ID: 6, DriveMode: 0, HomingOffset: 0,
-		RangeMin: 500, RangeMax: 3500,
+		// The conservative window from gripper_range.go, not the arm joints' 500/3500.
+		RangeMin: gripperSafeRangeMin, RangeMax: gripperSafeRangeMax,
 		NormMode: NormModeRange100, // 0-100% for gripper
 	},
 }
@@ -203,6 +204,10 @@ func LoadFullCalibrationFromFile(filePath string, logger logging.Logger) (SO101F
 
 	if err := ValidateFullCalibration(calibration, logger); err != nil {
 		return SO101FullCalibration{}, fmt.Errorf("calibration validation failed: %w", err)
+	}
+
+	if fileFormat.Gripper == nil {
+		warnGripperUsingSafeRange(fmt.Sprintf("%s has no gripper entry", filePath), logger)
 	}
 
 	return calibration, nil
@@ -403,8 +408,7 @@ func ReadCalibrationFromServos(
 		if logger != nil {
 			logger.Warn("Cannot read servo calibration: bus is nil")
 		}
-		guarded, _ := guardGripperTravel(DefaultSO101FullCalibration, logger)
-		return guarded
+		return finalizeCalibrationFromServos(nil, servoIDs, "the servo bus is unavailable", logger)
 	}
 
 	successCount := 0
@@ -455,8 +459,9 @@ func ReadCalibrationFromServos(
 		logger.Debugf("Calibration loaded from servos: %d/%d successful", successCount, len(servoIDs))
 	}
 
-	// Registers can report a range the jaw cannot reach; narrow it before anyone maps
-	// percentages onto it. Callers with a calibration file never reach here.
-	guarded, _ := guardGripperTravel(FromFeetechCalibrationMap(calibrations), logger)
-	return guarded
+	// Registers can report a range the jaw cannot reach, and a servo may not answer at all.
+	// Narrow and announce before anyone maps percentages onto it. Callers with a calibration
+	// file never reach here.
+	return finalizeCalibrationFromServos(calibrations, servoIDs,
+		"its registers held no usable range", logger)
 }
