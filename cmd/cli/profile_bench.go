@@ -1527,3 +1527,72 @@ func measureWriteRate(port string, gap time.Duration, fastFlush bool) (latencySt
 	})
 	return st, err
 }
+
+// --- sampling ---
+
+// sampleUntilStopped polls position and velocity as fast as the link allows until every
+// servo has reported stopped for settleReads consecutive reads, or timeout elapses.
+//
+// One SyncRead of 4 bytes at RegPresentPosition returns position AND velocity per servo,
+// because addresses 56 and 58 are adjacent. Each sample carries its own measured
+// timestamp, so sampling jitter appears in the data rather than being assumed uniform.
+func sampleUntilStopped(
+	ctx context.Context,
+	r *rig,
+	ids []int,
+	timeout time.Duration,
+	settleReads int,
+) (map[int][]sample, error) {
+	out := make(map[int][]sample, len(ids))
+	t0 := time.Now()
+	deadline := t0.Add(timeout)
+	stoppedRuns := 0
+	sawMotion := false
+
+	for {
+		if ctx.Err() != nil {
+			return out, ctx.Err()
+		}
+		data, err := r.bus.SyncRead(ctx, feetech.RegPresentPosition.Address, 4, ids)
+		now := time.Since(t0)
+		if err != nil {
+			return out, fmt.Errorf("sync read: %w", err)
+		}
+
+		allStopped := true
+		for _, id := range ids {
+			pos, vel, derr := decodePosVel(r.proto, data[id])
+			if derr != nil {
+				return out, fmt.Errorf("servo %d: %w", id, derr)
+			}
+			out[id] = append(out[id], sample{t: now, pos: pos, vel: vel})
+			if abs(vel) >= velEpsilon {
+				allStopped = false
+				sawMotion = true
+			}
+		}
+
+		if allStopped {
+			stoppedRuns++
+			// Require motion to have started before treating "stopped" as "finished",
+			// so the initial pre-motion latency does not end the trial immediately.
+			if sawMotion && stoppedRuns >= settleReads {
+				return out, nil
+			}
+		} else {
+			stoppedRuns = 0
+		}
+
+		if time.Now().After(deadline) {
+			if !sawMotion {
+				return out, fmt.Errorf("no motion detected within %v", timeout)
+			}
+			return out, nil // timed out mid-move; caller sees it in the profile
+		}
+	}
+}
+
+// settleReads is how many consecutive all-stopped reads end a trial. The STS3215 reports
+// zero velocity briefly at direction changes and at the start of a ramp, so a single
+// zero read is not conclusive.
+const settleReads = 5
