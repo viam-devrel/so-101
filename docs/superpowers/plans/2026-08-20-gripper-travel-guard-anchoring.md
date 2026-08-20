@@ -320,6 +320,9 @@ func TestFinalizeCalibrationGuardsTheGripper(t *testing.T) {
 	read := map[int]*MotorCalibration{
 		6: {ID: 6, RangeMin: 0, RangeMax: 4095, NormMode: NormModeRange100},
 	}
+	// The implausible range matters: the old nil-bus vehicle asserted the returned range
+	// equals the safe window, which the *default* now satisfies whether or not the guard
+	// ran. Only an implausible input gives the wiring assertion teeth.
 
 	cal := finalizeCalibration(read, []int{1, 2, 3, 4, 5, 6}, "unused", logger)
 
@@ -482,6 +485,45 @@ immediately after the `calibration := SO101FullCalibration{...}` literal:
 
 Adjust the JSON literal above if the real `CalibrationEntry` field names differ — check
 `CalibrationFileFormat` and `CalibrationEntry` in `config.go` before writing the fixture.
+
+- [ ] **Step 5c: Ride-along fixes from Task 2's review**
+
+Four small items the Task 2 review raised, grouped here so they land with the code they touch.
+
+**A. The guard's copy has no field-fidelity assertion (the one that matters).** Mutating
+`guarded := *cal.Gripper` into a partial literal carrying only `ID`/`RangeMin`/`RangeMax`
+survives the entire suite. On hardware that is not cosmetic: `NormMode`'s zero value is
+`NormModeRaw`, so a guarded gripper silently downgraded to Raw would have `Denormalize` pass
+the 0-100 percentage through as a raw tick and drive the jaw to ~0 — about 2000 ticks past its
+closed stop. Add to `TestGuardGripperTravelReplacesAnImplausibleRange`:
+
+```go
+	assert.Equal(t, NormModeRange100, guarded.Gripper.NormMode,
+		"the copy must carry the mode, not just the range")
+	assert.Equal(t, 6, guarded.Gripper.ID)
+```
+
+**B. Trim `config.go`'s gripper comment to its first line** (ending in a period). Lines 2-3
+restate `gripper_range.go`'s file header and duplicate the test's own comment.
+
+**C. Drop the third assertion in `TestDefaultGripperCalibrationUsesTheSafeWindow`** — the
+`gripperRangeIsPlausible` call is implied by the two above it plus
+`TestGripperSafeWindowStaysInsideTheStops`.
+
+**D. Give `Grab()` a positive case.** The empty-jaw test is currently the only `.Grab(` call in
+the suite, so it would also pass against a `Grab` that always returned false:
+
+```go
+func TestGrabReportsHeldWhenTheJawStopsShortOfClosed(t *testing.T) {
+	fake := newFakeServoArm()
+	fake.percent = 50
+	g := newTestGripper(t, fake)
+
+	grabbed, err := g.Grab(context.Background(), nil)
+	require.NoError(t, err)
+	assert.True(t, grabbed, "a jaw held open by an object is holding something")
+}
+```
 
 - [ ] **Step 6: Run the full suite**
 
