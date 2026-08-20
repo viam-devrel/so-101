@@ -9,7 +9,8 @@ import (
 	"go.viam.com/rdk/logging"
 )
 
-// Every other number derives from this: the URDF jaw joint spans 110 degrees.
+// The plausibility yardstick. The safe window is measured, not derived — see
+// gripperSafeTravelTicks.
 func TestGripperTravelTicksMatchesTheKinematicModel(t *testing.T) {
 	assert.InDelta(t, 1251, gripperTravelTicks(), 2,
 		"110 degrees of jaw travel at 4095 ticks/rev")
@@ -22,8 +23,8 @@ func TestGripperRangeIsPlausible(t *testing.T) {
 		want     bool
 	}{
 		{"factory full encoder", 0, 4095, false},
-		{"module placeholder default", 500, 3500, false},
-		{"a real calibration", 1900, 2900, true},
+		{"the arm joints' 500/3500", 500, 3500, false},
+		{"a real calibration, measured", 2030, 3481, true},
 		{"exactly the modeled travel", 2048 - 625, 2048 + 626, true},
 		{"slightly over, within tolerance", 1500, 3000, true},
 		{"well over tolerance", 1000, 3200, false},
@@ -36,15 +37,29 @@ func TestGripperRangeIsPlausible(t *testing.T) {
 	}
 }
 
-// Must stop short of the mechanical stops, not merely improve on what it replaced.
-func TestSafeGripperRangeStaysInsideTheModeledTravel(t *testing.T) {
-	min, max := safeGripperRange()
+// The bug the first draft shipped: a window centered on 2048 puts 0% (grab) at tick 1548,
+// five hundred ticks past the jaw's closed stop. Every other test in this file asserts
+// arithmetic about the window; this one asserts what the window means.
+func TestGripperClosesAtTheClosedStop(t *testing.T) {
+	min, max := gripperSafeRangeMin, gripperSafeRangeMax
+	cal := &MotorCalibration{ID: 6, RangeMin: min, RangeMax: max, NormMode: NormModeRange100}
 
-	assert.Less(t, max-min, gripperTravelTicks(),
-		"the safe window must be narrower than the jaw's real travel")
-	assert.Equal(t, gripperEncoderCenter, (min+max)/2,
-		"centered where a half-turn homing offset puts mid-travel")
-	assert.True(t, gripperRangeIsPlausible(min, max),
+	closedTick, err := cal.Denormalize(0)
+	require.NoError(t, err)
+	assert.Equal(t, 2048, closedTick,
+		"0% is grab; it must land on the measured closed stop, not past it")
+
+	openTick, err := cal.Denormalize(100)
+	require.NoError(t, err)
+	assert.Equal(t, 3248, openTick,
+		"1200 ticks of open travel, held under the ~1450 measured on hardware")
+}
+
+// Must stop short of the mechanical stops.
+func TestGripperSafeWindowStaysInsideTheStops(t *testing.T) {
+	assert.Less(t, gripperSafeTravelTicks, gripperObservedTravelTicks,
+		"the safe window must stay inside the travel measured on hardware")
+	assert.True(t, gripperRangeIsPlausible(gripperSafeRangeMin, gripperSafeRangeMax),
 		"the guard must not reject its own substitute")
 }
 
@@ -56,9 +71,8 @@ func TestGuardGripperTravelReplacesAnImplausibleRange(t *testing.T) {
 	guarded, replaced := guardGripperTravel(cal, logger)
 	require.True(t, replaced)
 
-	safeMin, safeMax := safeGripperRange()
-	assert.Equal(t, safeMin, guarded.Gripper.RangeMin)
-	assert.Equal(t, safeMax, guarded.Gripper.RangeMax)
+	assert.Equal(t, gripperSafeRangeMin, guarded.Gripper.RangeMin)
+	assert.Equal(t, gripperSafeRangeMax, guarded.Gripper.RangeMax)
 	assert.Equal(t, 1, logs.FilterMessageSnippet("wider than the jaw").Len(),
 		"the degraded mode must be warned about, and named specifically enough to act on")
 }
@@ -66,12 +80,12 @@ func TestGuardGripperTravelReplacesAnImplausibleRange(t *testing.T) {
 // Never override an operator who actually ran calibration.
 func TestGuardGripperTravelLeavesACredibleRangeAlone(t *testing.T) {
 	cal := DefaultSO101FullCalibration
-	cal.Gripper = &MotorCalibration{ID: 6, RangeMin: 1900, RangeMax: 2900, NormMode: NormModeRange100}
+	cal.Gripper = &MotorCalibration{ID: 6, RangeMin: 2030, RangeMax: 3481, NormMode: NormModeRange100}
 
 	guarded, replaced := guardGripperTravel(cal, nil)
 	assert.False(t, replaced)
-	assert.Equal(t, 1900, guarded.Gripper.RangeMin)
-	assert.Equal(t, 2900, guarded.Gripper.RangeMax)
+	assert.Equal(t, 2030, guarded.Gripper.RangeMin)
+	assert.Equal(t, 3481, guarded.Gripper.RangeMax)
 }
 
 // Degrees mode only takes a center point from the range, so arm servos are out of scope.
@@ -115,9 +129,8 @@ func TestReadCalibrationFromServosGuardsTheGripper(t *testing.T) {
 
 	cal := ReadCalibrationFromServos(context.Background(), nil, []int{1, 2, 3, 4, 5, 6}, logger)
 
-	safeMin, safeMax := safeGripperRange()
-	assert.Equal(t, safeMin, cal.Gripper.RangeMin, "the default gripper range must be guarded")
-	assert.Equal(t, safeMax, cal.Gripper.RangeMax)
+	assert.Equal(t, gripperSafeRangeMin, cal.Gripper.RangeMin, "the default gripper range must be guarded")
+	assert.Equal(t, gripperSafeRangeMax, cal.Gripper.RangeMax)
 	assert.Equal(t, 1, logs.FilterMessageSnippet("wider than the jaw").Len())
 
 	assert.Equal(t, DefaultSO101FullCalibration.ShoulderPan.RangeMin, cal.ShoulderPan.RangeMin,

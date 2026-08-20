@@ -13,12 +13,23 @@ import (
 const (
 	gripperEncoderTicks = 4095
 
-	// Where a half-turn homing offset puts mid-travel.
-	gripperEncoderCenter = 2048
+	// The gripper is always servo 6: SO101FullCalibration.Gripper maps to that ID.
+	gripperServoID = 6
 
-	// Fraction of modeled travel the substituted window spans. Under 1 so a bad guess means
-	// the jaw won't fully open rather than stalling.
-	gripperSafeTravelFraction = 0.8
+	// A half-turn homing offset puts the jaw's closed stop at the encoder centre. 0% is grab.
+	gripperClosedStopTick = 2048
+
+	// Open travel from the closed stop, measured across kits and held under the observed
+	// ~1450 so a kit with less travel under-opens rather than stalling. Deliberately not
+	// derived from gripperTravelTicks(): the model does not match the hardware, so a
+	// kinematics edit must not move a hardware limit.
+	gripperSafeTravelTicks = 1200
+
+	// Jaw travel from a recorded calibration (2030..3481). The safe window stays under it.
+	gripperObservedTravelTicks = 1451
+
+	gripperSafeRangeMin = gripperClosedStopTick
+	gripperSafeRangeMax = gripperClosedStopTick + gripperSafeTravelTicks
 
 	// How much wider than the model a recorded range may be before we stop believing it.
 	// Real calibrations overshoot slightly; 0/4095 and the 500/3500 default do not.
@@ -41,13 +52,6 @@ func gripperRangeIsPlausible(rangeMin, rangeMax int) bool {
 	return float64(width) <= float64(gripperTravelTicks())*gripperMaxPlausibleTravelFactor
 }
 
-// safeGripperRange is the window used when the recorded one isn't credible: centered where the
-// homing offset puts mid-travel, spanning a fraction of modeled travel.
-func safeGripperRange() (rangeMin, rangeMax int) {
-	half := int(math.Round(float64(gripperTravelTicks()) * gripperSafeTravelFraction / 2))
-	return gripperEncoderCenter - half, gripperEncoderCenter + half
-}
-
 // guardGripperTravel narrows the gripper's range when it is too wide to be real, and reports
 // whether it did. Arm servos are left alone: degrees mode takes only a center point from the
 // range, so a wrong one costs them a few degrees rather than a scaled command.
@@ -56,11 +60,10 @@ func guardGripperTravel(cal SO101FullCalibration, logger logging.Logger) (SO101F
 		return cal, false
 	}
 
-	safeMin, safeMax := safeGripperRange()
 	// Copy: DefaultSO101FullCalibration is a package-level var of pointers.
 	guarded := *cal.Gripper
 	oldMin, oldMax := guarded.RangeMin, guarded.RangeMax
-	guarded.RangeMin, guarded.RangeMax = safeMin, safeMax
+	guarded.RangeMin, guarded.RangeMax = gripperSafeRangeMin, gripperSafeRangeMax
 	cal.Gripper = &guarded
 
 	if logger != nil {
@@ -68,7 +71,7 @@ func guardGripperTravel(cal SO101FullCalibration, logger logging.Logger) (SO101F
 			"gripper servo %d reports a %d-tick range (%d-%d), wider than the jaw can move (~%d ticks): "+
 				"it has a homing offset but no real position limits. Using %d-%d instead, centered on "+
 				"mid-travel. The jaw will not open fully; run the calibration workflow to record its range.",
-			guarded.ID, oldMax-oldMin, oldMin, oldMax, gripperTravelTicks(), safeMin, safeMax)
+			guarded.ID, oldMax-oldMin, oldMin, oldMax, gripperTravelTicks(), gripperSafeRangeMin, gripperSafeRangeMax)
 	}
 	return cal, true
 }
