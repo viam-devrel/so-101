@@ -48,9 +48,9 @@ Servos 4 and 5 were not measured.
 
 ## Core insight: acceleration must be coordinated, not just speed
 
-Motion is speed-limited (trapezoidal) only when `d > v²/a`. At the defaults below that
-crossover is **~4.2°**, and motion-planner waypoints are typically shorter — so **most
-planned motion is acceleration-limited**, where scaling per-joint *speed* accomplishes
+Motion is speed-limited (trapezoidal) only when `d > v²/a`. At the defaults (50 °/s,
+500 °/s²) that crossover is **5.0°**, and motion-planner waypoints are typically shorter — so
+**most planned motion is acceleration-limited**, where scaling per-joint *speed* accomplishes
 nothing.
 
 Scaling **both** `v` and `a` by each joint's share of the travel makes every joint's profile
@@ -69,6 +69,22 @@ This is the whole design in one line: `kᵢ = dᵢ / d_max`, then `vᵢ = v_max�
 `Acc = (a_steps − 386) / 108`, clamped to `[1, 50]`, where 108 steps/s² per unit is the mean
 measured slope and 386 the mean offset.
 
+**The default must land below the clamp, which is why it is 500 °/s² and not higher.**
+600 °/s² maps to `Acc 59.6` and clamps to 50. Clamping the *reference* joint (`k = 1`) while
+joints below `k ≈ 0.85` keep their exact scaled value breaks coordination in exactly the
+regime this design targets: the reference arrives ~9% late in the triangular case, and every
+joint above `k ≈ 0.85` collapses to the same register value, so acceleration scaling stops
+working across the top 15% of the range on every move. 500 °/s² maps to `Acc 49.1` — the
+largest default that leaves the whole `k` range unclamped — and is still 5× the 100 the
+config has been advertising.
+
+The validated range becomes **[50, 500] °/s²**, and the maximum stays at 500 rather than
+rising. Two reasons: values above ~508 are unreachable (`Acc 50` delivers 508.5 °/s² under
+the mean mapping, and less on servo 2, whose measured ceiling is 464), and the bench results
+doc recommends lowering this bound, not raising it. The minimum rises from 10 because
+`Acc: 1` delivers ~43 °/s² — anything below that silently clamps, so a configured 10 would
+have been off by more than 4×.
+
 Per-joint calibration was considered and rejected: only three of five joints were measured,
 and the 89–128 spread implies roughly ±20% per-joint error, i.e. ~10% arrival-timing error
 between joints. Against a current spread of 50–100% of move duration, that is a large
@@ -80,16 +96,32 @@ silently stop scaling.
 
 ### Travel reference
 
-`MoveToJointPositions` reads current position **once** (~0.6 ms on v0.6.1) and computes
-travel from it.
+**One position read per call, never per waypoint.**
 
-`MoveThroughJointPositions` computes each segment's travel from the planner's own sequence,
-`|q[k+1] − q[k]|`, with **no extra bus traffic**. This honors the planned path shape rather
-than wherever the arm happens to be, and avoids adding a read between every waypoint — which
-would risk reintroducing the stutter that back-to-back streaming currently avoids.
+`MoveToJointPositions` reads current position once and computes travel from it.
+
+`MoveThroughJointPositions` reads once for the **first** waypoint — `q[0]`'s travel is
+measured from where the arm actually is, since there is no preceding waypoint to difference
+against, and single-waypoint streams (which `GoToInputs` at `arm.go:762` emits routinely) have
+no deltas at all. Every subsequent segment uses `|q[k+1] − q[k]|` from the planner's own
+sequence, with no further bus traffic. This honors the planned path shape rather than wherever
+the arm happens to be, and avoids a read between every waypoint, which would risk
+reintroducing the stutter back-to-back streaming currently avoids.
 
 Accepted consequence: if the arm lags behind the stream, commanded deltas understate actual
 travel. The *ratios* still reflect the planned path, which is what coordination needs.
+
+**The read becomes unconditional**, where today `moveJoints` reads only when `wait` is true
+(`arm.go:615-623`). That condition exists because the read fed a completion-timeout estimate
+needed only when waiting — and because on v0.6.0 a read cost ~12 ms, which is why teleop
+passes `wait: false` to avoid it. On v0.6.1 the same read is roughly 1 ms, so coordinating the
+`wait: false` teleop path costs a few percent of a 30–50 Hz setpoint budget rather than a
+third of it. **This makes the v0.6.1 bump a correctness dependency, not just a performance
+one.** If teleop latency proves to suffer in practice, the documented fallback is to skip
+coordination when `wait` is false and retain uniform-speed behavior there.
+
+Note the read latency above is estimated from the bench run's *write*-rate table; reads carry
+a response packet and were not separately measured.
 
 ### `MoveOptions` caps reduce the shared reference
 
@@ -106,8 +138,28 @@ Every joint's command derives from the reduced reference, so coordination stays 
 every cap is honored — the most-constrained joint sets the pace for all. Conservative, and
 that is what a cap means in a coordinated move.
 
-`MaxVelRads`/`MaxAccRads` apply to all joints; the `*Joints` slices override per-joint.
-Joints with zero travel are excluded from the `min` (they would divide by zero).
+Following `arm.proto`: `MaxVelRads`/`MaxAccRads` apply to all joints, and are **ignored
+entirely** when the corresponding `*Joints` slice is set — not merged with it. RDK does not
+enforce this (`pb_helpers.go:26-28` explicitly leaves it to the implementer), so this driver
+must.
+
+Joints with zero travel are excluded from the `min` (they would divide by zero); their
+commanded speed is `v_max·0`, floored to 1 step/s, which is harmless because goal equals
+current position.
+
+A `*Joints` slice whose length does not match the arm's DoF is **rejected with an error**.
+RDK sizes the slice from whatever the client sent with no DoF check (`pb_helpers.go:40-51`),
+and silently ignoring or truncating a mismatched slice would produce motion that violates a
+cap the caller believes is in force.
+
+### Degenerate cases
+
+**All joints at zero travel:** no-op. `d_max = 0` makes every `kᵢ` undefined and `min` over
+the empty set meaningless, so the move returns without writing anything — commanding an arm
+to where it already is has no work to do.
+
+**A single moving joint:** `k = 1` for it, so it moves at the full reference and the result
+is identical to today's behavior. No special case needed.
 
 ### Register traps this code must encode
 
@@ -128,12 +180,20 @@ A short-travel joint can round to either. Both floors are load-bearing.
 | `motion_profile.go` | **New.** Pure functions: `kᵢ` scaling, unit conversion, clamping, cap reduction. No I/O. |
 | `manager.go` | **New** `MoveServosWithProfiles` using `ServoGroup.SetGoals`. `writePositions` untouched. |
 | `arm.go` | `moveJoints` computes travels; `MoveToJointPositions` reads position once; `MoveThroughJointPositions` uses deltas and honors `MoveOptions`. |
-| `config.go` | Acceleration default 100 → 600 °/s²; validated max 500 → 700. |
-| `go.mod` | `feetech-servo` v0.6.0 → v0.6.1 (flush fix). |
+| `arm.go:432,434` | Acceleration default 100 → 500 °/s²; validated range 10–500 → 50–500. **Not `config.go`**, which only declares the JSON tag (`config.go:24`). |
+| `arm.go:1027` | The `set_acceleration` DoCommand carries a **second** copy of the bounds check that must change in lockstep. |
+| `go.mod` | `feetech-servo` v0.6.0 → v0.6.1. Needed for the **flush fix** only — `SetGoals` already exists at v0.6.0. |
 
 `SetGoals` is the only primitive that can write acceleration — a 7-byte sync write carrying
-acc+pos+time+speed, the same wire cost as today's 6-byte write. It writes `Time: 0` always,
-matching FEETECH's own `WritePosEx`.
+acc+pos+time+speed, against today's 6-byte write. That is +5 bytes on a ~48-byte 5-servo
+packet, immaterial. It writes `Time: 0` always, matching FEETECH's own `WritePosEx`.
+
+Scaled per-joint speeds must convert through **`degPerSecToStepsPerSec`** (floor 1 step/s),
+**not** `resolveSpeedDegsPerSec` — the latter's `minSpeedDegsPerSec = 3.0` floor would destroy
+scaling for any joint below `k ≈ 0.06`. Both live in `speed.go`.
+
+`MoveServosToPositions` has one caller outside the arm path, `manual_mode.go:266` (speed 0,
+acc 0). It must keep today's behavior.
 
 `writePositions` stays exactly as it is because two of its four callers are single-servo
 gripper paths (`manager.go:134`, `:154`) where coordination is meaningless.
@@ -144,9 +204,10 @@ Writing any finite acceleration adds ramp time `v/a` that unlimited ramp does no
 register is never written, so the servos run at whatever they hold — almost certainly
 `Acc: 0`, unlimited.
 
-At the new 600 °/s² default, a 20° move goes from ~0.40 s to ~0.48 s: **about 21% longer.**
-At the old documented 100 °/s² default it would have been ~0.90 s, **123% longer** — which is
-why the default moves to 600 rather than honoring the number the config has been advertising.
+At the new 500 °/s² default, a 20° move goes from 0.400 s to 0.500 s: **25% longer**
+(trapezoidal, crossover 5.0°). At the old documented 100 °/s² it would have been 0.894 s,
+**124% longer** (triangular, crossover 25°) — which is why the default moves rather than
+honoring the number the config has been advertising.
 
 This is a real regression on upgrade, accepted deliberately: it is the price of both smoother
 motion and the ability to coordinate acceleration at all.
@@ -180,6 +241,10 @@ Unlike the bench harness, this is **shipped module code** and gets real unit tes
 - a cap on a *short*-travel joint correctly slowing the whole move (the case that
   distinguishes reference-reduction from per-joint clamping)
 - `Acc` clamped at the knee of 50, and at the floor of 1
+- the shipped default maps to `Acc 49`, i.e. **below** the clamp, so the reference joint is
+  not clamped — a regression here silently breaks coordination at the default
+- a `*Joints` slice of the wrong length is rejected
+- a `*Joints` slice set alongside the scalar ignores the scalar
 
 **Hardware verification** reuses `cmd/cli/profile_bench.go`. A `-full-arm` `goaltime` run
 should show arrival spread collapse from the measured 260–520 ms to roughly 10% of move
