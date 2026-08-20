@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"time"
 
 	"github.com/hipsterbrown/feetech-servo/feetech"
@@ -116,6 +117,14 @@ func (cfg *SoArm101Config) LoadCalibration(logger logging.Logger) (SO101FullCali
 		return DefaultSO101FullCalibration, false
 	}
 
+	// convertOrDefault hands back this exact pointer when the file had no "gripper" entry, so
+	// identity is how we tell "the file omitted it" from "the file's gripper happens to match
+	// the default". Gated on ServoIDs the same way finalizeCalibrationFromServos gates its
+	// warning, so an arm-only machine (no servo 6) doesn't warn about a gripper it doesn't have.
+	if calibration.Gripper == DefaultSO101FullCalibration.Gripper && slices.Contains(cfg.ServoIDs, gripperServoID) {
+		warnGripperUsingSafeRange(fmt.Sprintf("%s has no gripper entry", cfg.CalibrationFile), logger)
+	}
+
 	if logger != nil {
 		logger.Debugf("Successfully loaded calibration from %s", cfg.CalibrationFile)
 	}
@@ -206,10 +215,12 @@ func LoadFullCalibrationFromFile(filePath string, logger logging.Logger) (SO101F
 		return SO101FullCalibration{}, fmt.Errorf("calibration validation failed: %w", err)
 	}
 
-	if fileFormat.Gripper == nil {
-		warnGripperUsingSafeRange(fmt.Sprintf("%s has no gripper entry", filePath), logger)
-	}
-
+	// The missing-gripper-entry warning lives in LoadCalibration, not here: only that caller
+	// knows the configured servo IDs, so only it can gate the warning the way
+	// finalizeCalibrationFromServos gates its own (arm-only machines shouldn't hear about a
+	// gripper they don't have). Callers that use this function directly -- reload_calibration
+	// (arm.go) -- don't get the warning; that command is on the arm, which has no servo IDs of
+	// its own to gate against here.
 	return calibration, nil
 }
 

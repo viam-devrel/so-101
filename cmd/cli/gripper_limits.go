@@ -24,8 +24,11 @@ import (
 
 const (
 	encoderMax = 4095
-	// The jaw's closed stop on a vendor half-turn-homed kit, not mid-travel; separate from the
-	// module's gripperClosedStopTick since this is its own package.
+	// The numeric midpoint of the 12-bit encoder's scale (used below as a report baseline and
+	// as -goto's "encoder-center" target) -- not, itself, a claim about the jaw. On a vendor
+	// half-turn-homed kit this is where the closed stop lands; on a kit homed to mid-travel
+	// (this module's own calibration prompt) it is not. Kept distinct from the module's
+	// gripperClosedStopTick since this is a different package with a different meaning.
 	encoderCenter = 2048
 	// gripperTravelTicks(), from the URDF joint limits. A recorded calibration measured
 	// 2030..3481 (span 1451); the module's safe window uses 1200, under that observed span.
@@ -237,9 +240,18 @@ func waitForStop(ctx context.Context, servo *feetech.Servo, target, timeoutMs in
 	// require several consecutive clear reads.
 	const settleReads = 3
 	clear := 0
+	// The last successfully observed Moving() state. A stalled, overload-latched servo is the
+	// documented failure this probe exists to catch, and its symptom is exactly failing reads
+	// (see cmd/cli/gripper_limits.go's package comment) -- so the deadline check below must run
+	// even when every read in an iteration errors, or the probe hangs on the case it's for.
+	lastMoving := true
 
 	for {
 		<-tick.C
+		if time.Now().After(deadline) {
+			return pos, peakLoad, lastMoving
+		}
+
 		p, perr := servo.Position(ctx)
 		if perr != nil {
 			fmt.Printf("\rread position: %v", perr)
@@ -256,14 +268,11 @@ func waitForStop(ctx context.Context, servo *feetech.Servo, target, timeoutMs in
 			fmt.Printf("\rread moving: %v", merr)
 			continue
 		}
+		lastMoving = moving
 		if moving {
 			clear = 0
 		} else if clear++; clear >= settleReads {
 			return pos, peakLoad, false
-		}
-
-		if time.Now().After(deadline) {
-			return pos, peakLoad, moving
 		}
 	}
 }

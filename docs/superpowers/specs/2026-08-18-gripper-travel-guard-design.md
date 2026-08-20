@@ -45,11 +45,20 @@ thing. This revision fixes that default too; see "The default was the larger hol
 ## Two ways users reach this state
 
 1. **Vendor "pre-calibrated" kits**, as above.
-2. **An abandoned calibration run.** `resetCalibrationRegisters` (`calibration.go:387`)
-   writes `min_angle_limit = 0` and `max_angle_limit = 4095` at calibration *start*
-   (`calibration.go:421`), deliberately widening the limits so the user can move each joint
-   freely while recording. Anyone who begins the workflow and stops before recording ranges
-   leaves their servos in exactly this state.
+2. **An abandoned calibration run — but only past a specific point.** `startCalibration`
+   (`calibration.go:351`) touches no registers at all; it only resets in-memory struct fields.
+   `resetCalibrationRegisters` (`calibration.go:387`) is called from `setHomingPosition`
+   (`calibration.go:421`), not from `startCalibration`. So a run abandoned after `start` but
+   before `set_homing` leaves the servo registers untouched — whatever they were before. Only
+   a run abandoned **after** `set_homing` reaches `0/4095`: `resetCalibrationRegisters` zeroes
+   the homing offset along with widening the limits, and `setHomingPosition` then reads the
+   current raw position and writes a *fresh* offset computed against it (`calibration.go:474-476`:
+   `targetCenter := 2047; homingOffset := currentRawPos - targetCenter`) — the position the
+   homing prompt (`calibration.go:375`) told the user to move to first, "the middle of its
+   range of motion." So this path does not merely widen the limits; it also re-homes the servo
+   so that tick 2048 means **mid-travel**, not the vendor's closed stop. This is the same
+   mid-travel-homed case the "conflict" section below analyzes — not a second, milder instance
+   of the vendor state.
 
 That second path also settles what `0/4095` means here: this codebase already treats it as
 the factory/unset value, under a function named for resetting to factory defaults.

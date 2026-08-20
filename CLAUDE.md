@@ -255,9 +255,14 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
   *missing* `gripper` key with the default and returns `fromFile=true`, which makes
   `registry.go:177` skip both the servo read and the guard, so an unsafe default there would
   never get caught. The guard itself runs inside `ReadCalibrationFromServos`, so a calibration
-  file with a `gripper` entry bypasses it entirely. Note `resetCalibrationRegisters` writes
-  `0`/`4095` at calibration *start*, so an abandoned calibration leaves servos in the same
-  state.
+  file with a `gripper` entry bypasses it entirely. `resetCalibrationRegisters` does **not**
+  run at calibration start — `startCalibration` only resets in-memory struct fields. It runs
+  from `setHomingPosition`, so `0`/`4095` is reached only by abandoning *after* `set_homing`,
+  and that same step also writes a fresh homing offset centered on wherever the jaw was told to
+  sit ("move to the middle of its range of motion", `calibration.go:375`). So this path does not
+  land in the vendor's closed-stop state the anchor assumes — it lands in the mid-travel-homed
+  state the anchor is *wrong* for (see the design doc's "conflict this design knowingly
+  accepts"). Abandoning *before* `set_homing` leaves the registers untouched.
 - **`Grab()` used to return `true` unconditionally.** Under the old `500/3500` default an
   empty jaw resting at its closed stop (tick 2048) normalized to 51.6%, clearing the `> 15.0`
   grasp threshold regardless of whether anything was held. Anyone who wrote code branching on
