@@ -1149,15 +1149,44 @@ func moveTimeout(commanded time.Duration) time.Duration {
 // reports velocity in whole steps/sec, so anything non-zero is real motion.
 const velEpsilon = 1
 
+// arrivalToleranceSteps is how close to the settled final position counts as arrived.
+//
+// Measured on hardware: an STS3215 holding position dithers +/-3 encoder steps (~0.26 deg)
+// around its setpoint, reporting +/-50-100 steps/sec while doing it. 4 steps clears that
+// with a little margin while staying far below the 114-step (10 deg) shortest travel tested.
+const arrivalToleranceSteps = 4
+
+// The settled position is the median of a trailing FRACTION of the series, not a fixed
+// count: a fixed count larger than the series medians the ramp itself and lands mid-travel.
+// Real traces run to thousands of samples so the cap dominates there; the floor only
+// matters for short synthetic series.
+const (
+	settledTailFraction = 10 // last 1/10th of the samples
+	settledTailMin      = 3
+	settledTailMax      = 50
+)
+
 // moveProfile is what one commanded move looks like after the fact.
 type moveProfile struct {
-	startIdx, endIdx int           // sample indices bounding the motion
-	duration         time.Duration // motion start to motion end
-	peakVel          int           // max |velocity| observed, steps/sec
-	velAtPeakTime    int           // |velocity| actually sampled at timeToPeak
-	timeToPeak       time.Duration // motion start to first sample within 95% of peak
-	overshootSteps   int           // furthest travel beyond target, 0 if none
-	moved            bool          // false if the servo never moved at all
+	startIdx, endIdx int // motion start, and last sample with non-zero velocity
+	arrivalIdx       int // first sample settled within arrivalToleranceSteps of the end
+
+	// duration is motion start to ARRIVAL, and is the number to trust. It deliberately
+	// excludes the dither that follows: the servo hunts around its setpoint indefinitely
+	// after arriving, so a velocity-based span counts hunting as travel. On the 2026-08-19
+	// bench run that inflated a 332ms move to a reported 877ms -- the short trials were
+	// mostly dither, which made travel time look independent of distance when it is not.
+	duration time.Duration
+
+	// motionSpan is the old velocity-based measure, first to last non-zero velocity. Kept
+	// for diagnostics only: motionSpan - duration is how long the servo spent hunting.
+	motionSpan time.Duration
+
+	peakVel        int           // max |velocity| observed, steps/sec
+	velAtPeakTime  int           // |velocity| actually sampled at timeToPeak
+	timeToPeak     time.Duration // motion start to first sample within 95% of peak
+	overshootSteps int           // furthest travel beyond target, 0 if none
+	moved          bool          // false if the servo never moved at all
 }
 
 // analyzeMove recovers the motion profile from a sample series. target is the commanded
@@ -1182,7 +1211,20 @@ func analyzeMove(samples []sample, target int) moveProfile {
 	}
 	p.moved = true
 	p.startIdx, p.endIdx = first, last
-	p.duration = samples[last].t - samples[first].t
+	p.motionSpan = samples[last].t - samples[first].t
+
+	// Arrival: the first sample that is within tolerance of where the servo ends up, which
+	// is where travel actually finished. Everything after it is hunting.
+	settled := settledPosition(samples)
+	p.arrivalIdx = last
+	p.duration = p.motionSpan
+	for i := first; i < len(samples); i++ {
+		if d := samples[i].pos - settled; d <= arrivalToleranceSteps && d >= -arrivalToleranceSteps {
+			p.arrivalIdx = i
+			p.duration = samples[i].t - samples[first].t
+			break
+		}
+	}
 
 	for _, s := range samples {
 		if v := abs(s.vel); v > p.peakVel {
@@ -1251,6 +1293,30 @@ func (p moveProfile) exceededGoalTime(commanded time.Duration) bool {
 	allowed := commanded*115/100 + 20*time.Millisecond
 	return p.duration > allowed
 }
+
+// settledPosition is the median of the trailing samples' positions -- where the servo
+// actually came to rest, which is not necessarily the commanded target.
+func settledPosition(samples []sample) int {
+	n := len(samples) / settledTailFraction
+	if n < settledTailMin {
+		n = settledTailMin
+	}
+	if n > settledTailMax {
+		n = settledTailMax
+	}
+	if n > len(samples) {
+		n = len(samples)
+	}
+	tail := make([]int, 0, n)
+	for _, s := range samples[len(samples)-n:] {
+		tail = append(tail, s.pos)
+	}
+	sort.Ints(tail)
+	return tail[len(tail)/2]
+}
+
+// ditherSpan is how long the servo spent hunting around its setpoint after arriving.
+func (p moveProfile) ditherSpan() time.Duration { return p.motionSpan - p.duration }
 
 func abs(v int) int {
 	if v < 0 {
@@ -2165,6 +2231,73 @@ func init() {
 			if settleWindow <= gap {
 				return fmt.Errorf("settleWindow %v <= worst-case inter-tick gap %v; sampling would end mid-move",
 					settleWindow, gap)
+			}
+			return nil
+		}},
+	)
+}
+
+func init() {
+	selftests = append(selftests,
+		selftestCase{"analyzeMove/excludes-setpoint-dither", func() error {
+			// Modelled on a real trace from the 2026-08-19 bench run: the servo travels
+			// for 300ms, arrives, then hunts +/-3 steps around the setpoint for another
+			// 600ms. A velocity-based span calls that a 900ms move; only ~300ms is travel.
+			var s []sample
+			at := func(ms int, pos, vel int) {
+				s = append(s, sample{t: time.Duration(ms) * time.Millisecond, pos: pos, vel: vel})
+			}
+			at(0, 0, 0)
+			for i := 1; i <= 10; i++ { // travel: 0 -> 110 over 300ms
+				at(i*30, i*11, 350)
+			}
+			// Arrived at 110 (t=300ms); now dither around it for 600ms.
+			for i := 1; i <= 20; i++ {
+				pos := 110
+				vel := 0
+				switch i % 3 {
+				case 0:
+					pos, vel = 108, -50
+				case 1:
+					pos, vel = 111, 50
+				}
+				at(300+i*30, pos, vel)
+			}
+
+			p := analyzeMove(s, 110)
+			if !p.moved {
+				return fmt.Errorf("moved = false")
+			}
+			// Travel is 30ms (motion start) to 300ms (arrival) = 270ms.
+			if want := 270 * time.Millisecond; p.duration != want {
+				return fmt.Errorf("duration = %v, want %v (dither must not count as travel)", p.duration, want)
+			}
+			// The velocity-based span runs to the last dither sample, ~3x longer.
+			if p.motionSpan <= p.duration {
+				return fmt.Errorf("motionSpan %v should exceed duration %v here", p.motionSpan, p.duration)
+			}
+			if p.ditherSpan() < 500*time.Millisecond {
+				return fmt.Errorf("ditherSpan = %v, want >=500ms", p.ditherSpan())
+			}
+			// And the headline consequence: a generous commanded time is no longer
+			// misreported as exceeded just because the servo hunted afterwards.
+			if p.exceededGoalTime(400 * time.Millisecond) {
+				return fmt.Errorf("270ms of travel reported as exceeding a 400ms budget")
+			}
+			return nil
+		}},
+		selftestCase{"settledPosition/short-series", func() error {
+			// A fixed trailing count larger than the series would median the ramp itself
+			// and land mid-travel. Regression guard: this series is 5 samples.
+			s := []sample{
+				{t: 0, pos: 0, vel: 0},
+				{t: 10 * time.Millisecond, pos: 30, vel: 500},
+				{t: 20 * time.Millisecond, pos: 60, vel: 500},
+				{t: 30 * time.Millisecond, pos: 100, vel: 100},
+				{t: 40 * time.Millisecond, pos: 100, vel: 0},
+			}
+			if got := settledPosition(s); got != 100 {
+				return fmt.Errorf("settledPosition = %d, want 100 (not a mid-ramp value)", got)
 			}
 			return nil
 		}},
