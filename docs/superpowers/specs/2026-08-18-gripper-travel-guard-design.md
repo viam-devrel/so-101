@@ -93,34 +93,57 @@ offset's implied closed stop and substitute a conservative open travel, anchored
   commands tick 3188 — a further 60-tick cushion that falls out of existing behavior.
 - **Plausibility is judged by width**, not by matching specific factory values, so any
   too-wide range is caught rather than only `0/4095`. Threshold stays `1.25 ×` the modeled
-  travel = 1564 ticks: the measured real calibration (1451) clears it, while `500/3500` (3000)
+  travel (1563.75 ticks — keep the multiplication, not a rounded literal): the measured real calibration (1451) clears it, while `500/3500` (3000)
   and `0/4095` do not.
 - **Applied inside `ReadCalibrationFromServos`**, which is the function that produces the
   untrustworthy calibration. Callers with a calibration file never reach it, so a recorded
   calibration is never second-guessed.
 - **Arm servos are untouched.** Degrees mode takes only a center point from the range.
 
-The substituted window is always strictly narrower than what it replaces, so the guard cannot
-command anything the current code would not have.
+The substituted window is always narrower in *width* than what it replaces. It is not
+necessarily a *subset* of it: a partially-calibrated `0/2500` is replaced by `2048..3248`,
+whose max exceeds the recorded one. Containment holds for the two cases that actually occur
+(`0/4095` and `500/3500`), and width is the property the guard is defending.
 
-## The default was the larger hole
+## The default: one bypass, and a DRY argument
 
-`DefaultSO101FullCalibration` gave servo 6 `500/3500` — span 3000, 2.4× the jaw travel. That
-default is used whenever no range is read: bus unavailable (`config.go:406`), servo 6's
-registers unreadable (`config.go:318` via `FromFeetechCalibrationMap`), and
-`GetSharedController` (`manager.go:513`). **None of those paths reach `guardGripperTravel`**,
-so the guard as first written left the original stall fully reachable.
+`DefaultSO101FullCalibration` gave servo 6 `500/3500` — span 3000, 2.4× the jaw travel.
+
+Most paths that hand out that default are already guarded, contrary to an earlier draft of
+this section: `config.go:406` *is* the `guardGripperTravel` call, `FromFeetechCalibrationMap`
+(`config.go:318`) is wrapped by the guard at `config.go:460`, and `GetSharedController`
+(`manager.go:513`) passes the raw default in but `registry.go:183` overwrites it with the
+guarded servo read before the controller is built. In those paths the unguarded default is
+transient and never commanded.
+
+**One path does escape.** `LoadFullCalibrationFromFile`'s `convertOrDefault` (`config.go:201`)
+fills a *missing* `gripper` key with `DefaultSO101FullCalibration.Gripper`, and
+`LoadCalibration` returns `fromFile = true`. `registry.go:177`'s `if !fromFile` then skips
+`ReadCalibrationFromServos` — and therefore the guard — entirely. A calibration file with no
+gripper entry is not hypothetical: the calibration sensor's `servo_ids` is user-configurable
+(`calibration.go:93`), so a run over servos 1-5 writes exactly such a file. That machine
+commands `500/3500` on the jaw with nothing to stop it.
 
 Fix: the default *is* the safe window. `RangeMin: gripperSafeRangeMin, RangeMax:
-gripperSafeRangeMax`. One definition of "the conservative gripper range", shared by the guard
-and the default, so the two cannot drift.
+gripperSafeRangeMax`. That closes the file path, and gives the guard and the default a single
+shared definition of "the conservative gripper range" so the two cannot drift.
+
+### A behavior fix that rides along
+
+`Grab()` infers a successful grasp from position error: `currentPercent - closedPosition >
+15.0` (`gripper.go:296-299`). Under `500/3500`, an **empty** jaw resting at its closed stop
+(tick 2048) reports `(2048-500)/3000 = 51.6%`, clears the threshold, and `Grab()` returns
+`true` — unconditionally, whether or not it is holding anything. Under `2048/3248` the same
+jaw reports 0% and `Grab()` correctly returns `false`. This changes an API return value, so it
+gets its own test rather than being left as a side effect.
 
 ## Warnings: by cause, not by width
 
 Making the default safe has a side effect that must be handled deliberately:
-`guardGripperTravel(DefaultSO101FullCalibration, …)` now finds its input plausible and
-returns `replaced=false`. The default paths would go **silent** — a gripper quietly running a
-1200-tick window with no indication it is uncalibrated.
+`guardGripperTravel(DefaultSO101FullCalibration, …)` now finds its input plausible and returns
+`replaced = false`. Every default path would go **silent** — a gripper quietly running a
+1200-tick window with no indication it is uncalibrated. Today those paths warn only as an
+accident of the default being implausible.
 
 So "running on the safe window" has two distinct causes and only one of them is a too-wide
 range. One helper, `warnGripperUsingSafeRange(logger, cause)`, three call sites:
@@ -128,14 +151,33 @@ range. One helper, `warnGripperUsingSafeRange(logger, cause)`, three call sites:
 | Cause | Site |
 |---|---|
 | Servo 6 reported a range too wide to be real | `guardGripperTravel` — names the reported range, and `0/4095` explicitly as the uncalibrated signature |
-| Servo 6 was requested but produced no calibration | end of `ReadCalibrationFromServos` |
-| Bus unavailable | `ReadCalibrationFromServos`'s nil-bus early return |
+| Servo 6 was requested but produced no calibration | `finalizeCalibration` (below) |
+| Bus unavailable | `finalizeCalibration`, reached from the nil-bus early return with an empty map |
 
-The second case requires that 6 was actually in `servoIDs`, so an arm-only machine configured
-`servo_ids: [1,2,3,4,5]` does not warn about a gripper it does not have. (In practice
-`arm.go:450` builds the controller with all six regardless of the arm's own `servo_ids`.)
+Both non-guard causes are gated on servo 6 appearing in `servoIDs`, so an arm-only machine
+configured `servo_ids: [1,2,3,4,5]` does not warn about a gripper it does not have — including
+when its bus is down. (In practice `arm.go:450` builds the controller with all six regardless
+of the arm's own `servo_ids`, so the gate rarely fires; it exists so the two sites cannot
+disagree.)
 
 All three end in the same sentence: the jaw will not open fully, run the calibration workflow.
+
+### `finalizeCalibration`
+
+`ReadCalibrationFromServos` has two return sites — the nil-bus early return and the end of the
+loop — and both must compose the map, warn, and guard identically. Extract that into
+
+```go
+func finalizeCalibration(
+    calibrations map[int]*MotorCalibration, servoIDs []int, logger logging.Logger,
+) SO101FullCalibration
+```
+
+called from both. This is not only deduplication: it is the only way the wiring stays testable.
+`TestReadCalibrationFromServosGuardsTheGripper` currently proves the guard is applied by
+driving the nil-bus path and watching the implausible default get replaced — a vehicle that
+stops working the moment the default is plausible. A pure `finalizeCalibration` can be handed
+a map with servo 6 at `0/4095` and asserted directly, with no bus.
 
 ## It does not break the workflow it recommends
 
@@ -153,10 +195,34 @@ asserted arithmetic about the window rather than what the window *means*. The lo
 addition is a test that drives `Denormalize` at 0% and 100% and asserts ticks 2048 and 3248 —
 the only test that would have caught a window centered on the closed stop.
 
-Alongside it: the plausibility table swaps its invented "a real calibration" case (`1900,
-2900`, itself centered) for the measured `2030, 3481`; a test pins `config.go`'s default to
-the shared constants; and a test with an observed logger covers the paths that would otherwise
-go silent once the default is safe.
+**Existing tests that must change** (all three fail otherwise):
+
+| Test | Why it breaks | Resolution |
+|---|---|---|
+| `TestSafeGripperRangeStaysInsideTheModeledTravel` | asserts `(min+max)/2 == 2048`, the centering this revision removes (new center 2648) | rewrite as `TestSafeGripperRangeClosesAtTheClosedStop`, asserting `min == gripperEncoderCenter`; keep its width and self-plausibility assertions |
+| `TestGuardGripperTravelDoesNotMutateTheSharedDefault` | `require.True(t, replaced, "the placeholder default is itself implausible")` — no longer true | keep the test (it covers pointer aliasing of the package-level `Gripper`, which still matters) but drive it with an explicitly implausible gripper instead of the default |
+| `TestReadCalibrationFromServosGuardsTheGripper` | asserts the "wider than the jaw" warning on the nil-bus path, which now neither fires the guard nor uses that wording | split: a `finalizeCalibration` test for the guard wiring, and a nil-bus test for the bus-unavailable warning |
+
+**New tests:**
+
+- `TestGripperClosesAtTheClosedStop` — `Denormalize` at 0% and 100% → 2048 and 3248.
+- `TestDefaultGripperCalibrationUsesTheSafeWindow` — pins `config.go`'s default to the shared
+  constants.
+- `TestGripperRangeIsPlausible` gains the measured `2030, 3481` case (span 1451, clears
+  1563.75 by 113) in place of the invented, centered `1900, 2900`.
+- `TestFinalizeCalibrationWarnsWhenTheGripperIsUncalibrated` — observed logger, one case per
+  cause.
+- A `Grab()` test for the empty-jaw case above, since the default change flips its return value.
+
+## Housekeeping this revision implies
+
+- `gripperEncoderCenter`'s comment ("Where a half-turn homing offset puts mid-travel") is now
+  wrong; 2048 is the closed stop. The name is kept because it is still literally the encoder
+  centre and the CLI probe uses the same term.
+- `gripperSafeTravelFraction` and `safeGripperRange()` become dead.
+- `guardGripperTravel`'s warning text still says "centered on mid-travel".
+- `cmd/cli/gripper_limits.go`, the probe these measurements came from, is still untracked and
+  should be committed alongside.
 
 ## Out of scope
 
