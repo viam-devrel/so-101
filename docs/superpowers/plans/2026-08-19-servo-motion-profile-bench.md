@@ -2088,7 +2088,9 @@ Single joint, fixed travel, fixed `Speed` — acceleration shapes the ramp towar
 ```go
 // --- test: accel ---
 
-var accSweep = []int{0, 1, 2, 5, 10, 20, 50, 100, 200, 255}
+// Descending: Acc=0 is an unlimited ramp and the jerkiest command in the harness, so it
+// runs LAST rather than as the first motion of a bench session.
+var accSweep = []int{255, 200, 100, 50, 20, 10, 5, 2, 1, 0}
 
 // accelSpeedSteps caps the velocity target during the acceleration sweep. Acc=0 means an
 // unlimited ramp; pairing that with a high velocity target is the one genuinely jerky
@@ -2251,15 +2253,26 @@ ls /dev/tty.usb* /dev/ttyUSB* /dev/ttyACM* 2>/dev/null
 go run cmd/cli/profile_bench.go -port=<PORT> -test=writerate -out=./bench-out
 ```
 
-Verify before trusting anything: `gap=1ms` reads ~1000 Hz, `gap=2ms` reads ~500 Hz, and **`gap=none` does not read the same rate as `gap=1ms`**. If that last check fails, the zero-coercion bug (fact 3) has been reintroduced — stop and fix it.
+The table has TWO blocks, one per transport. Read them differently:
+
+- **`stock` rows are expected to be FLAT at ~95 Hz regardless of gap.** That is feetech's
+  `SerialTransport.Flush` waiting out a 10 ms read timeout before every packet, and it is
+  the single most actionable finding this test produces — not a fault. Do **not** stop the
+  run because these rows fail to track the gap.
+- **`fastflush` rows should track the gap**: ~1000 Hz at 1 ms, ~500 Hz at 2 ms. Only if a
+  *fastflush* `none` row reads the same rate as its own `1ms` row has the `MinCommandGap`
+  zero-coercion been reintroduced — stop and fix that.
+- A 5-servo `SetGoals` is 48 bytes ≈ 480 µs of wire time, so ~2080 Hz is the physical
+  ceiling. Anything faster is host-side buffering, not the bus.
 
 - [ ] **Step 3: Clear the workspace and position the joint, then run the motion tests**
 
 Two things to know before the motion runs:
 
 - **The harness refuses to overwrite CSVs.** Filenames carry the servo and mode
-  (`accel_servo2.csv`, `goaltime_fullarm_samples.csv`), so the servo 1/2/3 sweep below no
-  longer collides with itself — but re-running the *same* configuration into the same
+  and the transport (`accel_servo2_fastflush.csv`,
+  `goaltime_fullarm_fastflush_samples.csv`), so the servo 1/2/3 sweep below no longer
+  collides with itself, and stock vs fast-flush runs stay separate — but re-running the *same* configuration into the same
   `-out` will fail rather than clobber. Move the old files aside or pass a new `-out`.
 - **The harness verifies the arm returned to start after every trial** and aborts if a
   joint is more than ~1 degree off, rather than measuring the rest of the sweep from a
@@ -2268,9 +2281,12 @@ Two things to know before the motion runs:
   changes the sample rate 3-10x and therefore changes `measured_ms`, `peak_vel` and
   `time_to_peak_sec`; `n_samples` per trial is recorded so you can see the resolution
   behind each number.
-- **After a motion run the servos keep `RegAcceleration` set.** It is SRAM, so power-cycle
-  the arm before using the shipped module, or its motion stays acceleration-limited in a
-  way it normally is not.
+- **After ANY run — including `writerate` — the servos keep `RegAcceleration` and
+  `RegGoalVelocity` set.** Both are SRAM, so power-cycle the arm before using the shipped
+  module, or its motion stays acceleration-limited in a way it normally is not.
+- **`-test=all` runs the motion tests first and `writerate` last**, because `writerate`
+  deliberately leaves the arm limp; running it first would have the motion tests hold and
+  measure a collapsed pose.
 - **Torque is released when each run ends**, on the normal path as well as on Ctrl-C. For
   the gravity-loaded joints below the arm will drop the moment the summary finishes
   printing, so support it. The harness prints a reminder when it powers up. Note also that
@@ -2278,7 +2294,9 @@ Two things to know before the motion runs:
   use `kill`.
 
 Before running `goaltime`, position the tested joint with at least **40° of positive
-headroom** inside its angle limits. The sweep runs 10°, 20°, and 40° travels and the harness
+headroom** inside its angle limits. For the `-full-arm` run in Step 4, **every** arm joint
+needs that headroom: `prepareTravel` validates the full un-staggered travel for all five,
+even though joints 1-4 only move a fraction of it. The sweep runs 10°, 20°, and 40° travels and the harness
 **refuses rather than clamps** (by design), so a joint parked near its upper limit completes
 the 10° and 20° trials and then aborts partway through the run.
 

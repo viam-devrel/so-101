@@ -213,7 +213,7 @@ report per-joint arrival spread. This is the direct test of whether coordinated 
 ### Test: `accel` (motion)
 
 Single joint, fixed travel, fixed `Speed` (not `Time` — acceleration shapes the ramp toward
-a velocity target). Sweep `Acc` ∈ {0, 1, 2, 5, 10, 20, 50, 100, 200, 255}, sampling the
+a velocity target). Sweep `Acc` descending ∈ {255, …, 1, 0} (gentlest first), sampling the
 velocity profile each time, returning to start between trials.
 
 Report peak velocity reached, time-to-peak, and implied steps/s² per `Acc` unit. This

@@ -137,7 +137,8 @@ func runGoalTime(cfg config) error {
 
 	summary, err := newCSV(cfg.outDir, csvName("goaltime", "", cfg.servo, cfg.fullArm, transportName(!cfg.stockTransport)), []string{
 		"trial", "servo_id", "transport", "n_samples", "commanded_ms", "travel_deg", "measured_ms",
-		"ratio_measured_over_commanded", "goal_time_exceeded", "peak_vel", "overshoot_steps",
+		"motion_start_sec", "motion_end_sec", "moved", "sampling_timed_out",
+		"ratio_measured_over_commanded", "goal_time_exceeded", "peak_vel_steps_per_sec", "overshoot_steps",
 	})
 	if err != nil {
 		return err
@@ -232,7 +233,7 @@ func goalTimeTrial(
 		return fmt.Errorf("%s: SetGoals: %w", trial, err)
 	}
 	commanded := time.Duration(ms) * time.Millisecond
-	series, err := sampleUntilStopped(ctx, r, ids, moveTimeout(commanded))
+	series, timedOut, err := sampleUntilStopped(ctx, r, ids, moveTimeout(commanded))
 	if err != nil {
 		// Write what was collected before failing. A transient decode error late in a sweep
 		// would otherwise discard that trial's whole series along with the run.
@@ -247,6 +248,11 @@ func goalTimeTrial(
 		s := series[p.id]
 		writeSamples(samplesCSV, trial, p.id, s)
 		prof := analyzeMove(s, targets[p.id])
+		startSec, endSec := "", ""
+		if prof.moved {
+			startSec = strconv.FormatFloat(s[prof.startIdx].t.Seconds(), 'f', 6, 64)
+			endSec = strconv.FormatFloat(s[prof.endIdx].t.Seconds(), 'f', 6, 64)
+		}
 		ratio := 0.0
 		if commanded > 0 {
 			ratio = prof.duration.Seconds() / commanded.Seconds()
@@ -265,8 +271,17 @@ func goalTimeTrial(
 			trial, strconv.Itoa(p.id),
 			transportName(!cfg.stockTransport), strconv.Itoa(len(s)),
 			strconv.Itoa(ms),
-			strconv.FormatFloat(travelDeg, 'f', 1, 64),
+			// The ACTUAL per-joint travel. Under -full-arm each joint gets a different
+			// fraction of the nominal, and that difference IS the experiment -- writing
+			// travelDeg here would record 40.0 for joints that moved 8, 16, 24 and 32.
+			strconv.FormatFloat(stepsToDeg(targets[p.id]-p.start), 'f', 2, 64),
 			strconv.FormatFloat(prof.duration.Seconds()*1000, 'f', 1, 64),
+			// Absolute motion bounds: the arrival spread the -full-arm run exists to
+			// measure is a group-by over motion_end_sec, and must not be recomputed from
+			// the deliberately-biased duration column.
+			startSec, endSec,
+			strconv.FormatBool(prof.moved),
+			strconv.FormatBool(timedOut),
 			strconv.FormatFloat(ratio, 'f', 3, 64),
 			strconv.FormatBool(prof.exceededGoalTime(commanded)),
 			strconv.Itoa(prof.peakVel),
@@ -308,7 +323,7 @@ func goalTimeTrial(
 	if err := r.group.SetGoals(ctx, back); err != nil {
 		return fmt.Errorf("%s: return SetGoals: %w", trial, err)
 	}
-	if _, err := sampleUntilStopped(ctx, r, ids, moveTimeout(commanded)); err != nil {
+	if _, _, err := sampleUntilStopped(ctx, r, ids, moveTimeout(commanded)); err != nil {
 		return fmt.Errorf("%s: return: %w", trial, err)
 	}
 	return verifyAtStart(ctx, r, plans)
@@ -316,7 +331,9 @@ func goalTimeTrial(
 
 // --- test: accel ---
 
-var accSweep = []int{0, 1, 2, 5, 10, 20, 50, 100, 200, 255}
+// Descending: Acc=0 is an unlimited ramp and the jerkiest command in the harness, so it
+// runs LAST rather than as the first motion of a bench session.
+var accSweep = []int{255, 200, 100, 50, 20, 10, 5, 2, 1, 0}
 
 // accelSpeedSteps caps the velocity target during the acceleration sweep. Acc=0 means an
 // unlimited ramp; pairing that with a high velocity target is the one genuinely jerky
@@ -337,7 +354,7 @@ func runAccel(cfg config) error {
 	summary, err := newCSV(cfg.outDir, csvName("accel", "", cfg.servo, false, transportName(!cfg.stockTransport)), []string{
 		"trial", "servo_id", "transport", "n_samples", "acc_units", "travel_deg", "peak_vel_steps_per_sec",
 		"time_to_peak_sec", "implied_accel_steps_per_sec2", "steps_per_sec2_per_unit",
-		"ramp_below_sampling_resolution", "duration_sec", "overshoot_steps",
+		"ramp_below_sampling_resolution", "sampling_timed_out", "duration_sec", "overshoot_steps",
 	})
 	if err != nil {
 		return err
@@ -377,7 +394,7 @@ func runAccel(cfg config) error {
 			if err := r.group.SetGoals(ctx, goal); err != nil {
 				return fmt.Errorf("%s: SetGoals: %w", trial, err)
 			}
-			series, err := sampleUntilStopped(ctx, r, ids, 10*time.Second)
+			series, timedOut, err := sampleUntilStopped(ctx, r, ids, accelTimeout(steps))
 			if err != nil {
 				writeSamples(samplesCSV, trial, p.id, series[p.id])
 				return fmt.Errorf("%s: %w", trial, err)
@@ -403,6 +420,7 @@ func runAccel(cfg config) error {
 				strconv.FormatFloat(implied, 'f', 1, 64),
 				strconv.FormatFloat(perUnit, 'f', 1, 64),
 				strconv.FormatBool(prof.rampBelowSamplingResolution()),
+				strconv.FormatBool(timedOut),
 				strconv.FormatFloat(prof.duration.Seconds(), 'f', 6, 64),
 				strconv.Itoa(prof.overshootSteps),
 			})
@@ -415,7 +433,7 @@ func runAccel(cfg config) error {
 			if err := r.group.SetGoals(ctx, back); err != nil {
 				return fmt.Errorf("%s: return SetGoals: %w", trial, err)
 			}
-			if _, err := sampleUntilStopped(ctx, r, ids, 10*time.Second); err != nil {
+			if _, _, err := sampleUntilStopped(ctx, r, ids, accelTimeout(steps)); err != nil {
 				return fmt.Errorf("%s: return: %w", trial, err)
 			}
 			if err := verifyAtStart(ctx, r, plans); err != nil {
@@ -442,7 +460,9 @@ func selectTests(name string, move bool) (run, skipped []string, err error) {
 	var requested []string
 	switch name {
 	case "all":
-		requested = []string{"writerate", "goaltime", "accel"}
+		// writerate LAST: it deliberately leaves the arm limp, and a motion test running
+		// after it would holdPose the collapsed pose and measure the sweep from there.
+		requested = []string{"goaltime", "accel", "writerate"}
 	case "writerate", "goaltime", "accel":
 		requested = []string{name}
 	default:
@@ -1060,8 +1080,11 @@ func prepareTravel(ctx context.Context, r *rig, ids []int, travelSteps int, assu
 }
 
 // returnToleranceSteps is how far a joint may sit from its start position after a return
-// leg before the sweep is aborted. ~1 degree.
-const returnToleranceSteps = 12
+// leg before the sweep is aborted. ~3 degrees: the gravity-loaded joints 2 and 3 that Task
+// 12 targets droop under steady-state load, and aborting a 15-trial sweep over normal droop
+// would waste the bench session. Still far tighter than the 10-40 degree travels in play,
+// so a genuinely stuck or contaminated joint is still caught.
+const returnToleranceSteps = 34
 
 // verifyAtStart re-reads positions and fails if any joint did not make it back.
 //
@@ -1087,6 +1110,27 @@ func verifyAtStart(ctx context.Context, r *rig, plans []travelPlan) error {
 		}
 	}
 	return nil
+}
+
+// accelTimeout bounds an accel trial. Derived, not hardcoded: a low-Acc trial is
+// triangular, so it takes ~2*sqrt(travel/a). If the register's real scale turns out to be
+// ~10 steps/s^2 per unit rather than the documented ~100, Acc=1 over 228 steps takes ~9.6s
+// -- right on the old hardcoded 10s. The timeout would then have expired exactly where the
+// interesting answer lives, and gravity-loaded joints are slower still.
+func accelTimeout(travelSteps int) time.Duration {
+	if travelSteps < 0 {
+		travelSteps = -travelSteps
+	}
+	// Worst case assumed: 1 steps/s^2 per Acc unit at Acc=1.
+	worst := 2 * math.Sqrt(float64(travelSteps))
+	t := time.Duration(worst*3) * time.Second
+	if t < 10*time.Second {
+		t = 10 * time.Second
+	}
+	if t > 60*time.Second {
+		t = 60 * time.Second
+	}
+	return t
 }
 
 // moveTimeout bounds a trial generously: commanded time plus slack, floored so that a
@@ -1735,7 +1779,7 @@ func init() {
 			}{
 				{"writerate", false, []string{"writerate"}, nil, false},
 				{"all", false, []string{"writerate"}, []string{"goaltime", "accel"}, false},
-				{"all", true, []string{"writerate", "goaltime", "accel"}, nil, false},
+				{"all", true, []string{"goaltime", "accel", "writerate"}, nil, false},
 				{"goaltime", false, nil, []string{"goaltime"}, false},
 				{"goaltime", true, []string{"goaltime"}, nil, false},
 				{"bogus", true, nil, nil, true},
@@ -1871,6 +1915,15 @@ var gapSweep = []time.Duration{
 const writeRateIterations = 500
 
 func runWriteRate(cfg config) error {
+	// Probe the port BEFORE creating the CSV. goaltime and accel open their rig first; doing
+	// it in the other order here meant a mistyped -port left a header-only file behind, and
+	// O_EXCL then refused the corrected retry.
+	if probe, err := openRig(cfg.port, noGap, armServoIDs, false); err != nil {
+		return err
+	} else if err := probe.close(); err != nil {
+		return err
+	}
+
 	out, err := newCSV(cfg.outDir, csvName("writerate", "", 0, false, "both"), []string{
 		"transport", "gap_label", "gap_sec", "n", "mean_sec", "p50_sec", "p95_sec", "p99_sec", "max_sec", "rate_hz",
 	})
@@ -1940,6 +1993,8 @@ func measureWriteRate(port string, gap time.Duration, fastFlush bool) (latencySt
 	var st latencyStats
 	err = r.withSafeShutdown(func(ctx context.Context) error {
 		// Torque off for the whole test: this measures the wire, not the motor.
+		fmt.Printf("torque is being RELEASED on servos %v for the writerate sweep -- "+
+			"support the arm; it will go limp now and stay limp\n", r.ids)
 		r.disableTorque(ctx)
 
 		positions, err := r.group.Positions(ctx)
@@ -1978,17 +2033,21 @@ func measureWriteRate(port string, gap time.Duration, fastFlush bool) (latencySt
 // --- sampling ---
 
 // sampleUntilStopped polls position and velocity as fast as the link allows until every
-// servo has reported stopped for settleReads consecutive reads, or timeout elapses.
+// servo has read zero velocity continuously for settleWindow, or timeout elapses.
 //
 // One SyncRead of 4 bytes at RegPresentPosition returns position AND velocity per servo,
 // because addresses 56 and 58 are adjacent. Each sample carries its own measured
 // timestamp, so sampling jitter appears in the data rather than being assumed uniform.
+// The bool result reports that the trial hit its deadline with the servo still moving.
+// It must reach the CSV: a truncated series yields duration ~= timeout, which
+// exceededGoalTime then reads as the servo failing to honor GoalTime -- recording the
+// harness giving up as the very boundary this test exists to find.
 func sampleUntilStopped(
 	ctx context.Context,
 	r *rig,
 	ids []int,
 	timeout time.Duration,
-) (map[int][]sample, error) {
+) (map[int][]sample, bool, error) {
 	out := make(map[int][]sample, len(ids))
 	t0 := time.Now()
 	deadline := t0.Add(timeout)
@@ -1997,19 +2056,19 @@ func sampleUntilStopped(
 
 	for {
 		if ctx.Err() != nil {
-			return out, ctx.Err()
+			return out, false, ctx.Err()
 		}
 		data, err := r.bus.SyncRead(ctx, feetech.RegPresentPosition.Address, 4, ids)
 		now := time.Since(t0)
 		if err != nil {
-			return out, fmt.Errorf("sync read: %w", err)
+			return out, false, fmt.Errorf("sync read: %w", err)
 		}
 
 		allStopped := true
 		for _, id := range ids {
 			pos, vel, derr := decodePosVel(r.proto, data[id])
 			if derr != nil {
-				return out, fmt.Errorf("servo %d: %w", id, derr)
+				return out, false, fmt.Errorf("servo %d: %w", id, derr)
 			}
 			out[id] = append(out[id], sample{t: now, pos: pos, vel: vel})
 			if abs(vel) >= velEpsilon {
@@ -2024,14 +2083,14 @@ func sampleUntilStopped(
 		// Require motion to have started before treating "stopped" as "finished", so the
 		// pre-motion latency window does not end the trial immediately.
 		if sawMotion && now-lastMotionAt >= settleWindow {
-			return out, nil
+			return out, false, nil
 		}
 
 		if time.Now().After(deadline) {
 			if !sawMotion {
-				return out, fmt.Errorf("no motion detected within %v", timeout)
+				return out, false, fmt.Errorf("no motion detected within %v", timeout)
 			}
-			return out, nil // timed out mid-move; caller sees it in the profile
+			return out, true, nil // timed out mid-move -- callers MUST record this
 		}
 	}
 }
