@@ -1521,7 +1521,7 @@ Expected: exit 0, no output.
 go run cmd/cli/profile_bench.go -selftest
 ```
 
-Expected: `33/33 passed`, exit 0.
+Expected: `35/35 passed`, exit 0.
 
 - [ ] **Step 3: Commit**
 
@@ -1680,7 +1680,7 @@ gofmt -s -w cmd/cli/profile_bench.go && \
   go run cmd/cli/profile_bench.go -selftest
 ```
 
-Expected: exit 0, no `gofmt` output, `33/33 passed`.
+Expected: exit 0, no `gofmt` output, `35/35 passed`.
 
 - [ ] **Step 4: Commit**
 
@@ -1702,7 +1702,7 @@ git commit -m "feat(bench): writerate sweep over MinCommandGap"
 // --- sampling ---
 
 // sampleUntilStopped polls position and velocity as fast as the link allows until every
-// servo has reported stopped for settleReads consecutive reads, or timeout elapses.
+// servo has reported stopped for settleWindow consecutive reads, or timeout elapses.
 //
 // One SyncRead of 4 bytes at RegPresentPosition returns position AND velocity per servo,
 // because addresses 56 and 58 are adjacent. Each sample carries its own measured
@@ -1746,7 +1746,7 @@ func sampleUntilStopped(
 			stoppedRuns++
 			// Require motion to have started before treating "stopped" as "finished",
 			// so the initial pre-motion latency does not end the trial immediately.
-			if sawMotion && stoppedRuns >= settleReads {
+			if sawMotion && stoppedRuns >= settleWindow {
 				return out, nil
 			}
 		} else {
@@ -1762,10 +1762,10 @@ func sampleUntilStopped(
 	}
 }
 
-// settleReads is how many consecutive all-stopped reads end a trial. The STS3215 reports
+// settleWindow is how many consecutive all-stopped reads end a trial. The STS3215 reports
 // zero velocity briefly at direction changes and at the start of a ramp, so a single
 // zero read is not conclusive.
-const settleReads = 5
+const settleWindow = 5
 ```
 
 - [ ] **Step 2: Verify build, vet, format, selftests**
@@ -1778,7 +1778,7 @@ gofmt -s -w cmd/cli/profile_bench.go && \
   go run cmd/cli/profile_bench.go -selftest
 ```
 
-Expected: exit 0, no `gofmt` output, `33/33 passed`.
+Expected: exit 0, no `gofmt` output, `35/35 passed`.
 
 - [ ] **Step 3: Commit**
 
@@ -2065,7 +2065,7 @@ gofmt -s -w cmd/cli/profile_bench.go && \
   go run cmd/cli/profile_bench.go -selftest
 ```
 
-Expected: exit 0, no `gofmt` output, `33/33 passed`.
+Expected: exit 0, no `gofmt` output, `35/35 passed`.
 
 - [ ] **Step 4: Commit**
 
@@ -2213,7 +2213,7 @@ gofmt -s -w cmd/cli/profile_bench.go && \
   go run cmd/cli/profile_bench.go -selftest
 ```
 
-Expected: exit 0, no `gofmt` output, `33/33 passed`.
+Expected: exit 0, no `gofmt` output, `35/35 passed`.
 
 - [ ] **Step 3: Confirm the module's tests still pass**
 
@@ -2261,6 +2261,16 @@ Two things to know before the motion runs:
   (`accel_servo2.csv`, `goaltime_fullarm_samples.csv`), so the servo 1/2/3 sweep below no
   longer collides with itself — but re-running the *same* configuration into the same
   `-out` will fail rather than clobber. Move the old files aside or pass a new `-out`.
+- **The harness verifies the arm returned to start after every trial** and aborts if a
+  joint is more than ~1 degree off, rather than measuring the rest of the sweep from a
+  contaminated position. If you see that abort, the arm is fighting something.
+- **Filenames and a CSV column record which transport produced the data.** The transport
+  changes the sample rate 3-10x and therefore changes `measured_ms`, `peak_vel` and
+  `time_to_peak_sec`; `n_samples` per trial is recorded so you can see the resolution
+  behind each number.
+- **After a motion run the servos keep `RegAcceleration` set.** It is SRAM, so power-cycle
+  the arm before using the shipped module, or its motion stays acceleration-limited in a
+  way it normally is not.
 - **Torque is released when each run ends**, on the normal path as well as on Ctrl-C. For
   the gravity-loaded joints below the arm will drop the moment the summary finishes
   printing, so support it. The harness prints a reminder when it powers up. Note also that
@@ -2321,7 +2331,7 @@ git commit -m "docs: recorded servo motion-profile bench measurements"
 - [ ] `go build -o /dev/null cmd/cli/profile_bench.go` exits 0
 - [ ] `go vet cmd/cli/profile_bench.go` exits 0
 - [ ] `gofmt -l cmd/cli/profile_bench.go` prints nothing
-- [ ] `go run cmd/cli/profile_bench.go -selftest` reports `33/33 passed`
+- [ ] `go run cmd/cli/profile_bench.go -selftest` reports `35/35 passed`
 - [ ] `go test ./cmd/module/ .` passes (modulo `TestEnumerateSerialPorts` without serial hardware)
 - [ ] All three tests have been run against real hardware and their CSVs exist
 - [ ] `docs/superpowers/results/2026-08-19-bench-run.md` records the numbers and a scope recommendation

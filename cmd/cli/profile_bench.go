@@ -135,8 +135,8 @@ func runGoalTime(cfg config) error {
 	}
 	defer r.close()
 
-	summary, err := newCSV(cfg.outDir, csvName("goaltime", "", cfg.servo, cfg.fullArm), []string{
-		"trial", "servo_id", "commanded_ms", "travel_deg", "measured_ms",
+	summary, err := newCSV(cfg.outDir, csvName("goaltime", "", cfg.servo, cfg.fullArm, transportName(!cfg.stockTransport)), []string{
+		"trial", "servo_id", "transport", "n_samples", "commanded_ms", "travel_deg", "measured_ms",
 		"ratio_measured_over_commanded", "goal_time_exceeded", "peak_vel", "overshoot_steps",
 	})
 	if err != nil {
@@ -144,7 +144,7 @@ func runGoalTime(cfg config) error {
 	}
 	defer summary.close()
 
-	samplesCSV, err := newCSV(cfg.outDir, csvName("goaltime", "_samples", cfg.servo, cfg.fullArm), sampleHeader)
+	samplesCSV, err := newCSV(cfg.outDir, csvName("goaltime", "_samples", cfg.servo, cfg.fullArm, transportName(!cfg.stockTransport)), sampleHeader)
 	if err != nil {
 		return err
 	}
@@ -234,6 +234,11 @@ func goalTimeTrial(
 	commanded := time.Duration(ms) * time.Millisecond
 	series, err := sampleUntilStopped(ctx, r, ids, moveTimeout(commanded))
 	if err != nil {
+		// Write what was collected before failing. A transient decode error late in a sweep
+		// would otherwise discard that trial's whole series along with the run.
+		for _, p := range plans {
+			writeSamples(samplesCSV, trial, p.id, series[p.id])
+		}
 		return fmt.Errorf("%s: %w", trial, err)
 	}
 
@@ -257,7 +262,9 @@ func goalTimeTrial(
 			arrivals = append(arrivals, s[prof.endIdx].t)
 		}
 		summary.write([]string{
-			trial, strconv.Itoa(p.id), strconv.Itoa(ms),
+			trial, strconv.Itoa(p.id),
+			transportName(!cfg.stockTransport), strconv.Itoa(len(s)),
+			strconv.Itoa(ms),
 			strconv.FormatFloat(travelDeg, 'f', 1, 64),
 			strconv.FormatFloat(prof.duration.Seconds()*1000, 'f', 1, 64),
 			strconv.FormatFloat(ratio, 'f', 3, 64),
@@ -304,7 +311,7 @@ func goalTimeTrial(
 	if _, err := sampleUntilStopped(ctx, r, ids, moveTimeout(commanded)); err != nil {
 		return fmt.Errorf("%s: return: %w", trial, err)
 	}
-	return nil
+	return verifyAtStart(ctx, r, plans)
 }
 
 // --- test: accel ---
@@ -327,8 +334,8 @@ func runAccel(cfg config) error {
 	}
 	defer r.close()
 
-	summary, err := newCSV(cfg.outDir, csvName("accel", "", cfg.servo, false), []string{
-		"trial", "servo_id", "acc_units", "travel_deg", "peak_vel_steps_per_sec",
+	summary, err := newCSV(cfg.outDir, csvName("accel", "", cfg.servo, false, transportName(!cfg.stockTransport)), []string{
+		"trial", "servo_id", "transport", "n_samples", "acc_units", "travel_deg", "peak_vel_steps_per_sec",
 		"time_to_peak_sec", "implied_accel_steps_per_sec2", "steps_per_sec2_per_unit",
 		"ramp_below_sampling_resolution", "duration_sec", "overshoot_steps",
 	})
@@ -337,7 +344,7 @@ func runAccel(cfg config) error {
 	}
 	defer summary.close()
 
-	samplesCSV, err := newCSV(cfg.outDir, csvName("accel", "_samples", cfg.servo, false), sampleHeader)
+	samplesCSV, err := newCSV(cfg.outDir, csvName("accel", "_samples", cfg.servo, false, transportName(!cfg.stockTransport)), sampleHeader)
 	if err != nil {
 		return err
 	}
@@ -372,6 +379,7 @@ func runAccel(cfg config) error {
 			}
 			series, err := sampleUntilStopped(ctx, r, ids, 10*time.Second)
 			if err != nil {
+				writeSamples(samplesCSV, trial, p.id, series[p.id])
 				return fmt.Errorf("%s: %w", trial, err)
 			}
 
@@ -386,7 +394,9 @@ func runAccel(cfg config) error {
 			fmt.Printf("%-10d %10d %12v %14.1f %12.1f\n",
 				acc, prof.peakVel, prof.timeToPeak, implied, perUnit)
 			summary.write([]string{
-				trial, strconv.Itoa(p.id), strconv.Itoa(acc),
+				trial, strconv.Itoa(p.id),
+				transportName(!cfg.stockTransport), strconv.Itoa(len(s)),
+				strconv.Itoa(acc),
 				strconv.FormatFloat(cfg.travelDeg, 'f', 1, 64),
 				strconv.Itoa(prof.peakVel),
 				strconv.FormatFloat(prof.timeToPeak.Seconds(), 'f', 6, 64),
@@ -407,6 +417,9 @@ func runAccel(cfg config) error {
 			}
 			if _, err := sampleUntilStopped(ctx, r, ids, 10*time.Second); err != nil {
 				return fmt.Errorf("%s: return: %w", trial, err)
+			}
+			if err := verifyAtStart(ctx, r, plans); err != nil {
+				return fmt.Errorf("%s: %w", trial, err)
 			}
 		}
 
@@ -814,6 +827,14 @@ func (r *rig) disableTorque(ctx context.Context) {
 	}
 }
 
+// holdSeedSpeedSteps / holdSeedAcc shape the goal seeded just before torque is enabled.
+// Gentle on purpose: this is the one write that lands while the operator may have hands on
+// the arm.
+const (
+	holdSeedSpeedSteps = 300
+	holdSeedAcc        = 20
+)
+
 // holdPose enables torque on every servo in the rig so the arm holds its posture while a
 // single joint is exercised. Without it the untested joints hang limp and the joint under
 // test accelerates a collapsing chain -- which corrupts exactly the gravity-loaded
@@ -822,6 +843,23 @@ func (r *rig) disableTorque(ctx context.Context) {
 // It also warns that torque is released on exit: withSafeShutdown drops it on the normal
 // return path too, so a gravity-loaded arm falls the moment the summary finishes printing.
 func (r *rig) holdPose(ctx context.Context) error {
+	// Seed every goal register with where the servo actually IS before energising.
+	// SetTorqueEnabled makes an STS3215 seek its goal-position register, which still holds
+	// whatever was last written -- so on an arm that viam-server drove and the operator then
+	// back-drove by hand, a bare torque-enable snaps all five joints to a stale goal at full
+	// speed, on an arm someone may be holding.
+	positions, err := r.group.Positions(ctx)
+	if err != nil {
+		return fmt.Errorf("reading positions before holding pose: %w", err)
+	}
+	seed := make(map[int]feetech.GoalRequest, len(positions))
+	for id, pos := range positions {
+		seed[id] = feetech.GoalRequest{Position: pos, Speed: holdSeedSpeedSteps, Acc: holdSeedAcc}
+	}
+	if err := r.group.SetGoals(ctx, seed); err != nil {
+		return fmt.Errorf("seeding goal positions before holding pose: %w", err)
+	}
+
 	for _, id := range r.ids {
 		s := r.group.ServoByID(id)
 		if s == nil {
@@ -1021,6 +1059,36 @@ func prepareTravel(ctx context.Context, r *rig, ids []int, travelSteps int, assu
 	return plans, nil
 }
 
+// returnToleranceSteps is how far a joint may sit from its start position after a return
+// leg before the sweep is aborted. ~1 degree.
+const returnToleranceSteps = 12
+
+// verifyAtStart re-reads positions and fails if any joint did not make it back.
+//
+// The return leg can finish without actually arriving: sampleUntilStopped returns nil on
+// timeout once motion has been seen, so a timed-out return is indistinguishable from a
+// completed one. prepareTravel would then read a contaminated position as the NEXT trial's
+// start, making its travel, target and overshoot all wrong with nothing in the CSV to say so.
+// One bad trial would quietly contaminate the whole remaining sweep.
+func verifyAtStart(ctx context.Context, r *rig, plans []travelPlan) error {
+	positions, err := r.group.Positions(ctx)
+	if err != nil {
+		return fmt.Errorf("verifying return to start: %w", err)
+	}
+	for _, p := range plans {
+		got, ok := positions[p.id]
+		if !ok {
+			return fmt.Errorf("verifying return to start: servo %d did not report a position", p.id)
+		}
+		if d := got - p.start; d > returnToleranceSteps || d < -returnToleranceSteps {
+			return fmt.Errorf("servo %d did not return to start: at %d, want %d (off by %d steps, "+
+				"tolerance %d); continuing would measure every later trial from a contaminated "+
+				"position", p.id, got, p.start, d, returnToleranceSteps)
+		}
+	}
+	return nil
+}
+
 // moveTimeout bounds a trial generously: commanded time plus slack, floored so that a
 // clipped move still has room to finish and be recognised as clipped.
 func moveTimeout(commanded time.Duration) time.Duration {
@@ -1042,6 +1110,7 @@ type moveProfile struct {
 	startIdx, endIdx int           // sample indices bounding the motion
 	duration         time.Duration // motion start to motion end
 	peakVel          int           // max |velocity| observed, steps/sec
+	velAtPeakTime    int           // |velocity| actually sampled at timeToPeak
 	timeToPeak       time.Duration // motion start to first sample within 95% of peak
 	overshootSteps   int           // furthest travel beyond target, 0 if none
 	moved            bool          // false if the servo never moved at all
@@ -1080,8 +1149,9 @@ func analyzeMove(samples []sample, target int) moveProfile {
 	// Time to reach 95% of peak, measured from motion start.
 	threshold := p.peakVel * 95 / 100
 	for i := first; i <= last; i++ {
-		if abs(samples[i].vel) >= threshold {
+		if v := abs(samples[i].vel); v >= threshold {
 			p.timeToPeak = samples[i].t - samples[first].t
+			p.velAtPeakTime = v
 			break
 		}
 	}
@@ -1109,7 +1179,11 @@ func (p moveProfile) impliedAccel() float64 {
 	if p.timeToPeak <= 0 {
 		return 0
 	}
-	return float64(p.peakVel) / p.timeToPeak.Seconds()
+	// Divide the velocity ACTUALLY sampled at timeToPeak, not peakVel. timeToPeak is when
+	// velocity first crossed 95% of peak, so peakVel/timeToPeak overstates a linear ramp's
+	// acceleration by 1/0.95 -- a systematic ~5.3% high bias in every row of the column
+	// Task 12 turns into a calibration constant.
+	return float64(p.velAtPeakTime) / p.timeToPeak.Seconds()
 }
 
 // rampBelowSamplingResolution reports that peak velocity was reached within a single
@@ -1452,15 +1526,26 @@ var sampleHeader = []string{"trial", "servo_id", "t_sec", "pos_steps", "pos_deg"
 // csvName builds a per-run filename. Task 12 sweeps several servos into a single -out
 // directory, so the servo and mode must appear in the name or each run would collide with
 // the one before it.
-func csvName(test, suffix string, servo int, fullArm bool) string {
+func csvName(test, suffix string, servo int, fullArm bool, transport string) string {
+	var scope string
 	switch {
 	case fullArm:
-		return fmt.Sprintf("%s_fullarm%s.csv", test, suffix)
+		scope = "_fullarm"
 	case servo > 0:
-		return fmt.Sprintf("%s_servo%d%s.csv", test, servo, suffix)
-	default:
-		return fmt.Sprintf("%s%s.csv", test, suffix)
+		scope = fmt.Sprintf("_servo%d", servo)
 	}
+	return fmt.Sprintf("%s%s_%s%s.csv", test, scope, transport, suffix)
+}
+
+// transportName labels which transport produced a measurement. It belongs in both the
+// filename and the data: the transport changes the sample rate by 3-10x, and therefore
+// changes measured_ms, peak_vel and time_to_peak_sec. A resolution-limited measurement
+// should carry its resolution.
+func transportName(fastFlush bool) string {
+	if fastFlush {
+		return "fastflush"
+	}
+	return "stock"
 }
 
 func init() {
@@ -1694,18 +1779,25 @@ func init() {
 				test, suffix string
 				servo        int
 				fullArm      bool
+				transport    string
 				want         string
 			}{
-				{"writerate", "", 0, false, "writerate.csv"},
-				{"accel", "", 2, false, "accel_servo2.csv"},
-				{"accel", "_samples", 2, false, "accel_servo2_samples.csv"},
-				{"goaltime", "", 1, true, "goaltime_fullarm.csv"},
-				{"goaltime", "_samples", 1, true, "goaltime_fullarm_samples.csv"},
+				{"writerate", "", 0, false, "both", "writerate_both.csv"},
+				{"accel", "", 2, false, "fastflush", "accel_servo2_fastflush.csv"},
+				{"accel", "_samples", 2, false, "stock", "accel_servo2_stock_samples.csv"},
+				{"goaltime", "", 1, true, "fastflush", "goaltime_fullarm_fastflush.csv"},
+				{"goaltime", "_samples", 1, true, "stock", "goaltime_fullarm_stock_samples.csv"},
+				// Same test and servo on different transports must not collide: the
+				// transport changes the sample rate and therefore the measurements.
+				{"accel", "", 2, false, "stock", "accel_servo2_stock.csv"},
 			} {
-				if got := csvName(tc.test, tc.suffix, tc.servo, tc.fullArm); got != tc.want {
-					return fmt.Errorf("csvName(%q,%q,%d,%v) = %q, want %q",
-						tc.test, tc.suffix, tc.servo, tc.fullArm, got, tc.want)
+				if got := csvName(tc.test, tc.suffix, tc.servo, tc.fullArm, tc.transport); got != tc.want {
+					return fmt.Errorf("csvName(%q,%q,%d,%v,%q) = %q, want %q",
+						tc.test, tc.suffix, tc.servo, tc.fullArm, tc.transport, got, tc.want)
 				}
+			}
+			if csvName("accel", "", 2, false, "stock") == csvName("accel", "", 2, false, "fastflush") {
+				return fmt.Errorf("csvName collides across transports")
 			}
 			return nil
 		}},
@@ -1779,7 +1871,7 @@ var gapSweep = []time.Duration{
 const writeRateIterations = 500
 
 func runWriteRate(cfg config) error {
-	out, err := newCSV(cfg.outDir, csvName("writerate", "", 0, false), []string{
+	out, err := newCSV(cfg.outDir, csvName("writerate", "", 0, false, "both"), []string{
 		"transport", "gap_label", "gap_sec", "n", "mean_sec", "p50_sec", "p95_sec", "p99_sec", "max_sec", "rate_hz",
 	})
 	if err != nil {
@@ -1900,8 +1992,8 @@ func sampleUntilStopped(
 	out := make(map[int][]sample, len(ids))
 	t0 := time.Now()
 	deadline := t0.Add(timeout)
-	stoppedRuns := 0
 	sawMotion := false
+	var lastMotionAt time.Duration
 
 	for {
 		if ctx.Err() != nil {
@@ -1926,15 +2018,13 @@ func sampleUntilStopped(
 			}
 		}
 
-		if allStopped {
-			stoppedRuns++
-			// Require motion to have started before treating "stopped" as "finished",
-			// so the initial pre-motion latency does not end the trial immediately.
-			if sawMotion && stoppedRuns >= settleReads {
-				return out, nil
-			}
-		} else {
-			stoppedRuns = 0
+		if !allStopped {
+			lastMotionAt = now
+		}
+		// Require motion to have started before treating "stopped" as "finished", so the
+		// pre-motion latency window does not end the trial immediately.
+		if sawMotion && now-lastMotionAt >= settleWindow {
+			return out, nil
 		}
 
 		if time.Now().After(deadline) {
@@ -1946,7 +2036,78 @@ func sampleUntilStopped(
 	}
 }
 
-// settleReads is how many consecutive all-stopped reads end a trial. The STS3215 reports
-// zero velocity briefly at direction changes and at the start of a ramp, so a single
-// zero read is not conclusive.
-const settleReads = 5
+// settleWindow is how long velocity must read zero CONTINUOUSLY before a trial is treated
+// as finished. Deliberately a duration, not a count of reads.
+//
+// A read count silently couples the settle criterion to the sample rate, and the motion
+// tests default to the fast-flush transport, which samples 3-10x faster than the stock one:
+// 5 reads is ~53ms at 95Hz but only ~5ms at 1kHz. Meanwhile the STS3215 reports velocity in
+// whole steps/sec derived from position deltas, so at low speed it reads 0 for the whole gap
+// between encoder ticks. Worst case in these sweeps is -full-arm joint 1 at 10 deg / 3000 ms,
+// which travels 1/5 of nominal = 7.6 steps/s = one tick every ~132 ms. A count-based settle
+// mistakes that for the end of the move, reports "GoalTime honored perfectly", and then
+// commands a reversal into a still-moving servo.
+//
+// 300ms gives ~2.3x margin over that 132ms worst case.
+const settleWindow = 300 * time.Millisecond
+
+func init() {
+	selftests = append(selftests,
+		selftestCase{"impliedAccel/no-95-percent-bias", func() error {
+			// Linear ramp a = 10000 steps/s^2 sampled every 10ms: 0,100,200,...,1000.
+			// The 95% threshold (950) is first met by the 1000 sample at t=100ms, so
+			// timeToPeak measured from motion start (t=10ms) is 90ms.
+			//
+			// Dividing peakVel by that time would read 1000/0.09 = 11111, overstating the
+			// true 10000 by 1/0.95. Dividing the velocity ACTUALLY sampled at that instant
+			// is exact whenever the crossing sample is the peak, and never biased high.
+			var s []sample
+			pos := 0
+			for i := 0; i <= 10; i++ {
+				s = append(s, sample{t: time.Duration(i) * 10 * time.Millisecond, pos: pos, vel: i * 100})
+				pos += i
+			}
+			s = append(s, sample{t: 110 * time.Millisecond, pos: pos, vel: 0})
+
+			p := analyzeMove(s, 1<<30)
+			if p.velAtPeakTime != 1000 {
+				return fmt.Errorf("velAtPeakTime = %d, want 1000", p.velAtPeakTime)
+			}
+			if want := 90 * time.Millisecond; p.timeToPeak != want {
+				return fmt.Errorf("timeToPeak = %v, want %v", p.timeToPeak, want)
+			}
+			// Now a case where the crossing sample is NOT the peak: 0,960,1000 with the
+			// threshold met at 960. peakVel/timeToPeak would read 1000/0.01 = 100000;
+			// velAtPeakTime/timeToPeak reads 960/0.01 = 96000.
+			// The 500 sample matters: motion must START before the crossing, or
+			// timeToPeak is 0 and impliedAccel short-circuits to 0 via its guard.
+			s2 := []sample{
+				{t: 0, pos: 0, vel: 0},
+				{t: 10 * time.Millisecond, pos: 0, vel: 500},
+				{t: 20 * time.Millisecond, pos: 5, vel: 960},
+				{t: 30 * time.Millisecond, pos: 15, vel: 1000},
+				{t: 40 * time.Millisecond, pos: 25, vel: 0},
+			}
+			p2 := analyzeMove(s2, 1<<30)
+			if p2.velAtPeakTime != 960 {
+				return fmt.Errorf("velAtPeakTime = %d, want 960 (the sample that crossed, not the peak)", p2.velAtPeakTime)
+			}
+			if got := p2.impliedAccel(); math.Abs(got-96000) > 1 {
+				return fmt.Errorf("impliedAccel = %v, want 96000 (peakVel-based would give 100000)", got)
+			}
+			return nil
+		}},
+		selftestCase{"settleWindow/covers-worst-case-gap", func() error {
+			// The slowest trial in either sweep is -full-arm joint 1 at 10 deg / 3000 ms:
+			// it gets 1/5 of nominal travel, so ~7.6 steps/s, i.e. one encoder tick every
+			// ~132ms. The settle window must exceed that or sampling ends mid-move.
+			steps := degToSteps(10) / 5
+			gap := time.Duration(float64(time.Second) * 3.0 / float64(steps))
+			if settleWindow <= gap {
+				return fmt.Errorf("settleWindow %v <= worst-case inter-tick gap %v; sampling would end mid-move",
+					settleWindow, gap)
+			}
+			return nil
+		}},
+	)
+}
