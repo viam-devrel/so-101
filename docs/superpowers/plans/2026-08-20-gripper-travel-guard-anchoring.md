@@ -553,10 +553,24 @@ nil-bus wiring test, which worked only while the default was implausible."
 
 - [ ] **Step 1: Fix the CLAUDE.md gotcha**
 
+Three things, all in the final bullet of the Gotchas section:
+
 The last bullet says the guard narrows the range "keeping the offset's implied center". Replace
-that clause: the window is **anchored** at the encoder centre, which is the jaw's *closed*
-stop, and opens 1200 ticks from there. Add that `DefaultSO101FullCalibration`'s servo-6 entry
-is the same window, and why (a calibration file with no `gripper` key skips the guard).
+that clause: the window is **anchored** at tick 2048, the jaw's *closed* stop on a
+half-turn-homed kit, and opens 1200 ticks from there. Add that `DefaultSO101FullCalibration`'s
+servo-6 entry is the same window, and why (a calibration file with no `gripper` key gets the
+default via `convertOrDefault` and `fromFile=true`, which skips `ReadCalibrationFromServos` and
+therefore the guard).
+
+Add two further notes worth having in the gotchas, both established during implementation:
+
+- **`Grab()` used to return `true` unconditionally.** Under the old `500/3500` default an empty
+  jaw at its closed stop normalized to 51.6%, clearing the `> 15.0` grasp threshold. Anyone
+  who wrote code branching on `Grab()`'s return value before this change was reading a constant.
+- **`feetech.BusConfig` takes an exported `Transport`**, so `ReadCalibrationFromServos`'s
+  bus-dependent paths are unit-testable without serial hardware (see `deadTransport` in
+  `gripper_range_test.go`). This is worth knowing generally — the repo has other paths written
+  off as hardware-only that may not be.
 
 - [ ] **Step 2: Update README's `#### Gripper travel guard` section**
 
@@ -571,8 +585,18 @@ now wrong. Four concrete edits:
    window is *anchored* at the encoder centre, which is the jaw's closed stop on a vendor
    half-turn-homed kit, and opens 1200 ticks from there to `2048`-`3248`.
 3. **`README.md:100-104`** — a fenced block quoting the old warning verbatim, including "Using
-   1548-2548 instead, centered on mid-travel". Replace with the actual new message produced by
-   `warnGripperUsingSafeRange`; paste real output rather than retyping it.
+   1548-2548 instead, centered on mid-travel". Replace with the real messages below, captured
+   from `logging.NewObservedTestLogger` during Task 3 (do not retype or reflow the wording; wrap
+   the fenced block only if the README's existing blocks wrap):
+
+   ```
+   gripper servo 6: its registers report a 4095-tick range (0-4095), wider than the jaw can move (~1251 ticks): it has a homing offset but no real position limits. Using the conservative range 2048-3248 (closed at tick 2048, opening 1200 ticks). The jaw will not open fully; run the calibration workflow to record its real range.
+   ```
+
+   The other three causes substitute for the clause after `gripper servo 6:` — `its registers
+   held no usable range`, `the servo bus is unavailable`, and `<path> has no gripper entry` —
+   and are otherwise identical. Show one in full and describe the rest; four near-identical
+   paragraphs would bury the point.
 4. **Add** two things the section does not currently cover: that the module *default* is now
    this same window (so a calibration file with no `gripper` entry is safe), and that the
    warning also fires when servo 6 simply was not read or the bus was unavailable — not only
