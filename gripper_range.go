@@ -10,8 +10,7 @@ import (
 
 // Servos with a homing offset but untouched position limits read as calibrated (the factory
 // 0/4095 passes ReadCalibrationFromServos's min<max check). For the gripper that scales
-// 0-100% across a whole encoder revolution, driving the jaw into its stops. Rationale and
-// open questions: docs/superpowers/specs/2026-08-18-gripper-travel-guard-design.md.
+// 0-100% across a whole encoder revolution, driving the jaw into its stops.
 const (
 	gripperEncoderTicks = 4095
 
