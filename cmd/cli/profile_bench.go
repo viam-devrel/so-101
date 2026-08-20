@@ -91,6 +91,30 @@ func run(cfg config) error {
 		return fmt.Errorf("no tests to run: %q requires -move", cfg.test)
 	}
 	fmt.Printf("running: %s\n", strings.Join(tests, ", "))
+	for _, t := range tests {
+		var err error
+		switch t {
+		case "writerate":
+			err = runWriteRate(cfg)
+		case "goaltime":
+			err = runGoalTime(cfg)
+		case "accel":
+			err = runAccel(cfg)
+		}
+		if err != nil {
+			return fmt.Errorf("%s: %w", t, err)
+		}
+	}
+	return nil
+}
+
+// runGoalTime is implemented in Task 10; this stub keeps the file building meanwhile.
+func runGoalTime(cfg config) error {
+	return fmt.Errorf("not yet implemented")
+}
+
+// runAccel is implemented in Task 11; this stub keeps the file building meanwhile.
+func runAccel(cfg config) error {
 	return fmt.Errorf("not yet implemented")
 }
 
@@ -1328,4 +1352,107 @@ func init() {
 			return nil
 		}},
 	)
+}
+
+// --- test: writerate ---
+
+// gapSweep is the set of MinCommandGap values probed. The first entry is the "no gap"
+// sentinel: a literal 0 is coerced to 1ms by feetech.NewBus (bus.go:63), which would make
+// it a mislabeled duplicate of the 1ms row.
+var gapSweep = []time.Duration{
+	noGap,
+	250 * time.Microsecond,
+	500 * time.Microsecond,
+	1 * time.Millisecond,
+	2 * time.Millisecond,
+}
+
+const writeRateIterations = 500
+
+func runWriteRate(cfg config) error {
+	out, err := newCSV(cfg.outDir, csvName("writerate", "", 0, false), []string{
+		"gap_label", "gap_sec", "n", "mean_sec", "p50_sec", "p95_sec", "p99_sec", "max_sec", "rate_hz",
+	})
+	if err != nil {
+		return err
+	}
+	defer out.close()
+
+	fmt.Printf("\n%-10s %8s %10s %10s %10s %10s %10s\n",
+		"gap", "rate_hz", "mean", "p50", "p95", "p99", "max")
+
+	for _, gap := range gapSweep {
+		st, err := measureWriteRate(cfg.port, gap)
+		if err != nil {
+			return fmt.Errorf("gap %v: %w", gap, err)
+		}
+		label := gap.String()
+		if gap == noGap {
+			label = "none"
+		}
+		fmt.Printf("%-10s %8.1f %10v %10v %10v %10v %10v\n",
+			label, st.rateHz, st.mean, st.p50, st.p95, st.p99, st.max)
+		out.write([]string{
+			label,
+			strconv.FormatFloat(gap.Seconds(), 'g', -1, 64),
+			strconv.Itoa(st.n),
+			strconv.FormatFloat(st.mean.Seconds(), 'f', 9, 64),
+			strconv.FormatFloat(st.p50.Seconds(), 'f', 9, 64),
+			strconv.FormatFloat(st.p95.Seconds(), 'f', 9, 64),
+			strconv.FormatFloat(st.p99.Seconds(), 'f', 9, 64),
+			strconv.FormatFloat(st.max.Seconds(), 'f', 9, 64),
+			strconv.FormatFloat(st.rateHz, 'f', 2, 64),
+		})
+	}
+
+	fmt.Printf("\nsanity checks: gap=1ms should read ~1000Hz, gap=2ms ~500Hz.\n")
+	fmt.Printf("if gap=none reads the same rate as gap=1ms, the zero-coercion bug is back.\n")
+	return out.close()
+}
+
+// measureWriteRate opens a fresh bus at the given gap and times back-to-back SetGoals
+// writes that command each servo's current position, with torque off.
+func measureWriteRate(port string, gap time.Duration) (latencyStats, error) {
+	r, err := openRig(port, gap, armServoIDs)
+	if err != nil {
+		return latencyStats{}, err
+	}
+	defer r.close()
+
+	var st latencyStats
+	err = r.withSafeShutdown(func(ctx context.Context) error {
+		// Torque off for the whole test: this measures the wire, not the motor.
+		r.disableTorque(ctx)
+
+		positions, err := r.group.Positions(ctx)
+		if err != nil {
+			return fmt.Errorf("read positions: %w", err)
+		}
+
+		goals := make(map[int]feetech.GoalRequest, len(r.ids))
+		for _, id := range r.ids {
+			pos, ok := positions[id]
+			if !ok {
+				return fmt.Errorf("servo %d did not report a position", id)
+			}
+			// Commanding the current position: even with torque somehow enabled, there
+			// is nowhere to move to.
+			goals[id] = feetech.GoalRequest{Position: pos, Speed: 100, Acc: 10}
+		}
+
+		latencies := make([]time.Duration, 0, writeRateIterations)
+		for i := 0; i < writeRateIterations; i++ {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			start := time.Now()
+			if err := r.group.SetGoals(ctx, goals); err != nil {
+				return fmt.Errorf("SetGoals iteration %d: %w", i, err)
+			}
+			latencies = append(latencies, time.Since(start))
+		}
+		st = summarize(latencies)
+		return nil
+	})
+	return st, err
 }
