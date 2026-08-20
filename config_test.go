@@ -2,9 +2,11 @@ package so_arm
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.viam.com/rdk/logging"
 )
@@ -62,6 +64,39 @@ func TestLoadCalibrationFromFile(t *testing.T) {
 			t.Error("Expected default calibration")
 		}
 	})
+}
+
+// A calibration file written by a servo_ids:[1,2,3,4,5] run has no gripper entry.
+// convertOrDefault fills the default and fromFile=true skips the guard entirely, so this is
+// the one fallback that has to announce itself here.
+// The warning lives in LoadCalibration, not LoadFullCalibrationFromFile: only the former knows
+// the configured servo IDs, so only it can gate the way finalizeCalibrationFromServos does.
+func TestLoadCalibrationWarnsWhenTheFileHasNoGripperEntry(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cal.json")
+	require.NoError(t, os.WriteFile(path, []byte(`{"shoulder_pan":{"id":1,"range_min":500,"range_max":3500}}`), 0o600))
+
+	logger, logs := logging.NewObservedTestLogger(t)
+	cfg := &SoArm101Config{CalibrationFile: path, ServoIDs: []int{1, 2, 3, 4, 5, 6}}
+	cal, fromFile := cfg.LoadCalibration(logger)
+
+	require.True(t, fromFile)
+	assert.Equal(t, gripperSafeRangeMin, cal.Gripper.RangeMin)
+	assert.Equal(t, 1, logs.FilterMessageSnippet("run the calibration workflow").Len())
+}
+
+// Mirrors TestFinalizeCalibrationFromServosStaysQuietWhenTheGripperWasNotRequested: an arm-only
+// ServoIDs (no 6) must not warn about a gripper the machine doesn't have, even though the file
+// is (correctly, for an arm-only machine) missing a gripper entry.
+func TestLoadCalibrationStaysQuietWhenGripperIsNotInServoIDs(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cal.json")
+	require.NoError(t, os.WriteFile(path, []byte(`{"shoulder_pan":{"id":1,"range_min":500,"range_max":3500}}`), 0o600))
+
+	logger, logs := logging.NewObservedTestLogger(t)
+	cfg := &SoArm101Config{CalibrationFile: path, ServoIDs: []int{1, 2, 3, 4, 5}}
+	_, fromFile := cfg.LoadCalibration(logger)
+
+	require.True(t, fromFile)
+	assert.Equal(t, 0, logs.FilterMessageSnippet("run the calibration workflow").Len())
 }
 
 func TestSO101ArmConfigValidateMeshRatios(t *testing.T) {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"time"
 
 	"github.com/hipsterbrown/feetech-servo/feetech"
@@ -66,7 +67,8 @@ var DefaultSO101FullCalibration = SO101FullCalibration{
 	},
 	Gripper: &MotorCalibration{
 		ID: 6, DriveMode: 0, HomingOffset: 0,
-		RangeMin: 500, RangeMax: 3500,
+		// The conservative window from gripper_range.go, not the arm joints' 500/3500.
+		RangeMin: gripperSafeRangeMin, RangeMax: gripperSafeRangeMax,
 		NormMode: NormModeRange100, // 0-100% for gripper
 	},
 }
@@ -113,6 +115,14 @@ func (cfg *SoArm101Config) LoadCalibration(logger logging.Logger) (SO101FullCali
 			logger.Warnf("Failed to load calibration from %s: %v, using default calibration", cfg.CalibrationFile, err)
 		}
 		return DefaultSO101FullCalibration, false
+	}
+
+	// convertOrDefault hands back this exact pointer when the file had no "gripper" entry, so
+	// identity is how we tell "the file omitted it" from "the file's gripper happens to match
+	// the default". Gated on ServoIDs the same way finalizeCalibrationFromServos gates its
+	// warning, so an arm-only machine (no servo 6) doesn't warn about a gripper it doesn't have.
+	if calibration.Gripper == DefaultSO101FullCalibration.Gripper && slices.Contains(cfg.ServoIDs, gripperServoID) {
+		warnGripperUsingSafeRange(fmt.Sprintf("%s has no gripper entry", cfg.CalibrationFile), logger)
 	}
 
 	if logger != nil {
@@ -205,6 +215,12 @@ func LoadFullCalibrationFromFile(filePath string, logger logging.Logger) (SO101F
 		return SO101FullCalibration{}, fmt.Errorf("calibration validation failed: %w", err)
 	}
 
+	// The missing-gripper-entry warning lives in LoadCalibration, not here: only that caller
+	// knows the configured servo IDs, so only it can gate the warning the way
+	// finalizeCalibrationFromServos gates its own (arm-only machines shouldn't hear about a
+	// gripper they don't have). Callers that use this function directly -- reload_calibration
+	// (arm.go) -- don't get the warning; that command is on the arm, which has no servo IDs of
+	// its own to gate against here.
 	return calibration, nil
 }
 
@@ -403,7 +419,7 @@ func ReadCalibrationFromServos(
 		if logger != nil {
 			logger.Warn("Cannot read servo calibration: bus is nil")
 		}
-		return DefaultSO101FullCalibration
+		return finalizeCalibrationFromServos(nil, servoIDs, "the servo bus is unavailable", logger)
 	}
 
 	successCount := 0
@@ -454,5 +470,9 @@ func ReadCalibrationFromServos(
 		logger.Debugf("Calibration loaded from servos: %d/%d successful", successCount, len(servoIDs))
 	}
 
-	return FromFeetechCalibrationMap(calibrations)
+	// Registers can report a range the jaw cannot reach, and a servo may not answer at all.
+	// Narrow and announce before anyone maps percentages onto it. Callers with a calibration
+	// file never reach here.
+	return finalizeCalibrationFromServos(calibrations, servoIDs,
+		"its registers held no usable range", logger)
 }

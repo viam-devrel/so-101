@@ -237,3 +237,37 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
   every move silently. `TestSimulatedConstructorWiresGoalCloud` covers the equivalent line
   in `newSimulatedSO101` and the shared `resolveGoalCloudConfig` contract, but the hardware
   constructor's line is guarded only by review.
+- **The gripper's calibrated range is a scale factor; the arm's is only a center point.**
+  `NormModeRange100` (servo 6) maps 0-100% linearly onto `[RangeMin, RangeMax]`, so a wrong
+  range rescales every command. `NormModeDegrees` (servos 1-5) takes only
+  `center = (min+max)/2` and then clamps, so the same wrong range costs ~4°. This is why an
+  uncalibrated servo is survivable for the arm and drives the jaw into its stops. `HomingOffset`
+  is stored but never used in `Normalize`/`Denormalize` — the servo firmware applies it itself
+  (`Present_Position = Actual_Position - Homing_Offset`).
+- **`0`/`4095` position limits mean "unset", not "calibrated".** `ReadCalibrationFromServos`
+  accepts them (`min < max && max <= 4095`), so kits that ship with a homing offset but no
+  limits read as calibrated. `guardGripperTravel` (`gripper_range.go`) narrows the gripper's
+  range when it is too wide to be real. The window is **anchored, not centered**: tick 2048
+  (`gripperClosedStopTick`) is the jaw's *closed* stop on a vendor half-turn-homed kit, not
+  its mid-travel, and the window opens `gripperSafeTravelTicks = 1200` ticks from there
+  (`2048..3248`). `DefaultSO101FullCalibration`'s servo-6 entry is this same window, not the
+  arm joints' `500/3500` — because `LoadFullCalibrationFromFile`'s `convertOrDefault` fills a
+  *missing* `gripper` key with the default and returns `fromFile=true`, which makes
+  `registry.go:177` skip both the servo read and the guard, so an unsafe default there would
+  never get caught. The guard itself runs inside `ReadCalibrationFromServos`, so a calibration
+  file with a `gripper` entry bypasses it entirely. `resetCalibrationRegisters` does **not**
+  run at calibration start — `startCalibration` only resets in-memory struct fields. It runs
+  from `setHomingPosition`, so `0`/`4095` is reached only by abandoning *after* `set_homing`,
+  and that same step also writes a fresh homing offset centered on wherever the jaw was told to
+  sit ("move to the middle of its range of motion", `calibration.go:375`). So this path does not
+  land in the vendor's closed-stop state the anchor assumes — it lands in the mid-travel-homed
+  state the anchor is *wrong* for (see the design doc's "conflict this design knowingly
+  accepts"). Abandoning *before* `set_homing` leaves the registers untouched.
+- **`Grab()` used to return `true` unconditionally.** Under the old `500/3500` default an
+  empty jaw resting at its closed stop (tick 2048) normalized to 51.6%, clearing the `> 15.0`
+  grasp threshold regardless of whether anything was held. Anyone who wrote code branching on
+  `Grab()`'s return value before this change was reading a constant.
+- **`feetech.BusConfig` takes an exported `Transport`**, so `ReadCalibrationFromServos`'s
+  bus-dependent paths are unit-testable without serial hardware (see `deadTransport` in
+  `gripper_range_test.go`). Worth knowing generally — the repo has other paths written off as
+  hardware-only that may not be.

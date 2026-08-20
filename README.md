@@ -83,11 +83,21 @@ The module uses this calibration priority:
 
 1. **File-based** - If `calibration_file` is configured and exists, load from file
 2. **Servo registers** - If no file configured/found, read homing offset and range limits from servo hardware
-3. **Hardcoded defaults** - If servo reads fail, use default values (offset=0, range=500-3500)
+3. **Hardcoded defaults** - If servo reads fail, use default values (offset=0, range=500-3500 for the arm joints; the gripper defaults to the conservative travel window described below)
 
 The servo register fallback provides better out-of-box experience by using actual hardware settings instead of generic defaults. Each startup without a calibration file will re-read from servos to ensure fresh data.
 
 **Note:** Calibration read from servos is used in-memory only and not automatically saved. To persist servo-read calibration, use the calibration sensor component's workflow.
+
+#### Gripper travel guard
+
+A gripper whose position limits are still at the factory `0`-`4095` reads as calibrated, but that range is used as a linear scale factor — 0-100% would map across a full encoder revolution, several times the jaw's travel, driving it into its mechanical stops until the servo latches its overload protection.
+
+So when servo 6's range is too wide to be real, the module substitutes a conservative window of ticks `2048`-`3248` and logs a warning naming the cause. The same window is the module's default, so a calibration file that omits its `gripper` entry is also safe. A range that could plausibly be real is never overridden.
+
+**The jaw will not reach full open or closed in this mode.** It is a safe fallback, not a substitute for calibration — run the [calibration sensor's](#model-devrelso101calibration) workflow to record the real range, after which the guard no longer applies.
+
+**One case it does not cover.** The window assumes tick `2048` is the jaw's closed stop, which holds on kits homed with the vendor's half-turn convention. This module's own calibration workflow homes from the *middle* of the jaw's travel instead, so a run abandoned after `set_homing` leaves `2048` at mid-travel — and from there `Open()` can strain against the far stop. Finish the workflow rather than relying on the fallback.
 
 ### Motion and speed
 
