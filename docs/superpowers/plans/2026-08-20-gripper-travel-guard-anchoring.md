@@ -49,7 +49,7 @@ func TestGripperClosesAtTheClosedStop(t *testing.T) {
 	closedTick, err := cal.Denormalize(0)
 	require.NoError(t, err)
 	assert.Equal(t, 2048, closedTick,
-		"0%% is grab; it must land on the measured closed stop, not past it")
+		"0% is grab; it must land on the measured closed stop, not past it")
 
 	openTick, err := cal.Denormalize(100)
 	require.NoError(t, err)
@@ -102,7 +102,16 @@ const (
 
 In `guardGripperTravel`, replace `safeMin, safeMax := safeGripperRange()` and the two
 assignments with `guarded.RangeMin, guarded.RangeMax = gripperSafeRangeMin, gripperSafeRangeMax`.
-Leave the `logger.Warnf` alone for now — Task 3 replaces it.
+
+**The `logger.Warnf` below it also passes `safeMin, safeMax` as its last two arguments** — swap
+those for `gripperSafeRangeMin, gripperSafeRangeMax` too, or the package will not compile:
+
+```
+./gripper_range.go:65:69: undefined: safeMin
+./gripper_range.go:65:78: undefined: safeMax
+```
+
+Leave the message *wording* alone for now; Task 3 rewrites it.
 
 - [ ] **Step 5: Update the three test call sites**
 
@@ -117,7 +126,7 @@ And rewrite the centering test, whose middle assertion is now the bug:
 // Must stop short of the mechanical stops, and start exactly on the closed one.
 func TestSafeGripperRangeClosesAtTheClosedStop(t *testing.T) {
 	assert.Equal(t, gripperEncoderCenter, gripperSafeRangeMin,
-		"0%% is grab: the window starts on the jaw's closed stop")
+		"0% is grab: the window starts on the jaw's closed stop")
 	assert.Less(t, gripperSafeRangeMax-gripperSafeRangeMin, gripperTravelTicks(),
 		"the safe window must be narrower than the jaw's modeled travel")
 	assert.True(t, gripperRangeIsPlausible(gripperSafeRangeMin, gripperSafeRangeMax),
@@ -135,6 +144,10 @@ centered fiction — with the reading taken off a kit:
 ```go
 		{"a real calibration, measured", 2030, 3481, true},
 ```
+
+While here, rename the `"module placeholder default"` case (`gripper_range_test.go:25`) to
+`"the arm joints' 500/3500"` — after Task 2 it is no longer the module's default, though it is
+still a valid implausible range and the case should stay.
 
 Span 1451 against a threshold of 1251 × 1.25 = 1563.75. Keep the multiplication in the
 implementation; do not hardcode 1564, which is a tick wider.
@@ -202,17 +215,9 @@ func TestGrabReportsNothingHeldWhenTheJawReachesItsClosedStop(t *testing.T) {
 
 	fake := newFakeServoArm()
 	fake.percent = restingPercent
-	deps := resource.Dependencies{fake.Name(): fake}
-	conf := resource.Config{
-		Name:                "gripper",
-		API:                 gripper.API,
-		Model:               SO101GripperModel,
-		ConvertedAttributes: &SO101GripperConfig{Arm: fake.Name().Name},
-	}
-	res, err := newSO101Gripper(context.Background(), deps, conf, logging.NewTestLogger(t))
-	require.NoError(t, err)
+	g := newTestGripper(t, fake) // gripper_test.go:146, as the file's other tests do
 
-	grabbed, err := res.(*so101Gripper).Grab(context.Background(), nil)
+	grabbed, err := g.Grab(context.Background(), nil)
 	require.NoError(t, err)
 	assert.False(t, grabbed, "an empty jaw at its closed stop is not holding anything")
 }
@@ -511,11 +516,30 @@ that clause: the window is **anchored** at the encoder centre, which is the jaw'
 stop, and opens 1200 ticks from there. Add that `DefaultSO101FullCalibration`'s servo-6 entry
 is the same window, and why (a calibration file with no `gripper` key skips the guard).
 
-- [ ] **Step 2: Check README's gripper section**
+- [ ] **Step 2: Update README's `#### Gripper travel guard` section**
 
-Run: `grep -n "500\|3500\|calibrat" README.md | head -30`
-If the gripper model's section documents a range or the uncalibrated behavior, update it. If it
-does not, skip — do not add a section that was not there.
+Not optional — `README.md:92-108` documents this feature in detail and every specific in it is
+now wrong. Four concrete edits:
+
+1. **`README.md:86`** — "Hardcoded defaults - If servo reads fail, use default values (offset=0,
+   range=500-3500)". Servo 6 is no longer 500-3500; say the gripper defaults to the conservative
+   travel window instead.
+2. **`README.md:98`** — "keeps the homing offset's mid-travel point and substitutes a
+   conservative window around it (`1548`-`2548`)". Both halves are the bug being fixed: the
+   window is *anchored* at the encoder centre, which is the jaw's closed stop on a vendor
+   half-turn-homed kit, and opens 1200 ticks from there to `2048`-`3248`.
+3. **`README.md:100-104`** — a fenced block quoting the old warning verbatim, including "Using
+   1548-2548 instead, centered on mid-travel". Replace with the actual new message produced by
+   `warnGripperUsingSafeRange`; paste real output rather than retyping it.
+4. **Add** two things the section does not currently cover: that the module *default* is now
+   this same window (so a calibration file with no `gripper` entry is safe), and that the
+   warning also fires when servo 6 simply was not read or the bus was unavailable — not only
+   when it reports a too-wide range.
+
+Also add a short note reflecting the spec's "The conflict this design knowingly accepts": the
+window assumes the vendor half-turn convention where the encoder centre is the closed stop, and
+a gripper homed from mid-travel (this module's own calibration prompt) will not open fully and
+may strain — finish the calibration workflow.
 
 - [ ] **Step 3: Commit the hardware probe**
 
