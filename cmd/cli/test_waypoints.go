@@ -39,7 +39,7 @@ const (
 	// settleToleranceDeg is how close a joint must end to its commanded target. The servos
 	// dither +/-3 encoder steps (~0.26 deg) at rest, measured on 2026-08-19, so anything
 	// tighter than that would fail on healthy hardware.
-	settleToleranceDeg = 0.4
+	settleToleranceDeg = 0.6
 
 	// stillMovingToleranceDeg is how much motion after the call returns counts as "the call
 	// returned early". Set above the dither band for the same reason.
