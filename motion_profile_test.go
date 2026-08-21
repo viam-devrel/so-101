@@ -106,11 +106,17 @@ func TestCoordinatedProfiles(t *testing.T) {
 		// k = 0.0001: speed scales to 0.005 deg/s and acceleration to 0.05 deg/s^2, both
 		// of which round to 0 without the floors.
 		got := coordinatedProfiles([]float64{100, 0.01}, refSpeed, refAccel, nil)
-		if got[1].speedSteps < minSpeedSteps {
-			t.Errorf("speedSteps = %d, want >= %d", got[1].speedSteps, minSpeedSteps)
+		// EXACTLY the floor, not merely at-or-above it. 50 deg/s * 0.0001 is 0.005 deg/s,
+		// which rounds to 0 steps and floors to 1. Asserting only ">= 1" would also accept
+		// 34 steps -- what resolveSpeedDegsPerSec's 3 deg/s floor produces -- so a
+		// substitution of that function for degPerSecToStepsPerSec would pass unnoticed
+		// while silently destroying scaling for every joint below k ~ 0.06.
+		if got[1].speedSteps != minSpeedSteps {
+			t.Errorf("speedSteps = %d, want exactly %d (a wrong conversion helper would "+
+				"floor much higher and still satisfy a >= check)", got[1].speedSteps, minSpeedSteps)
 		}
-		if got[1].accUnits < minAccUnits {
-			t.Errorf("accUnits = %d, want >= %d", got[1].accUnits, minAccUnits)
+		if got[1].accUnits != minAccUnits {
+			t.Errorf("accUnits = %d, want exactly %d", got[1].accUnits, minAccUnits)
 		}
 	})
 
