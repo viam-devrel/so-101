@@ -2,6 +2,7 @@ package so_arm
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"runtime"
 	"strings"
@@ -19,7 +20,9 @@ import (
 type ControllerEntry struct {
 	config      *SoArm101Config
 	calibration SO101FullCalibration // the seed newBusSession wraps servos in
-	refCount    int64                // Atomic reference counter
+	refCount    int                  // live handles; guarded by mu, never atomics
+	pins        int                  // in-flight users that are NOT handles
+	torndown    bool                 // once guard; also hides the entry from a new acquire
 	mu          sync.RWMutex         // guards bookkeeping: config, calibration, refCount
 
 	port     string              // for error messages; no longer only in config
@@ -29,6 +32,78 @@ type ControllerEntry struct {
 
 	session atomic.Pointer[busSession] // nil == disconnected
 	gen     atomic.Uint64              // monotonic session counter
+}
+
+// --- Entry lifecycle ---
+//
+// refCount counts live handles. pins counts in-flight users that are not handles: serial
+// hotplug's reconnect goroutine, and any future mid-flight acquire. Whichever of the two
+// reaches zero LAST performs the teardown. Release is idempotent via a per-handle once, so
+// the releasing handle structurally cannot come back and finish the job -- the deferred
+// close is an entry-level responsibility.
+//
+// pins ships built, tested, and deliberately unwired: nothing on the acquire path takes one,
+// because getExistingController holds entry.mu for its whole body while tryPin locks the
+// same mutex. It exists so hotplug's reconnect loop has a correct primitive to attach to.
+
+// tryPin registers a non-handle user of this entry, or refuses once teardown has begun.
+// The refusal is what keeps hotplug from starting a reconnect loop for a dying entry.
+func (e *ControllerEntry) tryPin() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.torndown {
+		return false
+	}
+	e.pins++
+	return true
+}
+
+// unpin drops a pin and tears the entry down if it was the last user.
+func (e *ControllerEntry) unpin() {
+	e.mu.Lock()
+	e.pins--
+	e.mu.Unlock()
+	e.teardownIfLast()
+}
+
+// teardownIfLast closes the bus and evicts the entry, at most once.
+//
+// It takes registry.mu BEFORE entry.mu and evicts inside the same critical section that sets
+// torndown. Both halves matter. Taking entry.mu first would invert the order against
+// GetController, which holds r.mu and then entry.mu. And evicting after releasing the locks
+// would leave a window where GetController finds a dead entry, raises its refCount, and
+// hands back a permanently disconnected handle -- after which the eviction lands and the
+// next acquire opens a SECOND bus on the same port.
+//
+// The bus is closed only after both locks are released: Close can block, and nothing else
+// needs to wait behind it. In-flight bus ops are safe, since feetech.Bus.Close sets its
+// closed flag under its own mutex -- they finish and later ones get ErrBusClosed.
+func (e *ControllerEntry) teardownIfLast() {
+	r := e.registry
+	if r == nil {
+		return // entries built by hand in tests
+	}
+
+	r.mu.Lock()
+	e.mu.Lock()
+	if e.torndown || e.refCount > 0 || e.pins > 0 {
+		e.mu.Unlock()
+		r.mu.Unlock()
+		return
+	}
+	e.torndown = true
+	sess := e.session.Swap(nil)
+	if r.entries[e.port] == e {
+		delete(r.entries, e.port)
+	}
+	e.mu.Unlock()
+	r.mu.Unlock()
+
+	if sess != nil && sess.bus != nil {
+		if err := sess.bus.Close(); err != nil && e.logger != nil {
+			e.logger.Warnf("error closing shared bus for port %s: %v", e.port, err)
+		}
+	}
 }
 
 // currentCalibration reads the session-rebuild seed.
@@ -78,13 +153,20 @@ func (r *ControllerRegistry) AcquireController(
 	return h, nil
 }
 
+// errEntryTornDown means the entry found in the map was already torn down, so the caller
+// should build a fresh one rather than join it.
+var errEntryTornDown = errors.New("controller entry torn down")
+
 func (r *ControllerRegistry) GetController(portPath string, config *SoArm101Config, calibration SO101FullCalibration, fromFile bool) (*ControllerHandle, error) {
 	r.mu.RLock()
 	entry, exists := r.entries[portPath]
 	r.mu.RUnlock()
 
 	if exists {
-		return r.getExistingController(entry, config, calibration, fromFile)
+		h, err := r.getExistingController(entry, config, calibration, fromFile)
+		if !errors.Is(err, errEntryTornDown) {
+			return h, err
+		}
 	}
 
 	return r.createNewController(portPath, config, calibration, fromFile)
@@ -94,12 +176,19 @@ func (r *ControllerRegistry) getExistingController(entry *ControllerEntry, confi
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
 
+	// Belt-and-braces: teardownIfLast evicts under the same lock that sets torndown, so
+	// this should be unreachable. Keeping the check means a future refactor that reopens
+	// that window fails loudly here instead of handing back a dead handle.
+	if entry.torndown {
+		return nil, errEntryTornDown
+	}
+
 	if entry.session.Load() == nil {
 		return nil, fmt.Errorf("controller not available for port %s", entry.config.Port)
 	}
 
 	if !configsEqual(entry.config, config) {
-		currentRefCount := atomic.LoadInt64(&entry.refCount)
+		currentRefCount := entry.refCount
 		configDiff := compareConfigs(entry.config, config)
 		return nil, fmt.Errorf("conflict: existing controller uses different config (refCount: %d): %s",
 			currentRefCount, configDiff)
@@ -121,7 +210,7 @@ func (r *ControllerRegistry) getExistingController(entry *ControllerEntry, confi
 		entry.calibration = calibration
 	}
 
-	atomic.AddInt64(&entry.refCount, 1)
+	entry.refCount++
 	r.trackCaller(entry.config.Port)
 
 	return &ControllerHandle{entry: entry, logger: config.Logger}, nil
@@ -132,7 +221,12 @@ func (r *ControllerRegistry) createNewController(portPath string, config *SoArm1
 	defer r.mu.Unlock()
 
 	if entry, exists := r.entries[portPath]; exists {
-		return r.getExistingController(entry, config, calibration, fromFile)
+		h, err := r.getExistingController(entry, config, calibration, fromFile)
+		if !errors.Is(err, errEntryTornDown) {
+			return h, err
+		}
+		// Torn down under us: fall through and build a fresh entry below.
+		delete(r.entries, portPath)
 	}
 
 	entry := &ControllerEntry{
@@ -185,7 +279,7 @@ func (r *ControllerRegistry) createNewController(portPath string, config *SoArm1
 
 	entry.calibration = finalCalibration
 	entry.session.Store(newBusSession(bus, finalCalibration, entry.gen.Add(1)))
-	atomic.StoreInt64(&entry.refCount, 1)
+	entry.refCount = 1
 
 	r.entries[portPath] = entry
 
@@ -198,6 +292,12 @@ func (r *ControllerRegistry) createNewController(portPath string, config *SoArm1
 	return &ControllerHandle{entry: entry, logger: config.Logger}, nil
 }
 
+// ReleaseController drops one reference by port path.
+//
+// It delegates to teardownIfLast rather than closing the bus itself. Its old body held
+// entry.mu and then r.mu -- the only reversed lock order in this package, against the
+// r.mu-then-entry.mu that both acquire paths and teardownIfLast use. Keeping that body,
+// even as a compatibility shim, would have been an ABBA deadlock waiting to happen.
 func (r *ControllerRegistry) ReleaseController(portPath string) {
 	r.mu.RLock()
 	entry, exists := r.entries[portPath]
@@ -208,24 +308,10 @@ func (r *ControllerRegistry) ReleaseController(portPath string) {
 	}
 
 	entry.mu.Lock()
-	defer entry.mu.Unlock()
+	entry.refCount--
+	entry.mu.Unlock()
 
-	currentRefCount := atomic.AddInt64(&entry.refCount, -1)
-	if currentRefCount <= 0 {
-		if sess := entry.session.Swap(nil); sess != nil && sess.bus != nil {
-			if err := sess.bus.Close(); err != nil && entry.config != nil && entry.config.Logger != nil {
-				entry.config.Logger.Warnf("error closing shared controller for port %s: %v", portPath, err)
-			}
-		}
-
-		r.mu.Lock()
-		delete(r.entries, portPath)
-		r.mu.Unlock()
-
-		entry.config = nil
-		entry.calibration = SO101FullCalibration{}
-		atomic.StoreInt64(&entry.refCount, 0)
-	}
+	entry.teardownIfLast()
 }
 
 func (r *ControllerRegistry) ForceCloseController(portPath string) error {
@@ -241,14 +327,16 @@ func (r *ControllerRegistry) ForceCloseController(portPath string) error {
 	}
 
 	entry.mu.Lock()
-	defer entry.mu.Unlock()
+	entry.torndown = true // so a later teardownIfLast cannot close the bus twice
+	sess := entry.session.Swap(nil)
+	entry.config = nil
+	entry.calibration = SO101FullCalibration{}
+	entry.refCount = 0
+	entry.mu.Unlock()
 
 	var err error
-	if sess := entry.session.Swap(nil); sess != nil {
+	if sess != nil && sess.bus != nil {
 		err = sess.bus.Close()
-		entry.config = nil
-		entry.calibration = SO101FullCalibration{}
-		atomic.StoreInt64(&entry.refCount, 0)
 	}
 
 	return err
@@ -266,7 +354,7 @@ func (r *ControllerRegistry) GetControllerStatus(portPath string) (int64, bool, 
 	entry.mu.RLock()
 	defer entry.mu.RUnlock()
 
-	currentRefCount := atomic.LoadInt64(&entry.refCount)
+	currentRefCount := entry.refCount
 	hasController := entry.session.Load() != nil
 	configSummary := ""
 
@@ -280,7 +368,7 @@ func (r *ControllerRegistry) GetControllerStatus(portPath string) (int64, bool, 
 			entry.config.Port, entry.config.Baudrate, calibrationInfo)
 	}
 
-	return currentRefCount, hasController, configSummary
+	return int64(currentRefCount), hasController, configSummary
 }
 
 func (r *ControllerRegistry) GetCurrentCalibration(portPath string) SO101FullCalibration {

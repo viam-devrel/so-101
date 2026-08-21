@@ -80,7 +80,7 @@ func TestSingleControllerAccess(t *testing.T) {
 		t.Fatal("Registry entry not found for port")
 	}
 
-	refCount := atomic.LoadInt64(&entry.refCount)
+	refCount := entry.refCount
 	if refCount != 1 {
 		t.Fatalf("Expected refCount 1, got %d", refCount)
 	}
@@ -182,31 +182,33 @@ func TestReferenceCountingLogic(t *testing.T) {
 	entry := &ControllerEntry{
 		config:      config,
 		calibration: DefaultSO101FullCalibration,
+		port:        port,
+		registry:    registry,
 		refCount:    3, // Start with 3 references
 	}
 	registry.entries[port] = entry
 
 	// Test decrement
-	initialCount := atomic.LoadInt64(&entry.refCount)
+	initialCount := entry.refCount
 	if initialCount != 3 {
 		t.Fatalf("Expected initial refCount 3, got %d", initialCount)
 	}
 
 	// Simulate releases
-	atomic.AddInt64(&entry.refCount, -1)
-	count1 := atomic.LoadInt64(&entry.refCount)
+	entry.refCount--
+	count1 := entry.refCount
 	if count1 != 2 {
 		t.Fatalf("Expected refCount 2 after first release, got %d", count1)
 	}
 
-	atomic.AddInt64(&entry.refCount, -1)
-	count2 := atomic.LoadInt64(&entry.refCount)
+	entry.refCount--
+	count2 := entry.refCount
 	if count2 != 1 {
 		t.Fatalf("Expected refCount 1 after second release, got %d", count2)
 	}
 
-	atomic.AddInt64(&entry.refCount, -1)
-	count3 := atomic.LoadInt64(&entry.refCount)
+	entry.refCount--
+	count3 := entry.refCount
 	if count3 != 0 {
 		t.Fatalf("Expected refCount 0 after third release, got %d", count3)
 	}
@@ -222,6 +224,8 @@ func TestCleanupOnZeroRefs(t *testing.T) {
 	entry := &ControllerEntry{
 		config:      config,
 		calibration: DefaultSO101FullCalibration,
+		port:        port,
+		registry:    registry,
 		refCount:    1,
 	}
 	registry.entries[port] = entry
@@ -255,6 +259,8 @@ func TestForceCloseController(t *testing.T) {
 		entry := &ControllerEntry{
 			config:      config,
 			calibration: DefaultSO101FullCalibration,
+			port:        port,
+			registry:    registry,
 			refCount:    2, // Multiple references
 		}
 		registry.entries[port] = entry
@@ -357,6 +363,8 @@ func TestGetControllerStatus(t *testing.T) {
 	entry := &ControllerEntry{
 		config:      config,
 		calibration: DefaultSO101FullCalibration,
+		port:        port,
+		registry:    registry,
 		refCount:    2,
 	}
 	registry.entries[port] = entry
@@ -464,4 +472,81 @@ func TestFailedOpenLeavesNoPoisonedEntry(t *testing.T) {
 	_, err = r.GetController("/dev/fake0", cfg, DefaultSO101FullCalibration, true)
 	require.NoError(t, err, "the second attempt must reopen, not replay a cached error")
 	assert.Equal(t, 2, attempts)
+}
+
+func TestReleaseClosesTheBusOnlyAfterTheLastHolder(t *testing.T) {
+	ft := newFakeTransport()
+	r, h1 := testRegistryAndHandle(t, ft)
+	h2 := acquireTestHandle(t, r)
+	entry := h1.entry
+
+	h1.Release()
+	assert.NotNil(t, entry.session.Load(), "one holder left; the bus must stay open")
+	assert.Equal(t, 0, ft.closeCount())
+
+	h2.Release()
+	r.mu.RLock()
+	_, present := r.entries["/dev/fake0"]
+	r.mu.RUnlock()
+	assert.False(t, present, "the last release must evict the entry")
+	assert.Equal(t, 1, ft.closeCount())
+}
+
+func TestReleaseIsIdempotent(t *testing.T) {
+	ft := newFakeTransport()
+	r, h := testRegistryAndHandle(t, ft)
+	h.Release()
+	h.Release() // a double Close must not double-decrement into a negative refCount
+	assert.Equal(t, 1, ft.closeCount())
+
+	h2 := acquireTestHandle(t, r)
+	assert.NotNil(t, h2.entry.session.Load(), "a fresh acquire must open a fresh entry")
+}
+
+func TestTryPinRefusesOnceTeardownHasBegun(t *testing.T) {
+	ft := newFakeTransport()
+	_, h := testRegistryAndHandle(t, ft)
+	entry := h.entry
+
+	h.Release() // last holder: teardown runs
+	assert.False(t, entry.tryPin(), "a pin after teardown must be refused, not granted")
+}
+
+func TestTeardownRunsExactlyOnce(t *testing.T) {
+	ft := newFakeTransport()
+	_, h := testRegistryAndHandle(t, ft)
+	entry := h.entry
+
+	h.Release()
+	entry.teardownIfLast() // a redundant call must be inert
+	entry.teardownIfLast()
+	assert.Equal(t, 1, ft.closeCount())
+}
+
+func TestAPinKeepsTheEntryAliveAcrossTheLastRelease(t *testing.T) {
+	ft := newFakeTransport()
+	_, h := testRegistryAndHandle(t, ft)
+	entry := h.entry
+
+	require.True(t, entry.tryPin(), "a pin on a live entry must be granted")
+
+	h.Release()
+	assert.Equal(t, 0, ft.closeCount(),
+		"the pin holder is still using the entry; teardown must wait for it")
+	assert.NotNil(t, entry.session.Load())
+
+	entry.unpin()
+	assert.Equal(t, 1, ft.closeCount(), "the last decrement performs the teardown")
+}
+
+func TestAcquireNeverJoinsATornDownEntry(t *testing.T) {
+	ft := newFakeTransport()
+	r, h := testRegistryAndHandle(t, ft)
+	torn := h.entry
+
+	h.Release()
+	h2 := acquireTestHandle(t, r)
+	assert.NotSame(t, torn, h2.entry,
+		"joining a torn-down entry would hand back a permanently dead handle")
+	assert.NotNil(t, h2.entry.session.Load())
 }

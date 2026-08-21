@@ -149,7 +149,12 @@ func (ft *fakeTransport) Read(p []byte) (int, error) {
 	return n, nil
 }
 
-func (ft *fakeTransport) Close() error                       { return nil }
+func (ft *fakeTransport) Close() error {
+	ft.mu.Lock()
+	defer ft.mu.Unlock()
+	ft.closes++
+	return nil
+}
 func (ft *fakeTransport) SetReadTimeout(time.Duration) error { return nil }
 func (ft *fakeTransport) Flush() error                       { return nil }
 

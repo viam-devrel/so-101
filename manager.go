@@ -546,8 +546,8 @@ func GetControllerStatus() (int64, bool, string) {
 
 	for _, entry := range globalRegistry.entries {
 		entry.mu.RLock()
-		refCount := atomic.LoadInt64(&entry.refCount)
-		totalRefCount += refCount
+		refCount := entry.refCount
+		totalRefCount += int64(refCount)
 
 		if entry.config != nil {
 			calibrationInfo := "default"
@@ -706,16 +706,24 @@ func (h *ControllerHandle) SetServoBaudRate(ctx context.Context, id, baudRate in
 	})
 }
 
-// Release drops this handle's claim on the port.
-//
-// Currently a no-op, exactly as ReleaseSharedController has always been: trackCaller keys
-// callerPorts by the PC inside GetSharedControllerWithCalibration while releaseFromCaller
-// looks it up by the PC inside the caller's Close, so those PCs never match and
-// ReleaseController never runs. Making this actually release is its own change, because it
-// is what makes the calibration sensor's recording-goroutine use-after-close reachable.
+// Release drops this handle's claim on the port, closing the shared bus and evicting the
+// entry once this was the last holder.
 func (h *ControllerHandle) Release() {
 	h.releaseOnce.Do(func() {
 		h.released.Store(true)
-		globalRegistry.releaseFromCaller()
+
+		e := h.entry
+		e.mu.Lock()
+		e.refCount--
+		e.mu.Unlock()
+
+		// NO lock held here. Serial hotplug inserts e.cancelReconnect() at this point, and
+		// that path takes reconnectMu then entry.mu -- holding entry.mu here would invert
+		// the lock order.
+		//
+		// teardownIfLast is called unconditionally rather than behind a precomputed flag:
+		// it re-reads both counters under the lock, so a concurrent unpin and Release in
+		// either order reach a correct decision exactly once.
+		e.teardownIfLast()
 	})
 }
