@@ -496,6 +496,23 @@ func TestReduceReferenceAndCaps(t *testing.T) {
 		}
 	})
 
+	t.Run("an acceleration cap on a SHORT-travel joint slows the whole move", func(t *testing.T) {
+		// The acceleration analogue of the short-joint speed case above, and it is the only
+		// thing that distinguishes reference-reduction from per-joint clamping for
+		// acceleration: capping the REFERENCE joint (k=1) cannot tell them apart, because
+		// cap/k == cap there. Capping joint 1 at 50 with k=0.25 binds the shared reference
+		// to 200, so the long joint drops from 500 to 200.
+		caps := []jointLimits{{}, {maxAccelDegsPerSecSq: 50}}
+		got := coordinatedProfiles([]float64{40, 10}, refSpeed, refAccel, caps)
+		if want := degPerSecSqToAccUnits(200); got[0].accUnits != want {
+			t.Errorf("long joint acc = %d, want %d (a short joint's acceleration cap must "+
+				"bind everyone)", got[0].accUnits, want)
+		}
+		if want := degPerSecSqToAccUnits(50); got[1].accUnits != want {
+			t.Errorf("capped short joint acc = %d, want %d", got[1].accUnits, want)
+		}
+	})
+
 	t.Run("a zero cap means uncapped, not stopped", func(t *testing.T) {
 		caps := []jointLimits{{maxSpeedDegsPerSec: 0}, {}}
 		got := coordinatedProfiles([]float64{40, 10}, refSpeed, refAccel, caps)
