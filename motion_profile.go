@@ -8,13 +8,15 @@ import (
 	"go.viam.com/rdk/utils"
 )
 
-// Acceleration-register calibration, measured on hardware 2026-08-19 (see
-// docs/superpowers/results/2026-08-19-bench-run.md).
+// Acceleration-register calibration, measured on an SO-101 (STS3215, firmware 3.10) by
+// sweeping the Acc register 0-255 at fixed travel and recovering the velocity profile from
+// sampled position and velocity.
 //
 // The register is linear from Acc 1 to the low 50s and saturates above that. A single global
-// slope and offset are used rather than a per-joint table: only three of five joints were
-// measured, and the 89-128 steps/s^2 per unit spread implies roughly 10% arrival-timing
-// error between joints -- small against a current spread of 50-100% of move duration.
+// slope and offset are used rather than a per-joint table: measured slopes were 127.6, 89.3
+// and 108.2 steps/s^2 per unit on joints 1, 2 and 3 (joints 4 and 5 were not measured), and
+// that spread implies roughly 10% arrival-timing error between joints -- small against the
+// 50-100% of move duration that uncoordinated motion produced.
 const (
 	accStepsPerUnit = 108.0 // mean measured slope, steps/s^2 per Acc unit
 	accOffsetSteps  = 386.0 // mean measured offset, steps/s^2
@@ -23,9 +25,9 @@ const (
 	// command, the exact opposite of what a caller asking for gentle acceleration wants.
 	minAccUnits = 1
 
-	// maxAccUnits is a conservative round-down below the LOWEST measured knee. The bench
-	// measured knees of 52, 55 and 63 across three joints; 50 sits under all of them. Above
-	// the knee the register has no further effect, so scaling silently stops working.
+	// maxAccUnits is a conservative round-down below the LOWEST measured knee. Measured
+	// knees were 52, 55 and 63 across three joints; 50 sits under all of them. Above the
+	// knee the register has no further effect, so scaling silently stops working.
 	maxAccUnits = 50
 )
 

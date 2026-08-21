@@ -119,9 +119,11 @@ type ServoProfile struct {
 // different times today; but two of its callers are single-servo gripper paths where
 // coordination is meaningless, so it stays as it is.
 //
-// Time is always written as 0. RegGoalTime is inert on STS servos -- FEETECH's own
-// SMS_STS driver hardcodes 0 there and exposes no time parameter (see the 2026-08-19 bench
-// results). Writing anything else would be silently ignored.
+// Time is always written as 0. RegGoalTime (register 44) is inert on STS servos: it is an
+// SCS-series feature, and FEETECH's own SDK reflects that -- SMS_STS.h defines
+// SMS_STS_GOAL_TIME_L but SMS_STS.cpp never references it, and WritePosEx takes no time
+// parameter and writes a hardcoded 0 to those bytes. Confirmed on hardware: a 10 degree move
+// takes ~335ms whether commanded at 200ms or 3000ms. Writing anything else is ignored.
 func (s *SafeSoArmController) MoveServosWithProfiles(
 	ctx context.Context,
 	servoIDs []int,
