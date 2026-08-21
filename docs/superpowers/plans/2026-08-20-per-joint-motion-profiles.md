@@ -1185,7 +1185,12 @@ Expected: PASS.
 grep -n "MoveServosToPositions" manual_mode.go arm.go
 ```
 
-Expected: `manual_mode.go:266` only. If `arm.go` still calls it, a path was missed.
+Expected: **two** hits — `manual_mode.go:266`, and one inside `arm.go`'s `moveJointsUniform`,
+which Task 7 introduced as the read-failure fallback and which legitimately still uses the
+uniform path. Anything beyond those two means a coordinated path was missed.
+
+(This expectation originally said "manual_mode.go only", written before Task 7 finalized
+`moveJointsUniform`.)
 
 - [ ] **Step 4: Commit**
 
