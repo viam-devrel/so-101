@@ -87,10 +87,38 @@ func coordinatedProfiles(travelsDeg []float64, refSpeedDegsPerSec, refAccelDegsP
 	return out
 }
 
-// reduceReference is implemented in Task 4.
-func reduceReference(travelsDeg []float64, maxTravel, speed, accel float64, caps []jointLimits) (float64, float64) {
-	return speed, accel
+// jointLimits is an optional per-joint cap derived from arm.MoveOptions. A zero field means
+// "no cap" -- never "stop", which is why every check below tests for > 0.
+type jointLimits struct {
+	maxSpeedDegsPerSec   float64
+	maxAccelDegsPerSecSq float64
 }
 
-// jointLimits is defined properly in Task 4.
-type jointLimits struct{}
+// reduceReference lowers the shared speed and acceleration reference until no per-joint cap
+// would be exceeded.
+//
+// Caps are constraints, not targets. Clamping one joint to its cap would leave it out of
+// step with the others and destroy the coordination; instead the most-constrained joint
+// sets the pace for everyone. Since joint i is commanded v_max*k_i, requiring
+// v_max <= cap_i/k_i for every moving joint guarantees every joint honors its own cap.
+//
+// Stationary joints are excluded: k = 0 would divide by zero, and a joint that is not moving
+// cannot violate a speed or acceleration cap anyway.
+func reduceReference(travelsDeg []float64, maxTravel, speed, accel float64, caps []jointLimits) (float64, float64) {
+	for i, d := range travelsDeg {
+		if i >= len(caps) {
+			break
+		}
+		k := math.Abs(d) / maxTravel
+		if k == 0 {
+			continue
+		}
+		if c := caps[i].maxSpeedDegsPerSec; c > 0 && c/k < speed {
+			speed = c / k
+		}
+		if c := caps[i].maxAccelDegsPerSecSq; c > 0 && c/k < accel {
+			accel = c / k
+		}
+	}
+	return speed, accel
+}

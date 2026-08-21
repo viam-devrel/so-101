@@ -133,3 +133,78 @@ func TestCoordinatedProfiles(t *testing.T) {
 		}
 	})
 }
+
+func TestReduceReferenceAndCaps(t *testing.T) {
+	const refSpeed, refAccel = 50.0, 500.0
+
+	t.Run("a cap on the reference joint slows everyone proportionally", func(t *testing.T) {
+		caps := []jointLimits{{maxSpeedDegsPerSec: 25}, {}}
+		got := coordinatedProfiles([]float64{40, 10}, refSpeed, refAccel, caps)
+		// k = 1.0 and 0.25; the cap halves the reference, so both halve.
+		if want := degPerSecToStepsPerSec(25); got[0].speedSteps != want {
+			t.Errorf("capped joint = %d, want %d", got[0].speedSteps, want)
+		}
+		if want := degPerSecToStepsPerSec(6.25); got[1].speedSteps != want {
+			t.Errorf("uncapped joint = %d, want %d (it must slow too, to stay coordinated)",
+				got[1].speedSteps, want)
+		}
+	})
+
+	t.Run("a cap on a SHORT-travel joint still slows the whole move", func(t *testing.T) {
+		// This is the case that distinguishes reference-reduction from per-joint clamping.
+		// The short joint would have run at 12.5 deg/s; capping it at 5 forces the shared
+		// reference down to 5/0.25 = 20 deg/s, so the long joint drops from 50 to 20.
+		caps := []jointLimits{{}, {maxSpeedDegsPerSec: 5}}
+		got := coordinatedProfiles([]float64{40, 10}, refSpeed, refAccel, caps)
+		if want := degPerSecToStepsPerSec(20); got[0].speedSteps != want {
+			t.Errorf("long joint = %d, want %d (a short joint's cap must bind everyone)",
+				got[0].speedSteps, want)
+		}
+		if want := degPerSecToStepsPerSec(5); got[1].speedSteps != want {
+			t.Errorf("capped short joint = %d, want %d", got[1].speedSteps, want)
+		}
+	})
+
+	t.Run("every joint ends at or below its own cap", func(t *testing.T) {
+		caps := []jointLimits{{maxSpeedDegsPerSec: 30}, {maxSpeedDegsPerSec: 8}, {maxSpeedDegsPerSec: 40}}
+		travels := []float64{40, 20, 10}
+		got := coordinatedProfiles(travels, refSpeed, refAccel, caps)
+		for i := range travels {
+			limit := degPerSecToStepsPerSec(caps[i].maxSpeedDegsPerSec)
+			if got[i].speedSteps > limit {
+				t.Errorf("joint %d = %d steps/s, exceeds its cap of %d", i, got[i].speedSteps, limit)
+			}
+		}
+	})
+
+	t.Run("a stationary joint's cap cannot bind", func(t *testing.T) {
+		// k = 0 would divide by zero. A stationary joint moves at 0 regardless, so no cap
+		// on it can be violated and it must be excluded from the reduction.
+		caps := []jointLimits{{}, {maxSpeedDegsPerSec: 0.001}}
+		got := coordinatedProfiles([]float64{40, 0}, refSpeed, refAccel, caps)
+		if want := degPerSecToStepsPerSec(refSpeed); got[0].speedSteps != want {
+			t.Errorf("moving joint = %d, want %d (a stationary joint's cap must not bind)",
+				got[0].speedSteps, want)
+		}
+	})
+
+	t.Run("acceleration caps reduce the reference the same way", func(t *testing.T) {
+		caps := []jointLimits{{maxAccelDegsPerSecSq: 250}, {}}
+		got := coordinatedProfiles([]float64{40, 10}, refSpeed, refAccel, caps)
+		if want := degPerSecSqToAccUnits(250); got[0].accUnits != want {
+			t.Errorf("capped joint acc = %d, want %d", got[0].accUnits, want)
+		}
+		if want := degPerSecSqToAccUnits(62.5); got[1].accUnits != want {
+			t.Errorf("uncapped joint acc = %d, want %d", got[1].accUnits, want)
+		}
+	})
+
+	t.Run("a zero cap means uncapped, not stopped", func(t *testing.T) {
+		caps := []jointLimits{{maxSpeedDegsPerSec: 0}, {}}
+		got := coordinatedProfiles([]float64{40, 10}, refSpeed, refAccel, caps)
+		if want := degPerSecToStepsPerSec(refSpeed); got[0].speedSteps != want {
+			t.Errorf("got %d, want %d (an unset cap must not pin the arm to zero)",
+				got[0].speedSteps, want)
+		}
+	})
+}
