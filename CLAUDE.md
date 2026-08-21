@@ -188,12 +188,15 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
   `onlyBuiltDependencies` list, and not `package.json`'s `pnpm` field. `setup.sh` pins
   `pnpm@11` (matching the `node@22` pin) so a future pnpm major can't silently break
   the build again.
-- The **simulated arm** uses coordinated-arrival interpolation (all joints finish together),
-  while the **hardware arm** uses independent-joint speed mode (each joint moves at the
-  configured `speed_degs_per_sec`; joints with longer travel finish later). This is intentional:
-  the RDK motion planner feeds dense waypoints that keep per-waypoint displacements small, so
-  independent-joint motion stays smooth on planned paths. Also note: `acceleration_degs_per_sec_per_sec`
-  is validated and stored on the hardware arm but not yet written to servo hardware (planned follow-up).
+- Both the **simulated arm** and the **hardware arm** now use coordinated-arrival
+  interpolation: each joint's speed and acceleration are scaled by its share of the travel so
+  all joints finish together. The hardware arm used to move each joint at the same configured
+  speed independently, so longer-travel joints finished later (measured on hardware as a
+  260-520 ms spread); that divergence from the simulated arm is resolved.
+- **`Speed: 0` means MAXIMUM, not stopped**, and **`Acc: 0` means UNLIMITED, not zero** — both
+  Feetech register sentinels are the opposite of what they look like, and both have already
+  caused real bugs in this project. A short-travel joint scaled down by a small `k` can round
+  into either floor if the scaling math doesn't guard against it.
 - **`referenceframe.PoseCloud` semantics are counterintuitive and were established
   empirically** (see `docs/superpowers/specs/2026-07-15-pose-cloud-orientation-design.md`;
   `goal_cloud.go` depends on all of it):

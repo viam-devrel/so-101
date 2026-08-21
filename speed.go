@@ -65,12 +65,24 @@ func resolveSpeedDegsPerSec(maxVelRads, defaultSpeedDegsPerSec float64) float64 
 }
 
 // moveTimeoutMs returns a safety timeout (ms) for waiting on a move to complete, based on
-// the worst-case joint travel and speed, clamped to a sane window.
-func moveTimeoutMs(maxTravelDeg, speedDegsPerSec float64) int {
-	if speedDegsPerSec <= 0 {
+// the worst-case joint travel and the commanded profile, clamped to a sane window.
+//
+// It models the ramp rather than assuming d/v. Acceleration is now enforced on hardware, and
+// in the acceleration-limited regime the true duration 2*sqrt(d/a) ALWAYS exceeds 2*d/v --
+// which is exactly the margin moveTimeoutFactor used to provide. Worked example inside the
+// validated config range: at 50 deg/s and the 50 deg/s^2 minimum, a 30 degree move really
+// takes 1.55s against a d/v-derived timeout of 1.2s, so WaitForServosToStop would warn and
+// return while the arm was still moving.
+func moveTimeoutMs(maxTravelDeg, speedDegsPerSec, accelDegsPerSecSq float64) int {
+	if speedDegsPerSec <= 0 || accelDegsPerSecSq <= 0 {
 		return maxMoveTimeoutMs
 	}
-	ms := int(math.Round(maxTravelDeg / speedDegsPerSec * 1000.0 * moveTimeoutFactor))
+	// Triangular when the move is too short to reach cruising speed, trapezoidal otherwise.
+	seconds := maxTravelDeg/speedDegsPerSec + speedDegsPerSec/accelDegsPerSecSq
+	if maxTravelDeg < speedDegsPerSec*speedDegsPerSec/accelDegsPerSecSq {
+		seconds = 2 * math.Sqrt(maxTravelDeg/accelDegsPerSecSq)
+	}
+	ms := int(math.Round(seconds * 1000.0 * moveTimeoutFactor))
 	if ms < minMoveTimeoutMs {
 		ms = minMoveTimeoutMs
 	}
