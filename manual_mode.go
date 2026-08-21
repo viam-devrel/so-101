@@ -214,7 +214,7 @@ func (m *manualSession) statusJoints() []manualJointStatus {
 	return out
 }
 
-// controllerManualIO adapts SafeSoArmController to manualIO for a set of arm servos.
+// controllerManualIO adapts ControllerHandle to manualIO for a set of arm servos.
 type controllerManualIO struct {
 	controller *ControllerHandle
 	ids        []int

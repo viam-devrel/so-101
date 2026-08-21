@@ -133,39 +133,41 @@ type ServoProfile struct {
 // SMS_STS_GOAL_TIME_L but SMS_STS.cpp never references it, and WritePosEx takes no time
 // parameter and writes a hardcoded 0 to those bytes. Confirmed on hardware: a 10 degree move
 // takes ~335ms whether commanded at 200ms or 3000ms. Writing anything else is ignored.
-func (s *SafeSoArmController) MoveServosWithProfiles(
+func (h *ControllerHandle) MoveServosWithProfiles(
 	ctx context.Context,
 	servoIDs []int,
 	jointAngles []float64,
 	profiles []ServoProfile,
 ) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	if len(servoIDs) != len(jointAngles) || len(servoIDs) != len(profiles) {
 		return fmt.Errorf("servo IDs (%d), angles (%d) and profiles (%d) must be the same length",
 			len(servoIDs), len(jointAngles), len(profiles))
 	}
 
-	goals := make(map[int]feetech.GoalRequest, len(servoIDs))
-	for i, servoID := range servoIDs {
-		normalized := utils.RadToDeg(jointAngles[i])
-		if isGripperServo(servoID) {
-			normalized = (jointAngles[i]/math.Pi + 1.0) / 2.0 * 100.0
+	return h.withSession(func(sess *busSession) error {
+		goals := make(map[int]feetech.GoalRequest, len(servoIDs))
+		for i, servoID := range servoIDs {
+			normalized := utils.RadToDeg(jointAngles[i])
+			if isGripperServo(servoID) {
+				normalized = (jointAngles[i]/math.Pi + 1.0) / 2.0 * 100.0
+			}
+			cs, ok := sess.servos[servoID]
+			if !ok {
+				return fmt.Errorf("servo %d not available", servoID)
+			}
+			raw, err := cs.Calibration().Denormalize(normalized)
+			if err != nil {
+				return fmt.Errorf("failed to denormalize position for servo %d: %w", servoID, err)
+			}
+			goals[servoID] = feetech.GoalRequest{
+				Position: raw,
+				Speed:    profiles[i].SpeedSteps,
+				Acc:      profiles[i].AccUnits,
+				Time:     0,
+			}
 		}
-		cal := s.calibration.GetMotorCalibrationByID(servoID)
-		raw, err := cal.Denormalize(normalized)
-		if err != nil {
-			return fmt.Errorf("failed to denormalize position for servo %d: %w", servoID, err)
-		}
-		goals[servoID] = feetech.GoalRequest{
-			Position: raw,
-			Speed:    profiles[i].SpeedSteps,
-			Acc:      profiles[i].AccUnits,
-			Time:     0,
-		}
-	}
-	return s.group.SetGoals(ctx, goals)
+		return sess.group.SetGoals(ctx, goals)
+	})
 }
 
 // --- Single-servo operations backing the servo_* DoCommand family ---
