@@ -10,14 +10,32 @@ import (
 	"time"
 
 	"github.com/hipsterbrown/feetech-servo/feetech"
+	"go.viam.com/rdk/logging"
+	"go.viam.com/rdk/resource"
 )
 
+// ControllerEntry is the single owner of one port's bus. Every handle on that port reaches
+// the bus through this entry's current session, so all holders share one state.
 type ControllerEntry struct {
-	controller  *SafeSoArmController
 	config      *SoArm101Config
-	calibration SO101FullCalibration
-	refCount    int64 // Atomic reference counter
-	mu          sync.RWMutex
+	calibration SO101FullCalibration // the seed newBusSession wraps servos in
+	refCount    int64                // Atomic reference counter
+	mu          sync.RWMutex         // guards bookkeeping: config, calibration, refCount
+
+	port     string              // for error messages; no longer only in config
+	registry *ControllerRegistry // for eviction at teardown
+	logger   logging.Logger      // was reached via entry.config.Logger
+	busMu    sync.RWMutex        // serializes bus work; the shared mutex problem 1 needed
+
+	session atomic.Pointer[busSession] // nil == disconnected
+	gen     atomic.Uint64              // monotonic session counter
+}
+
+// currentCalibration reads the session-rebuild seed.
+func (e *ControllerEntry) currentCalibration() SO101FullCalibration {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.calibration
 }
 
 type ControllerRegistry struct {
@@ -41,7 +59,26 @@ func NewControllerRegistry() *ControllerRegistry {
 	}
 }
 
-func (r *ControllerRegistry) GetController(portPath string, config *SoArm101Config, calibration SO101FullCalibration, fromFile bool) (*SafeSoArmController, error) {
+// AcquireController is the registry-scoped entry point. Tests use this one so they can
+// drive an injected busFactory; production goes through the package-level delegate.
+func (r *ControllerRegistry) AcquireController(
+	owner resource.Name, config *SoArm101Config,
+	calibration SO101FullCalibration, fromFile bool,
+) (*ControllerHandle, error) {
+	h, err := r.GetController(config.Port, config, calibration, fromFile)
+	if err != nil {
+		return nil, err
+	}
+	h.owner = owner
+	// Seam: serial hotplug calls h.entry.resumeReconnect() here.
+	//
+	// It must be HERE and nowhere deeper. getExistingController holds entry.mu under a
+	// defer for its whole body, and createNewController calls it while holding r.mu -- so
+	// a seam placed in either would run under a lock that resumeReconnect's tryPin needs.
+	return h, nil
+}
+
+func (r *ControllerRegistry) GetController(portPath string, config *SoArm101Config, calibration SO101FullCalibration, fromFile bool) (*ControllerHandle, error) {
 	r.mu.RLock()
 	entry, exists := r.entries[portPath]
 	r.mu.RUnlock()
@@ -53,11 +90,11 @@ func (r *ControllerRegistry) GetController(portPath string, config *SoArm101Conf
 	return r.createNewController(portPath, config, calibration, fromFile)
 }
 
-func (r *ControllerRegistry) getExistingController(entry *ControllerEntry, config *SoArm101Config, calibration SO101FullCalibration, fromFile bool) (*SafeSoArmController, error) {
+func (r *ControllerRegistry) getExistingController(entry *ControllerEntry, config *SoArm101Config, calibration SO101FullCalibration, fromFile bool) (*ControllerHandle, error) {
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
 
-	if entry.controller == nil {
+	if entry.session.Load() == nil {
 		return nil, fmt.Errorf("controller not available for port %s", entry.config.Port)
 	}
 
@@ -75,19 +112,10 @@ func (r *ControllerRegistry) getExistingController(entry *ControllerEntry, confi
 			config.Logger.Info("Updating controller calibration")
 		}
 
-		if entry.controller != nil {
-			// Update calibration in each CalibratedServo using thread-safe method
+		if sess := entry.session.Load(); sess != nil {
+			// One place to write: the per-servo calibrations are the source of truth.
 			for id := 1; id <= 6; id++ {
-				motorCal := calibration.GetMotorCalibrationByID(id)
-				appCal := &MotorCalibration{
-					ID:           motorCal.ID,
-					DriveMode:    motorCal.DriveMode,
-					HomingOffset: motorCal.HomingOffset,
-					RangeMin:     motorCal.RangeMin,
-					RangeMax:     motorCal.RangeMax,
-					NormMode:     motorCal.NormMode,
-				}
-				entry.controller.calibratedServos[id].UpdateCalibration(appCal)
+				sess.servos[id].UpdateCalibration(copyMotorCalibration(calibration.GetMotorCalibrationByID(id)))
 			}
 		}
 		entry.calibration = calibration
@@ -96,16 +124,10 @@ func (r *ControllerRegistry) getExistingController(entry *ControllerEntry, confi
 	atomic.AddInt64(&entry.refCount, 1)
 	r.trackCaller(entry.config.Port)
 
-	return &SafeSoArmController{
-		bus:              entry.controller.bus,
-		group:            entry.controller.group,
-		calibratedServos: entry.controller.calibratedServos,
-		logger:           config.Logger,
-		calibration:      entry.calibration,
-	}, nil
+	return &ControllerHandle{entry: entry, logger: config.Logger}, nil
 }
 
-func (r *ControllerRegistry) createNewController(portPath string, config *SoArm101Config, calibration SO101FullCalibration, fromFile bool) (*SafeSoArmController, error) {
+func (r *ControllerRegistry) createNewController(portPath string, config *SoArm101Config, calibration SO101FullCalibration, fromFile bool) (*ControllerHandle, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -116,6 +138,9 @@ func (r *ControllerRegistry) createNewController(portPath string, config *SoArm1
 	entry := &ControllerEntry{
 		config:      config,
 		calibration: calibration,
+		port:        portPath,
+		registry:    r,
+		logger:      config.Logger,
 	}
 
 	feetechCalibrations := calibration.ToFeetechCalibrationMap()
@@ -146,35 +171,8 @@ func (r *ControllerRegistry) createNewController(portPath string, config *SoArm1
 		return nil, fmt.Errorf("failed to create feetech servo bus: %w", err)
 	}
 
-	// Create raw servo instances
-	rawServos := make(map[int]*feetech.Servo)
-	for id := 1; id <= 6; id++ {
-		rawServos[id] = feetech.NewServo(bus, id, &feetech.ModelSTS3215)
-	}
-
-	// Create ServoGroups
-	group := feetech.NewServoGroup(bus,
-		rawServos[1], rawServos[2], rawServos[3], rawServos[4], rawServos[5], rawServos[6])
-
-	// Wrap servos with calibration
-	calibratedServos := make(map[int]*CalibratedServo)
-	for id := 1; id <= 6; id++ {
-		motorCal := calibration.GetMotorCalibrationByID(id)
-
-		// Convert SO101 MotorCalibration to our MotorCalibration type
-		appCal := &MotorCalibration{
-			ID:           motorCal.ID,
-			DriveMode:    motorCal.DriveMode,
-			HomingOffset: motorCal.HomingOffset,
-			RangeMin:     motorCal.RangeMin,
-			RangeMax:     motorCal.RangeMax,
-			NormMode:     motorCal.NormMode,
-		}
-
-		calibratedServos[id] = NewCalibratedServo(rawServos[id], appCal)
-	}
-
-	// If using default calibration (not from file), try reading from servos
+	// If using default calibration (not from file), try reading from servos. The session is
+	// built afterwards so its servos carry whatever calibration was just read.
 	finalCalibration := calibration
 	if !fromFile {
 		if config.Logger != nil {
@@ -183,31 +181,10 @@ func (r *ControllerRegistry) createNewController(portPath string, config *SoArm1
 		// Use background context for servo reading during controller creation
 		ctx := context.Background()
 		finalCalibration = ReadCalibrationFromServos(ctx, bus, config.ServoIDs, config.Logger)
-
-		// Update calibrated servos with new calibration
-		for id := 1; id <= 6; id++ {
-			motorCal := finalCalibration.GetMotorCalibrationByID(id)
-			appCal := &MotorCalibration{
-				ID:           motorCal.ID,
-				DriveMode:    motorCal.DriveMode,
-				HomingOffset: motorCal.HomingOffset,
-				RangeMin:     motorCal.RangeMin,
-				RangeMax:     motorCal.RangeMax,
-				NormMode:     motorCal.NormMode,
-			}
-			calibratedServos[id] = NewCalibratedServo(rawServos[id], appCal)
-		}
 	}
 
-	entry.controller = &SafeSoArmController{
-		bus:              bus,
-		group:            group,
-		calibratedServos: calibratedServos,
-		logger:           config.Logger,
-		calibration:      finalCalibration,
-	}
-	// Update entry calibration after controller creation for consistency
 	entry.calibration = finalCalibration
+	entry.session.Store(newBusSession(bus, finalCalibration, entry.gen.Add(1)))
 	atomic.StoreInt64(&entry.refCount, 1)
 
 	r.entries[portPath] = entry
@@ -215,16 +192,10 @@ func (r *ControllerRegistry) createNewController(portPath string, config *SoArm1
 	r.trackCaller(portPath)
 
 	if config.Logger != nil {
-		config.Logger.Debugf("Created new feetech servo bus with %d servos for port %s", len(calibratedServos), portPath)
+		config.Logger.Debugf("Created new feetech servo bus for port %s", portPath)
 	}
 
-	return &SafeSoArmController{
-		bus:              bus,
-		group:            group,
-		calibratedServos: calibratedServos,
-		logger:           config.Logger,
-		calibration:      finalCalibration,
-	}, nil
+	return &ControllerHandle{entry: entry, logger: config.Logger}, nil
 }
 
 func (r *ControllerRegistry) ReleaseController(portPath string) {
@@ -241,8 +212,8 @@ func (r *ControllerRegistry) ReleaseController(portPath string) {
 
 	currentRefCount := atomic.AddInt64(&entry.refCount, -1)
 	if currentRefCount <= 0 {
-		if entry.controller != nil && entry.controller.bus != nil {
-			if err := entry.controller.bus.Close(); err != nil && entry.config != nil && entry.config.Logger != nil {
+		if sess := entry.session.Swap(nil); sess != nil && sess.bus != nil {
+			if err := sess.bus.Close(); err != nil && entry.config != nil && entry.config.Logger != nil {
 				entry.config.Logger.Warnf("error closing shared controller for port %s: %v", portPath, err)
 			}
 		}
@@ -251,7 +222,6 @@ func (r *ControllerRegistry) ReleaseController(portPath string) {
 		delete(r.entries, portPath)
 		r.mu.Unlock()
 
-		entry.controller = nil
 		entry.config = nil
 		entry.calibration = SO101FullCalibration{}
 		atomic.StoreInt64(&entry.refCount, 0)
@@ -274,9 +244,8 @@ func (r *ControllerRegistry) ForceCloseController(portPath string) error {
 	defer entry.mu.Unlock()
 
 	var err error
-	if entry.controller != nil {
-		err = entry.controller.bus.Close()
-		entry.controller = nil
+	if sess := entry.session.Swap(nil); sess != nil {
+		err = sess.bus.Close()
 		entry.config = nil
 		entry.calibration = SO101FullCalibration{}
 		atomic.StoreInt64(&entry.refCount, 0)
@@ -298,7 +267,7 @@ func (r *ControllerRegistry) GetControllerStatus(portPath string) (int64, bool, 
 	defer entry.mu.RUnlock()
 
 	currentRefCount := atomic.LoadInt64(&entry.refCount)
-	hasController := entry.controller != nil
+	hasController := entry.session.Load() != nil
 	configSummary := ""
 
 	if entry.config != nil {

@@ -204,7 +204,7 @@ type so101 struct {
 	logger     logging.Logger
 	cfg        *SO101ArmConfig
 	opMgr      *operation.SingleOperationManager
-	controller *SafeSoArmController
+	controller *ControllerHandle
 	manual     *manualSession
 
 	// goalCloud is the resolved approach-axis tolerance pair. Set once in NewSO101 and

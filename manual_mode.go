@@ -216,14 +216,14 @@ func (m *manualSession) statusJoints() []manualJointStatus {
 
 // controllerManualIO adapts SafeSoArmController to manualIO for a set of arm servos.
 type controllerManualIO struct {
-	controller *SafeSoArmController
+	controller *ControllerHandle
 	ids        []int
 	limits     map[int][2]float64
 	origPGain  map[int]int // captured lazily on applyCompliance for restore
 	origTorque map[int]int // captured lazily on applyCompliance for restore
 }
 
-func newControllerManualIO(c *SafeSoArmController, ids []int, limits [][2]float64) *controllerManualIO {
+func newControllerManualIO(c *ControllerHandle, ids []int, limits [][2]float64) *controllerManualIO {
 	lm := map[int][2]float64{}
 	for i, id := range ids {
 		if i < len(limits) {

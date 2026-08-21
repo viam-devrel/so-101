@@ -223,7 +223,6 @@ func TestCleanupOnZeroRefs(t *testing.T) {
 		config:      config,
 		calibration: DefaultSO101FullCalibration,
 		refCount:    1,
-		controller:  nil,
 	}
 	registry.entries[port] = entry
 
@@ -256,8 +255,7 @@ func TestForceCloseController(t *testing.T) {
 		entry := &ControllerEntry{
 			config:      config,
 			calibration: DefaultSO101FullCalibration,
-			refCount:    2,   // Multiple references
-			controller:  nil, // No actual controller
+			refCount:    2, // Multiple references
 		}
 		registry.entries[port] = entry
 	}
@@ -360,7 +358,6 @@ func TestGetControllerStatus(t *testing.T) {
 		config:      config,
 		calibration: DefaultSO101FullCalibration,
 		refCount:    2,
-		controller:  nil,
 	}
 	registry.entries[port] = entry
 

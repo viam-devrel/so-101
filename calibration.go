@@ -111,7 +111,7 @@ type so101CalibrationSensor struct {
 	name       resource.Name
 	logger     logging.Logger
 	cfg        *SO101CalibrationSensorConfig
-	controller *SafeSoArmController
+	controller *ControllerHandle
 
 	// Calibration state
 	mu               sync.RWMutex
@@ -460,17 +460,10 @@ func (cs *so101CalibrationSensor) setHomingPosition(ctx context.Context) (map[st
 	// 	}
 	// 	positions[servoID] = raw
 	// }
-	positionsData, err := cs.controller.bus.SyncRead(ctx, feetech.RegPresentPosition.Address, len(cs.cfg.ServoIDs), cs.cfg.ServoIDs)
+	rawPositions, err := cs.controller.SyncReadPositions(ctx, cs.cfg.ServoIDs)
 	if err != nil {
 		cs.setState(StateError, fmt.Sprintf("Failed to read servo positions: %v", err))
 		return map[string]any{"success": false}, err
-	}
-	proto := cs.controller.bus.Protocol()
-	rawPositions := make(map[int]int, len(cs.cfg.ServoIDs))
-	for _, id := range cs.cfg.ServoIDs {
-		if d, ok := positionsData[id]; ok {
-			rawPositions[id] = int(proto.DecodeWord(d))
-		}
 	}
 
 	// Calculate homing offsets to center the range
@@ -562,17 +555,10 @@ func (cs *so101CalibrationSensor) recordPositions(recordingCtx context.Context) 
 			cs.mu.RUnlock()
 
 			// Read current positions for all configured servos
-			positionsData, err := cs.controller.bus.SyncRead(recordingCtx, feetech.RegPresentPosition.Address, len(cs.cfg.ServoIDs), cs.cfg.ServoIDs)
+			rawPositions, err := cs.controller.SyncReadPositions(recordingCtx, cs.cfg.ServoIDs)
 			if err != nil {
 				cs.logger.Errorf("Failed to read positions during recording: %v", err)
 				continue
-			}
-			proto := cs.controller.bus.Protocol()
-			rawPositions := make(map[int]int, len(cs.cfg.ServoIDs))
-			for _, id := range cs.cfg.ServoIDs {
-				if d, ok := positionsData[id]; ok {
-					rawPositions[id] = int(proto.DecodeWord(d))
-				}
 			}
 
 			// radianPositions, err := cs.controller.GetJointPositionsForServos(recordingCtx, cs.cfg.ServoIDs)
@@ -1042,9 +1028,9 @@ func (cs *so101CalibrationSensor) motorSetupVerify(ctx context.Context) (map[str
 
 	// Check each expected motor
 	for id, name := range expectedMotors {
-		if servo, exists := cs.controller.calibratedServos[id]; exists {
+		if cs.controller.ServoPresent(id) {
 			// Try to ping the servo
-			_, err := servo.Ping(ctx)
+			_, err := cs.controller.PingServo(ctx, id)
 			if err != nil {
 				results[name] = map[string]any{
 					"id":     id,
@@ -1054,7 +1040,7 @@ func (cs *so101CalibrationSensor) motorSetupVerify(ctx context.Context) (map[str
 				allGood = false
 			} else {
 				// Auto-detect model
-				if err := servo.DetectModel(ctx); err != nil {
+				if modelName, err := cs.controller.DetectServoModel(ctx, id); err != nil {
 					results[name] = map[string]any{
 						"id":     id,
 						"status": "model_detection_failed",
@@ -1064,7 +1050,7 @@ func (cs *so101CalibrationSensor) motorSetupVerify(ctx context.Context) (map[str
 					results[name] = map[string]any{
 						"id":     id,
 						"status": "ok",
-						"model":  servo.Model().Name,
+						"model":  modelName,
 					}
 				}
 			}
@@ -1100,7 +1086,7 @@ func (cs *so101CalibrationSensor) motorSetupScanBus(ctx context.Context) (map[st
 
 	// Discover sweeps every bus ID (1..253) and reliably returns all responders;
 	// each absent ID costs one BusConfig.PingTimeout, so a sparse bus takes a few seconds.
-	discovered, err := cs.controller.bus.Discover(ctx)
+	discovered, err := cs.controller.Discover(ctx)
 	if err != nil {
 		cs.setupStatus = fmt.Sprintf("Bus scan failed: %v", err)
 		return map[string]any{"success": false, "error": cs.setupStatus}, err
@@ -1162,7 +1148,7 @@ func (cs *so101CalibrationSensor) discoverOneMotor(ctx context.Context, expected
 	// Since we're using a shared controller, we need to work with the existing bus.
 	// Discover sweeps all bus IDs, so a lone motor is found whatever ID it carries —
 	// and finding more than one responder is a real error, not a collision artifact.
-	discovered, err := cs.controller.bus.Discover(ctx)
+	discovered, err := cs.controller.Discover(ctx)
 	if err != nil {
 		return nil, 0, fmt.Errorf("discovery failed: %w", err)
 	}
@@ -1190,8 +1176,7 @@ func (cs *so101CalibrationSensor) discoverOneMotor(ctx context.Context, expected
 // Helper function to assign motor ID and baudrate
 func (cs *so101CalibrationSensor) assignMotorIDAndBaudrate(currentID, targetID, currentBaudrate, targetBaudrate int) error {
 	// Get the servo instance
-	servo, exists := cs.controller.calibratedServos[currentID]
-	if !exists {
+	if !cs.controller.ServoPresent(currentID) {
 		return fmt.Errorf("servo with ID %d not found in controller", currentID)
 	}
 
@@ -1199,14 +1184,13 @@ func (cs *so101CalibrationSensor) assignMotorIDAndBaudrate(currentID, targetID, 
 	ctx := context.Background()
 
 	// Ping to verify communication
-	_, err := servo.Ping(ctx)
-	if err != nil {
+	if _, err := cs.controller.PingServo(ctx, currentID); err != nil {
 		return fmt.Errorf("failed to ping servo: %w", err)
 	}
 
 	// Set target ID if different from current
 	if currentID != targetID {
-		if err := servo.SetID(ctx, targetID); err != nil {
+		if err := cs.controller.SetServoID(ctx, currentID, targetID); err != nil {
 			return fmt.Errorf("failed to set servo ID: %w", err)
 		}
 		cs.logger.Infof("Updated servo ID from %d to %d", currentID, targetID)
@@ -1214,7 +1198,7 @@ func (cs *so101CalibrationSensor) assignMotorIDAndBaudrate(currentID, targetID, 
 
 	// Set target baudrate if different from current
 	if currentBaudrate != targetBaudrate {
-		if err := servo.SetBaudRate(ctx, targetBaudrate); err != nil {
+		if err := cs.controller.SetServoBaudRate(ctx, currentID, targetBaudrate); err != nil {
 			return fmt.Errorf("failed to set baudrate: %w", err)
 		}
 		cs.logger.Infof("Updated servo baudrate to %d", targetBaudrate)
