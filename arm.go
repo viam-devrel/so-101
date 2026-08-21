@@ -429,10 +429,12 @@ func NewSO101(ctx context.Context, deps resource.Dependencies, name resource.Nam
 
 	accelerationDegsPerSec := conf.AccelerationDegsPerSec
 	if accelerationDegsPerSec == 0 {
-		accelerationDegsPerSec = 100 // Default acceleration in degrees per second^2
+		accelerationDegsPerSec = defaultAccelDegsPerSecSq
 	}
-	if accelerationDegsPerSec < 10 || accelerationDegsPerSec > 500 {
-		return nil, fmt.Errorf("acceleration_degs_per_sec_per_sec must be between 10 and 500 degrees/second^2, got %.1f", accelerationDegsPerSec)
+	if accelerationDegsPerSec < minAccelDegsPerSecSq || accelerationDegsPerSec > maxAccelDegsPerSecSq {
+		return nil, fmt.Errorf(
+			"acceleration_degs_per_sec_per_sec must be between %.0f and %.0f degrees/second^2, got %.1f",
+			minAccelDegsPerSecSq, maxAccelDegsPerSecSq, accelerationDegsPerSec)
 	}
 
 	if conf.Baudrate == 0 {
@@ -1119,8 +1121,10 @@ func (s *so101) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[
 
 		if accVal, ok := cmd["set_acceleration"]; ok {
 			if acc, ok := accVal.(float64); ok {
-				if acc < 10 || acc > 500 {
-					return nil, fmt.Errorf("acceleration must be between 10 and 500 degrees/second^2, got %.1f", acc)
+				if acc < minAccelDegsPerSecSq || acc > maxAccelDegsPerSecSq {
+					return nil, fmt.Errorf(
+						"acceleration must be between %.0f and %.0f degrees/second^2, got %.1f",
+						minAccelDegsPerSecSq, maxAccelDegsPerSecSq, acc)
 				}
 				s.mu.Lock()
 				s.defaultAcc = float32(acc)

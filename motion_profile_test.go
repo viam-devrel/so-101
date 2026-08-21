@@ -478,3 +478,20 @@ func TestUniformSpeedUnderCaps(t *testing.T) {
 		t.Errorf("got %v, want 50 (a negative cap must not bind)", got)
 	}
 }
+
+func TestAccelBoundsAreReachable(t *testing.T) {
+	// A configured value the register cannot express would silently clamp, so the validated
+	// bounds must both land strictly inside [minAccUnits, maxAccUnits].
+	if got := degPerSecSqToAccUnits(minAccelDegsPerSecSq); got <= minAccUnits {
+		t.Errorf("minimum %.0f deg/s^2 maps to Acc %d, at or below the floor of %d",
+			minAccelDegsPerSecSq, got, minAccUnits)
+	}
+	if got := degPerSecSqToAccUnits(maxAccelDegsPerSecSq); got >= maxAccUnits {
+		t.Errorf("maximum %.0f deg/s^2 maps to Acc %d, at or above the knee of %d",
+			maxAccelDegsPerSecSq, got, maxAccUnits)
+	}
+	if defaultAccelDegsPerSecSq < minAccelDegsPerSecSq || defaultAccelDegsPerSecSq > maxAccelDegsPerSecSq {
+		t.Errorf("default %.0f is outside the validated range [%.0f, %.0f]",
+			defaultAccelDegsPerSecSq, minAccelDegsPerSecSq, maxAccelDegsPerSecSq)
+	}
+}
