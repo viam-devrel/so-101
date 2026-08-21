@@ -152,7 +152,6 @@ func newSO101Gripper(ctx context.Context, deps resource.Dependencies, conf resou
 
 	model, err := buildGripperModel(gripperType, meshDetail, conf.ResourceName().ShortName())
 	if err != nil {
-		ReleaseSharedController()
 		return nil, fmt.Errorf("failed to build gripper kinematic model: %w", err)
 	}
 

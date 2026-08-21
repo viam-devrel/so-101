@@ -515,27 +515,6 @@ func AcquireController(
 	return globalRegistry.AcquireController(owner, config, calibration, fromFile)
 }
 
-func ReleaseSharedController() {
-	globalRegistry.releaseFromCaller()
-}
-
-func ForceCloseSharedController() error {
-	globalRegistry.mu.RLock()
-	portPaths := make([]string, 0, len(globalRegistry.entries))
-	for portPath := range globalRegistry.entries {
-		portPaths = append(portPaths, portPath)
-	}
-	globalRegistry.mu.RUnlock()
-
-	var lastErr error
-	for _, portPath := range portPaths {
-		if err := globalRegistry.ForceCloseController(portPath); err != nil {
-			lastErr = err
-		}
-	}
-	return lastErr
-}
-
 func GetControllerStatus() (int64, bool, string) {
 	globalRegistry.mu.RLock()
 	defer globalRegistry.mu.RUnlock()
