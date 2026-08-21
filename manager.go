@@ -105,6 +105,58 @@ func (s *SafeSoArmController) MoveServosToPositions(ctx context.Context, servoID
 	return s.writePositions(ctx, rawPositions, speed)
 }
 
+// ServoProfile is one servo's speed and acceleration for a coordinated move.
+type ServoProfile struct {
+	SpeedSteps int // goal velocity, steps/sec. Never 0: that means MAX SPEED.
+	AccUnits   int // acceleration register. Never 0: that means UNLIMITED.
+}
+
+// MoveServosWithProfiles commands each servo to its angle under its OWN speed and
+// acceleration, in a single SetGoals sync write.
+//
+// This exists alongside writePositions rather than replacing it. writePositions can only
+// issue one shared speed and cannot set acceleration at all, which is why joints arrive at
+// different times today; but two of its callers are single-servo gripper paths where
+// coordination is meaningless, so it stays as it is.
+//
+// Time is always written as 0. RegGoalTime is inert on STS servos -- FEETECH's own
+// SMS_STS driver hardcodes 0 there and exposes no time parameter (see the 2026-08-19 bench
+// results). Writing anything else would be silently ignored.
+func (s *SafeSoArmController) MoveServosWithProfiles(
+	ctx context.Context,
+	servoIDs []int,
+	jointAngles []float64,
+	profiles []ServoProfile,
+) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if len(servoIDs) != len(jointAngles) || len(servoIDs) != len(profiles) {
+		return fmt.Errorf("servo IDs (%d), angles (%d) and profiles (%d) must be the same length",
+			len(servoIDs), len(jointAngles), len(profiles))
+	}
+
+	goals := make(map[int]feetech.GoalRequest, len(servoIDs))
+	for i, servoID := range servoIDs {
+		normalized := utils.RadToDeg(jointAngles[i])
+		if isGripperServo(servoID) {
+			normalized = (jointAngles[i]/math.Pi + 1.0) / 2.0 * 100.0
+		}
+		cal := s.calibration.GetMotorCalibrationByID(servoID)
+		raw, err := cal.Denormalize(normalized)
+		if err != nil {
+			return fmt.Errorf("failed to denormalize position for servo %d: %w", servoID, err)
+		}
+		goals[servoID] = feetech.GoalRequest{
+			Position: raw,
+			Speed:    profiles[i].SpeedSteps,
+			Acc:      profiles[i].AccUnits,
+			Time:     0,
+		}
+	}
+	return s.group.SetGoals(ctx, goals)
+}
+
 // --- Single-servo operations backing the servo_* DoCommand family ---
 //
 // These exist so a gripper can drive one servo on this bus without holding a controller of
