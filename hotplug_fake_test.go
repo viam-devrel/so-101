@@ -65,6 +65,7 @@ type fakeTransport struct {
 	unplugged bool
 	writes    int
 	opens     int
+	closes    int
 }
 
 const fakeModelNumber = 777 // ModelSTS3215's model number
@@ -205,3 +206,25 @@ func (ft *fakeTransport) queue(id int, params []byte) {
 }
 
 var _ feetech.Transport = (*fakeTransport)(nil)
+
+// setRegister seeds a register so a read returns a known value.
+func (ft *fakeTransport) setRegister(id int, address byte, value []byte) {
+	ft.mu.Lock()
+	defer ft.mu.Unlock()
+	if regs, ok := ft.registers[id]; ok {
+		regs[address] = append([]byte(nil), value...)
+	}
+}
+
+// closeCount reports how many times the bus over this fake has been closed, so a teardown
+// test can assert it happened exactly once.
+func (ft *fakeTransport) closeCount() int {
+	ft.mu.Lock()
+	defer ft.mu.Unlock()
+	return ft.closes
+}
+
+// encodeWordLE encodes a 16-bit register value the way the STS protocol expects.
+func encodeWordLE(v int) []byte {
+	return feetech.NewProtocol(feetech.ProtocolSTS).EncodeWord(uint16(v))
+}
