@@ -621,10 +621,6 @@ func (s *so101) moveJoints(
 	caps []jointLimits,
 	wait bool,
 ) error {
-	// Note this loop computes the same maximum that coordinatedProfiles computes
-	// internally. The duplication is deliberate -- moveJoints needs maxTravelDeg for the
-	// timeout distance -- but the two must agree, and a mutation test showed this exact
-	// scan is easy to get wrong in a way no ordering-naive test catches.
 	if len(from) != len(to) {
 		return fmt.Errorf("coordinated move needs matching position counts, got %d current and %d target",
 			len(from), len(to))
@@ -667,7 +663,7 @@ func (s *so101) moveJoints(
 	// A MoveOptions cap can reduce the shared reference well below the request -- the cap
 	// tests in motion_profile_test.go reduce 50 deg/s to 20, a 2.5x slowdown against
 	// moveTimeoutFactor = 2.0 -- so timing against the request would abort a move that is
-	// proceeding perfectly correctly, and only once Task 8 supplies caps.
+	// proceeding perfectly correctly.
 	effectiveSpeed := speedDegsPerSec
 	maxSteps := 0
 	for _, p := range profiles {
@@ -679,7 +675,11 @@ func (s *so101) moveJoints(
 		effectiveSpeed = float64(maxSteps) / stepsPerDegree
 	}
 
-	timeout := moveTimeoutMs(maxTravelDeg, effectiveSpeed)
+	// Use the acceleration actually achievable: the Acc register floors at ~43 deg/s^2, so
+	// a cap-reduced reference below that is silently raised by the hardware and timing
+	// against the lower value would over-estimate the duration.
+	effectiveAccel := math.Max(accelDegsPerSecSq, accFloorDegsPerSecSq)
+	timeout := moveTimeoutMs(maxTravelDeg, effectiveSpeed, effectiveAccel)
 	s.logger.Debugf("moveJoints: ref %.1f deg/s (effective %.1f), %.0f deg/s^2, max travel "+
 		"%.1f deg, %d joint(s) at the acceleration floor, wait timeout %d ms",
 		speedDegsPerSec, effectiveSpeed, accelDegsPerSecSq, maxTravelDeg, floored, timeout)
@@ -689,9 +689,21 @@ func (s *so101) moveJoints(
 // moveJointsUniform is the pre-coordination path, retained only as the fallback for when
 // the travel-reference read fails. It commands every joint at one shared speed, which is
 // why joints arrive at different times.
-func (s *so101) moveJointsUniform(ctx context.Context, to []float64, speedDegsPerSec float64, wait bool) error {
-	speedSteps := degPerSecToStepsPerSec(speedDegsPerSec)
-	if err := s.controller.MoveServosToPositions(ctx, s.armServoIDs, to, speedSteps, 0); err != nil {
+func (s *so101) moveJointsUniform(ctx context.Context, to []float64, speedDegsPerSec, accelDegsPerSecSq float64, wait bool) error {
+	// Writes an explicit UNIFORM profile rather than a bare position write. A coordinated
+	// move leaves each servo's Speed and Acc registers at its own scaled value -- as low as
+	// 1 step/s and Acc 1 -- and a position-only write does not touch either. So without
+	// this the "uniform" fallback would inherit whatever the previous coordinated move left
+	// behind, and would be uniform in neither speed nor acceleration.
+	profile := ServoProfile{
+		SpeedSteps: degPerSecToStepsPerSec(speedDegsPerSec),
+		AccUnits:   degPerSecSqToAccUnits(accelDegsPerSecSq),
+	}
+	profiles := make([]ServoProfile, len(s.armServoIDs))
+	for i := range profiles {
+		profiles[i] = profile
+	}
+	if err := s.controller.MoveServosWithProfiles(ctx, s.armServoIDs, to, profiles); err != nil {
 		return fmt.Errorf("failed to move SO-101 arm: %w", err)
 	}
 	if !wait {
@@ -748,7 +760,7 @@ func (s *so101) MoveToJointPositions(ctx context.Context, positions []referencef
 			"uniform speed: %v", err)
 		// No arm.MoveOptions here, so caps is always nil -- kept for symmetry with
 		// MoveThroughJointPositions' fallback.
-		return s.moveJointsUniform(ctx, clamped, uniformSpeedUnderCaps(speed, nil), parseWaitExtra(extra))
+		return s.moveJointsUniform(ctx, clamped, uniformSpeedUnderCaps(speed, nil), accel, parseWaitExtra(extra))
 	}
 
 	return s.moveJoints(ctx, current, clamped, speed, accel, nil, parseWaitExtra(extra))
@@ -801,8 +813,26 @@ func (s *so101) MoveThroughJointPositions(ctx context.Context, positions [][]ref
 			return err
 		}
 		isLast := idx == len(positions)-1
+
+		// The hardware executes ONLY the final write. Each SetGoals overwrites the previous
+		// goal, and the whole stream is issued in a few tens of milliseconds, so every
+		// intermediate waypoint is superseded before the arm can act on it. The last
+		// waypoint's profile therefore has to be computed against where the arm ACTUALLY
+		// is, not against the previous commanded waypoint: a joint whose travel is
+		// concentrated earlier in the path has a near-zero delta in the final segment,
+		// which floors it to 1 step/s while its goal is still far away, and collapses the
+		// completion timeout to the 1s floor so the call returns mid-motion.
+		if isLast && from != nil {
+			if cur, rerr := s.controller.GetJointPositionsForServos(ctx, s.armServoIDs); rerr == nil {
+				from = cur
+			} else {
+				s.logger.Warnf("failed to re-read positions before the final waypoint; "+
+					"coordination and timeout will use the commanded predecessor: %v", rerr)
+			}
+		}
+
 		if from == nil {
-			if err := s.moveJointsUniform(ctx, clamped, uniformSpeedUnderCaps(speed, caps), isLast); err != nil {
+			if err := s.moveJointsUniform(ctx, clamped, uniformSpeedUnderCaps(speed, caps), accel, isLast); err != nil {
 				return err
 			}
 		} else if err := s.moveJoints(ctx, from, clamped, speed, accel, caps, isLast); err != nil {

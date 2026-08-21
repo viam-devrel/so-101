@@ -49,6 +49,10 @@ func degPerSecSqToAccUnits(degsPerSecSq float64) int {
 // coordination this whole mechanism exists to provide.
 const defaultAccelDegsPerSecSq = 500.0
 
+// accFloorDegsPerSecSq is what Acc 1 actually delivers. Any lower request is silently raised
+// to this by the register floor, so timing calculations must not assume the lower value.
+const accFloorDegsPerSecSq = 43.0
+
 // Configured-acceleration bounds, in deg/s^2. Both ends are set by what the register can
 // actually express: Acc 1 delivers about 43 deg/s^2, so the old minimum of 10 was
 // unreachable by more than 4x; Acc 50 delivers about 508, so values above that do nothing.
