@@ -11,7 +11,7 @@ import (
 // Acceleration-register calibration, measured on hardware 2026-08-19 (see
 // docs/superpowers/results/2026-08-19-bench-run.md).
 //
-// The register is linear from Acc 1 to about 50 and saturates above it. A single global
+// The register is linear from Acc 1 to the low 50s and saturates above that. A single global
 // slope and offset are used rather than a per-joint table: only three of five joints were
 // measured, and the 89-128 steps/s^2 per unit spread implies roughly 10% arrival-timing
 // error between joints -- small against a current spread of 50-100% of move duration.
@@ -23,8 +23,9 @@ const (
 	// command, the exact opposite of what a caller asking for gentle acceleration wants.
 	minAccUnits = 1
 
-	// maxAccUnits is the measured knee. Above it the register has no further effect, so
-	// scaling silently stops working.
+	// maxAccUnits is a conservative round-down below the LOWEST measured knee. The bench
+	// measured knees of 52, 55 and 63 across three joints; 50 sits under all of them. Above
+	// the knee the register has no further effect, so scaling silently stops working.
 	maxAccUnits = 50
 )
 
@@ -108,8 +109,10 @@ type jointLimits struct {
 // sets the pace for everyone. Since joint i is commanded v_max*k_i, requiring
 // v_max <= cap_i/k_i for every moving joint guarantees every joint honors its own cap.
 //
-// Stationary joints are excluded: k = 0 would divide by zero, and a joint that is not moving
-// cannot violate a speed or acceleration cap anyway.
+// Stationary joints are excluded. Note this is defensive rather than load-bearing: Go yields
+// +Inf for c/0 with c > 0, and +Inf < speed is already false, so a stationary joint could
+// never bind even without the guard. It stays because the intent should be explicit -- but do
+// not assume removing it would fault.
 func reduceReference(travelsDeg []float64, maxTravel, speed, accel float64, caps []jointLimits) (float64, float64) {
 	for i, d := range travelsDeg {
 		if i >= len(caps) {
@@ -147,7 +150,7 @@ func jointLimitsFromMoveOptions(opts *arm.MoveOptions, dof int) ([]jointLimits, 
 	if n := len(opts.MaxVelRadsJoints); n > 0 {
 		if n != dof {
 			return nil, fmt.Errorf(
-				"MoveOptions.MaxVelRadsJoints has %d entries but the arm has %d joints", n, dof)
+				"max_vel_degs_per_sec_joints has %d entries but the arm has %d joints", n, dof)
 		}
 		for i, v := range opts.MaxVelRadsJoints {
 			limits[i].maxSpeedDegsPerSec = utils.RadToDeg(v)
@@ -162,7 +165,7 @@ func jointLimitsFromMoveOptions(opts *arm.MoveOptions, dof int) ([]jointLimits, 
 	if n := len(opts.MaxAccRadsJoints); n > 0 {
 		if n != dof {
 			return nil, fmt.Errorf(
-				"MoveOptions.MaxAccRadsJoints has %d entries but the arm has %d joints", n, dof)
+				"max_acc_degs_per_sec2_joints has %d entries but the arm has %d joints", n, dof)
 		}
 		for i, a := range opts.MaxAccRadsJoints {
 			limits[i].maxAccelDegsPerSecSq = utils.RadToDeg(a)

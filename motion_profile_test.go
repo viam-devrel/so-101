@@ -71,6 +71,19 @@ func TestCoordinatedProfiles(t *testing.T) {
 		}
 	})
 
+	t.Run("the longest travel need not be first", func(t *testing.T) {
+		// Every other case here puts the longest travel at index 0, so a loop-bound slip in
+		// the max scan would go unnoticed -- and that slip scales a joint ABOVE the
+		// reference, which is the one failure mode here with a safety edge.
+		got := coordinatedProfiles([]float64{10, 40}, refSpeed, refAccel, nil)
+		if want := degPerSecToStepsPerSec(12.5); got[0].speedSteps != want {
+			t.Errorf("short joint at index 0 = %d, want %d", got[0].speedSteps, want)
+		}
+		if want := degPerSecToStepsPerSec(50); got[1].speedSteps != want {
+			t.Errorf("long joint at index 1 = %d, want %d", got[1].speedSteps, want)
+		}
+	})
+
 	t.Run("direction does not matter, only magnitude", func(t *testing.T) {
 		fwd := coordinatedProfiles([]float64{40, 10}, refSpeed, refAccel, nil)
 		rev := coordinatedProfiles([]float64{-40, -10}, refSpeed, refAccel, nil)
@@ -136,6 +149,14 @@ func TestCoordinatedProfiles(t *testing.T) {
 			t.Errorf("reference joint accUnits = %d, which is at the clamp of %d; "+
 				"the default acceleration is too high and coordination is broken",
 				got[0].accUnits, maxAccUnits)
+		}
+		// Pinned from BELOW too. Asserting only "< the clamp" would let the default
+		// regress to the old 100 deg/s^2 -- which the spec measures as making a 20 degree
+		// move 124% longer instead of 25% -- without any test noticing.
+		if got, want := degPerSecSqToAccUnits(defaultAccelDegsPerSecSq), maxAccUnits-1; got != want {
+			t.Errorf("default %.0f deg/s^2 maps to Acc %d, want exactly %d: the spec requires "+
+				"the largest default that leaves the whole k range unclamped",
+				defaultAccelDegsPerSecSq, got, want)
 		}
 	})
 }
@@ -222,6 +243,53 @@ func TestReduceReferenceAndCaps(t *testing.T) {
 		}
 	})
 
+	t.Run("acceleration caps take the minimum across joints", func(t *testing.T) {
+		// The velocity mirror of this already exists. Without it, "last cap wins" instead
+		// of a minimum passes the suite -- and that lets a joint exceed its own cap.
+		caps := []jointLimits{
+			{maxAccelDegsPerSecSq: 300},
+			{maxAccelDegsPerSecSq: 100},
+			{maxAccelDegsPerSecSq: 500},
+		}
+		travels := []float64{40, 20, 10} // k = 1, 0.5, 0.25
+		got := coordinatedProfiles(travels, refSpeed, refAccel, caps)
+		// Binding reference is min(300/1, 100/0.5, 500/0.25) = 200 deg/s^2.
+		for i, k := range []float64{1, 0.5, 0.25} {
+			if want := degPerSecSqToAccUnits(200 * k); got[i].accUnits != want {
+				t.Errorf("joint %d accUnits = %d, want %d", i, got[i].accUnits, want)
+			}
+			if limit := degPerSecSqToAccUnits(caps[i].maxAccelDegsPerSecSq); got[i].accUnits > limit {
+				t.Errorf("joint %d accUnits = %d, exceeds its own cap of %d", i, got[i].accUnits, limit)
+			}
+		}
+	})
+
+	t.Run("negative travels work with caps applied", func(t *testing.T) {
+		// The existing direction test passes caps=nil, so reduceReference never runs
+		// against negative travels despite coordinatedProfiles documenting that it may.
+		caps := []jointLimits{{maxSpeedDegsPerSec: 25}, {}}
+		fwd := coordinatedProfiles([]float64{40, 10}, refSpeed, refAccel, caps)
+		rev := coordinatedProfiles([]float64{-40, -10}, refSpeed, refAccel, caps)
+		for i := range fwd {
+			if fwd[i] != rev[i] {
+				t.Errorf("joint %d: forward %+v != reverse %+v once caps are applied", i, fwd[i], rev[i])
+			}
+		}
+	})
+
+	t.Run("a negative cap is ignored, not applied", func(t *testing.T) {
+		// MoveOptions values come from protobuf with no sign validation, so a buggy client
+		// can send these. A negative cap must not drive the reference negative.
+		caps := []jointLimits{{maxSpeedDegsPerSec: -5, maxAccelDegsPerSecSq: -5}, {}}
+		got := coordinatedProfiles([]float64{40, 10}, refSpeed, refAccel, caps)
+		if want := degPerSecToStepsPerSec(refSpeed); got[0].speedSteps != want {
+			t.Errorf("speedSteps = %d, want %d (a negative cap must not bind)", got[0].speedSteps, want)
+		}
+		if want := degPerSecSqToAccUnits(refAccel); got[0].accUnits != want {
+			t.Errorf("accUnits = %d, want %d (a negative cap must not bind)", got[0].accUnits, want)
+		}
+	})
+
 	t.Run("a zero cap means uncapped, not stopped", func(t *testing.T) {
 		caps := []jointLimits{{maxSpeedDegsPerSec: 0}, {}}
 		got := coordinatedProfiles([]float64{40, 10}, refSpeed, refAccel, caps)
@@ -256,8 +324,11 @@ func TestJointLimitsFromMoveOptions(t *testing.T) {
 	t.Run("a per-joint slice IGNORES the scalar, per arm.proto", func(t *testing.T) {
 		// arm.proto: the scalar is "Ignored when max_vel_degs_per_sec_joints is set".
 		// RDK deliberately does not enforce this, so this driver must.
+		// The scalar is deliberately SMALLER than every slice entry. With a larger scalar,
+		// "ignore the scalar" and "min-merge the scalar" produce identical results, so the
+		// test would prove only that the slice is read -- not that the scalar is dropped.
 		opts := &arm.MoveOptions{
-			MaxVelRads:       utils.DegToRad(30),
+			MaxVelRads:       utils.DegToRad(5),
 			MaxVelRadsJoints: []float64{utils.DegToRad(10), utils.DegToRad(20)},
 		}
 		got, err := jointLimitsFromMoveOptions(opts, 2)
@@ -265,7 +336,7 @@ func TestJointLimitsFromMoveOptions(t *testing.T) {
 			t.Fatal(err)
 		}
 		if math.Abs(got[0].maxSpeedDegsPerSec-10) > 1e-9 {
-			t.Errorf("joint 0 = %v, want 10 (the scalar 30 must be ignored)", got[0].maxSpeedDegsPerSec)
+			t.Errorf("joint 0 = %v, want 10 (the scalar 5 must be ignored, not min-merged)", got[0].maxSpeedDegsPerSec)
 		}
 		if math.Abs(got[1].maxSpeedDegsPerSec-20) > 1e-9 {
 			t.Errorf("joint 1 = %v, want 20", got[1].maxSpeedDegsPerSec)
@@ -284,8 +355,9 @@ func TestJointLimitsFromMoveOptions(t *testing.T) {
 	t.Run("a per-joint ACCELERATION slice also ignores its scalar", func(t *testing.T) {
 		// The acceleration mirror of the velocity case above. Without it, merging the
 		// scalar into the slice on the acceleration path passes the whole suite.
+		// Scalar smaller than every slice entry, for the same reason as the velocity case.
 		opts := &arm.MoveOptions{
-			MaxAccRads:       utils.DegToRad(400),
+			MaxAccRads:       utils.DegToRad(50),
 			MaxAccRadsJoints: []float64{utils.DegToRad(100), utils.DegToRad(200)},
 		}
 		got, err := jointLimitsFromMoveOptions(opts, 2)
@@ -293,7 +365,7 @@ func TestJointLimitsFromMoveOptions(t *testing.T) {
 			t.Fatal(err)
 		}
 		if math.Abs(got[0].maxAccelDegsPerSecSq-100) > 1e-9 {
-			t.Errorf("joint 0 = %v, want 100 (the scalar 400 must be ignored)", got[0].maxAccelDegsPerSecSq)
+			t.Errorf("joint 0 = %v, want 100 (the scalar 50 must be ignored, not min-merged)", got[0].maxAccelDegsPerSecSq)
 		}
 		if math.Abs(got[1].maxAccelDegsPerSecSq-200) > 1e-9 {
 			t.Errorf("joint 1 = %v, want 200", got[1].maxAccelDegsPerSecSq)
@@ -304,6 +376,20 @@ func TestJointLimitsFromMoveOptions(t *testing.T) {
 		opts := &arm.MoveOptions{MaxAccRadsJoints: []float64{1, 2, 3}}
 		if _, err := jointLimitsFromMoveOptions(opts, 5); err == nil {
 			t.Error("a 3-entry acceleration slice on a 5-DoF arm was accepted, want an error")
+		}
+	})
+
+	t.Run("negative scalars are ignored, not treated as caps", func(t *testing.T) {
+		// Two independent guards exist for this -- here and in reduceReference -- and
+		// neither was tested. Values arrive from protobuf unvalidated.
+		got, err := jointLimitsFromMoveOptions(&arm.MoveOptions{MaxVelRads: -1, MaxAccRads: -1}, 3)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, l := range got {
+			if l.maxSpeedDegsPerSec != 0 || l.maxAccelDegsPerSecSq != 0 {
+				t.Errorf("joint %d = %+v, want both zero (no cap) for negative options", i, l)
+			}
 		}
 	})
 

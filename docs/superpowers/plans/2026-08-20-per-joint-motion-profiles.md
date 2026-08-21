@@ -626,7 +626,7 @@ func TestJointLimitsFromMoveOptions(t *testing.T) {
 		// arm.proto: the scalar is "Ignored when max_vel_degs_per_sec_joints is set".
 		// RDK deliberately does not enforce this, so this driver must.
 		opts := &arm.MoveOptions{
-			MaxVelRads:       utils.DegToRad(30),
+			MaxVelRads:       utils.DegToRad(5),
 			MaxVelRadsJoints: []float64{utils.DegToRad(10), utils.DegToRad(20)},
 		}
 		got, err := jointLimitsFromMoveOptions(opts, 2)
@@ -634,7 +634,7 @@ func TestJointLimitsFromMoveOptions(t *testing.T) {
 			t.Fatal(err)
 		}
 		if math.Abs(got[0].maxSpeedDegsPerSec-10) > 1e-9 {
-			t.Errorf("joint 0 = %v, want 10 (the scalar 30 must be ignored)", got[0].maxSpeedDegsPerSec)
+			t.Errorf("joint 0 = %v, want 10 (the scalar 5 must be ignored, not min-merged)", got[0].maxSpeedDegsPerSec)
 		}
 		if math.Abs(got[1].maxSpeedDegsPerSec-20) > 1e-9 {
 			t.Errorf("joint 1 = %v, want 20", got[1].maxSpeedDegsPerSec)
@@ -654,7 +654,7 @@ func TestJointLimitsFromMoveOptions(t *testing.T) {
 		// The acceleration mirror of the velocity case above. Without it, merging the
 		// scalar into the slice on the acceleration path passes the whole suite.
 		opts := &arm.MoveOptions{
-			MaxAccRads:       utils.DegToRad(400),
+			MaxAccRads:       utils.DegToRad(50),
 			MaxAccRadsJoints: []float64{utils.DegToRad(100), utils.DegToRad(200)},
 		}
 		got, err := jointLimitsFromMoveOptions(opts, 2)
