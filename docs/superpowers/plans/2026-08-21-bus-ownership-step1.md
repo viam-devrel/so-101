@@ -104,17 +104,31 @@ Do it before the restructure so the diff stays small and the regression test lan
 
 ## Task 4: One entry, one session, one handle
 
-The big one. All 20 `SafeSoArmController` methods get rewritten **once**. The type keeps its name until Task 7, so the 49 `s.controller.Method(...)` call sites in `arm.go`, `calibration.go`, and `manual_mode.go` are untouched by this task — only the field's *type* changes, and it changes to a same-named type.
+The big one. All 20 `SafeSoArmController` methods get rewritten **once**, and the type is renamed to `ControllerHandle` in the same pass — renaming a type while rewriting every one of its methods is one edit, not two. The 49 `s.controller.Method(...)` call sites are unaffected: same method names on the same field, only the field's declared type changes.
+
+**This task is NOT behavior-neutral, and it should not be framed that way in review.** Deleting the per-holder mutex and serializing on a shared one *is* the fix for problem 1 — the whole point is that the arm and the calibration sensor now exclude each other where they previously did not. Expect new contention between them; that is the feature. What must not change is the *result* of any operation.
 
 **Files:**
 - Create: `bus_session.go`, `bus_session_test.go`
-- Modify: `registry.go`, `manager.go`
+- Modify: `registry.go`, `manager.go`, `arm.go`, `calibration.go`, `manual_mode.go`
 
 - [ ] **Step 1: Write the failing test**
 
-`bus_session_test.go` — the two session tests plus the **Shared test helpers block** (`testRegistry`, `acquireTestHandle`, `testRegistryAndHandle`, `testHandle`, `cloneCalibration`, `stopReconnectAndWait`) from **Task 4, Step 1 of the serial-hotplug plan**. Copy that block; every later task in both plans uses it. Omit `stopReconnectAndWait` for now — it references reconnect fields that do not exist until hotplug.
+`bus_session_test.go` — the **Shared test helpers block** from **Task 4, Step 1 of the serial-hotplug plan** (`testRegistry`, `acquireTestHandle`, `testRegistryAndHandle`, `testHandle`, `cloneCalibration`), with two changes: omit `stopReconnectAndWait` (it references reconnect fields that do not exist until hotplug), and give `acquireTestHandle` an owner name, since Task 7 adds that parameter:
 
-Add the test this task is actually about:
+```go
+func acquireTestHandle(t *testing.T, r *ControllerRegistry) *ControllerHandle {
+	t.Helper()
+	owner := arm.Named("test-arm-" + t.Name())
+	h, err := r.AcquireController(owner, shortTimeoutConfig("/dev/fake0"),
+		DefaultSO101FullCalibration, true)
+	require.NoError(t, err)
+	t.Cleanup(h.Release)
+	return h
+}
+```
+
+Plus the test this task is about:
 
 ```go
 func TestAllHoldersShareOneControllerState(t *testing.T) {
@@ -133,63 +147,116 @@ func TestAllHoldersShareOneControllerState(t *testing.T) {
 Run: `go test -run 'TestWithSession|TestAllHoldersShare' -race .`
 Expected: FAIL — `undefined: busSession`, `ErrPortDisconnected`, `h.entry`.
 
-- [ ] **Step 3: Write `bus_session.go`**
+- [ ] **Step 3: Write `bus_session.go` — and settle the locking here**
 
-Take `busSession`, `ErrPortDisconnected`, `withSession`, `withSessionValue`, and `newBusSession` from **Task 4, Step 3 of the serial-hotplug plan**, with one change: the methods hang off `*SafeSoArmController` for now (Task 7 renames the type), and `newBusSession` takes the entry's single calibration.
+Take `busSession`, `ErrPortDisconnected`, and `newBusSession` from **Task 4, Step 3 of the serial-hotplug plan**. **Do not** take that plan's `withSession`: it acquires no lock, which was correct only because it was written to sit on top of an already-shared controller. This plan is what makes the controller shared, so the accessor here owns the locking.
 
-- [ ] **Step 4: Restructure the entry and the controller**
+```go
+// Two mutexes, deliberately. entry.busMu serializes bus WORK; entry.mu guards
+// bookkeeping (refCount, pins, torndown, calibration). Keeping them apart is what stops
+// a 1-second serial timeout from blocking a Release, an acquire, or a teardown -- and
+// what stops withSession from self-deadlocking when it reads calibration.
+//
+// Lock order: busMu -> entry.mu. Never the reverse.
+
+// withSession runs a bus WRITE. Exclusive, matching today's s.mu.Lock() paths.
+func (h *ControllerHandle) withSession(f func(*busSession) error) error {
+	h.entry.busMu.Lock()
+	defer h.entry.busMu.Unlock()
+	return h.runLocked(f)
+}
+
+// withSessionRead runs a bus READ. Shared, matching today's s.mu.RLock() paths.
+//
+// The distinction is worth preserving even though feetech.Bus serializes each individual
+// transaction internally (feetech/bus.go's b.mu): what the controller mutex buys is
+// MULTI-transaction atomicity, so a write sequence is not interleaved with reads.
+func (h *ControllerHandle) withSessionRead(f func(*busSession) error) error {
+	h.entry.busMu.RLock()
+	defer h.entry.busMu.RUnlock()
+	return h.runLocked(f)
+}
+
+func (h *ControllerHandle) runLocked(f func(*busSession) error) error {
+	sess := h.entry.session.Load()
+	if sess == nil {
+		return fmt.Errorf("%w: %s", ErrPortDisconnected, h.entry.port)
+	}
+	return h.entry.report(sess.gen, f(sess))
+}
+```
+
+Add `withSessionValue`/`withSessionValueRead` generic variants for the methods that return a value.
+
+**Define `report` here as a pass-through.** The copied method bodies call it, and hotplug gives it teeth later:
+
+```go
+// report is where a bus error will become a connection verdict once serial hotplug lands.
+// Until then it is the identity function. It must NOT take entry.mu -- withSession's
+// callers already hold busMu, and hotplug's version takes entry.mu internally.
+func (e *ControllerEntry) report(gen uint64, err error) error { return err }
+```
+
+- [ ] **Step 4: Restructure the entry and rename the controller**
 
 `ControllerEntry` gains:
 
 ```go
 	port     string                     // for error messages; no longer only in config
 	registry *ControllerRegistry        // for eviction at teardown (Task 9)
+	logger   logging.Logger             // was reached via entry.config.Logger
+	busMu    sync.RWMutex               // serializes bus work (problem 1's fix)
 	session  atomic.Pointer[busSession] // the single owner of the bus
 	gen      atomic.Uint64              // monotonic session counter
 ```
 
-The registry back-pointer is what lets `teardownIfLast` evict the entry from `r.entries`
-without the registry having to poll. It also means the entry reads `e.registry.busFactory`
-rather than caching its own copy — supersede the serial-hotplug plan's note about the entry
-"needing no registry back-pointer", which predates this teardown design.
+The registry back-pointer is what lets `teardownIfLast` evict the entry from `r.entries`. It also means the entry reads `e.registry.busFactory` rather than caching a copy — supersede the serial-hotplug plan's note about the entry "needing no registry back-pointer", which predates this teardown design.
 
-`SafeSoArmController` loses `bus`, `group`, `calibratedServos`, **and `mu`**, keeping only:
+**`ControllerEntry.controller` is deleted.** A `*ControllerHandle` holding only `{entry, logger}` would be circular and meaningless. Three live reads must be converted to `entry.session.Load() != nil`:
+
+| Site | Was | Becomes |
+|---|---|---|
+| `registry.go:56` | `entry.controller == nil` guard | `entry.session.Load() == nil` |
+| `registry.go:302` | `hasController` in `GetControllerStatus` | `entry.session.Load() != nil` |
+| `registry.go:277` | `ForceCloseController`'s nil check | same, or delete with the function (Task 10) |
+
+Three test literals construct entries with a `controller` field and need updating: `registry_test.go:223`, `:258`, `:361`.
+
+`SafeSoArmController` is renamed **`ControllerHandle`** and reduced to:
 
 ```go
-type SafeSoArmController struct {
+type ControllerHandle struct {
 	entry  *ControllerEntry
 	logger logging.Logger // per-holder, so log lines name the component that acted
 }
 ```
 
-Deleting `mu` is the fix for problem 1: serialization moves to `entry.mu`, which is genuinely shared. `withSession` takes it.
+Both registry return paths (`registry.go:98`, `:220`) return `&ControllerHandle{entry: entry, logger: config.Logger}`.
 
-`createNewController` builds the session with `newBusSession` and `entry.session.Store(...)` instead of assembling the three fields inline. The `!fromFile` register-read path stays, but must rebuild the session afterwards so the servos carry the calibration just read.
-
-Both registry return paths (`registry.go:98`, `:220`) now return `&SafeSoArmController{entry: entry, logger: config.Logger}`.
+Rename sites beyond the three component fields — all compile errors, listed so they are not a scavenger hunt: `servo_commands_test.go:220` (`var _ servoOps = (*SafeSoArmController)(nil)`), `manual_mode.go:226` (constructor parameter), and `manager.go:512`'s `GetSharedController` (update it now; Task 10 deletes it).
 
 - [ ] **Step 5: Convert all 20 methods**
 
-Every method that touched `s.bus`, `s.group`, or `s.calibratedServos` becomes a `withSession`/`withSessionValue` call. The sample conversion in **Task 4, Step 5 of the serial-hotplug plan** shows the shape. Three rules:
+Each method that touched `s.bus`, `s.group`, or `s.calibratedServos` becomes a `withSession*` call. **Preserve today's read/write split exactly:** the five methods that took `s.mu.Lock()` (`MoveToJointPositions`, `MoveServosToPositions` and the single-servo movers, `SetTorqueEnable`, `Stop`, `WriteServoRegister`, `SetCalibration`) use `withSession`; the `RLock` methods use `withSessionRead`. Read each method's current lock before converting it rather than guessing from the name.
+
+Three rules:
 
 1. **Argument validation stays outside `withSession`** — a malformed call must fail the same way whether or not the port is up, and must never reach the error classifier hotplug adds later.
-2. **Do not wrap `Close`.** Closing the bus is teardown, not a session operation. (In fact `SafeSoArmController.Close` becomes dead — nothing should close a *shared* bus from a per-holder method. Delete it and let Task 9's teardown own closing.)
-3. **`WaitForServosToStop` keeps its lock-free polling** (`manager.go:331-341`) — capture servos, release the lock, poll. Hotplug adds the generation guard; do not add it here, and do not "fix" the lock-free design.
+2. **`ControllerHandle.Close` is deleted.** Nothing should close a *shared* bus from a per-holder method; Task 9's teardown owns closing.
+3. **`WaitForServosToStop` keeps its lock-free polling** (`manager.go:331-341`) — capture servos under the read lock, release it, poll. Hotplug adds the generation guard; do not add it here, and do not "fix" the lock-free design.
 
 - [ ] **Step 6: Run the full suite**
 
 Run: `go test ./cmd/module/ . -race 2>&1 | tail -30`
-Expected: PASS. This task must be behavior-neutral; any changed behavior is a refactor bug.
+Expected: PASS. Results must be unchanged; timing and contention may not be.
 
 - [ ] **Step 7: Commit**
 
 ```bash
 gofmt -s -w . && go vet ./cmd/module/ .
-git add bus_session.go bus_session_test.go registry.go manager.go
+git add bus_session.go bus_session_test.go registry.go manager.go arm.go calibration.go manual_mode.go
 git commit -m "refactor: one shared controller state per port, behind a bus session"
 ```
-
----
 
 ## Task 5: Collapse the two calibrations
 
@@ -210,6 +277,8 @@ func TestCalibrationHasASingleSourceOfTruth(t *testing.T) {
 	updated := cloneCalibration(DefaultSO101FullCalibration)
 	updated.Gripper.RangeMin = 1234
 	require.NoError(t, h1.SetCalibration(updated))
+	assert.Equal(t, 1234, h1.entry.calibration.Gripper.RangeMin,
+		"the session-rebuild seed must track SetCalibration, or a replug undoes it")
 
 	// The read path and the write path must agree, through either holder.
 	assert.Equal(t, 1234, h2.GetCalibration().Gripper.RangeMin)
@@ -250,6 +319,22 @@ Every read of a servo's calibration goes through `Calibration()` — never the s
 
 The prior spec offers a fallback (route the acquire-time update through `SetCalibration`), but it leaves two copies and one more chance to desynchronize. Take the collapse.
 
+**`entry.calibration` is the second copy that survives, and it must not go stale.** `newBusSession(bus, cal, gen)` seeds every servo *from it*, so any session rebuild — the `!fromFile` register-read path here, and hotplug's reconnect later — resurrects whatever it holds. But `SetCalibration` (reached from `arm.go:970`'s `reload_calibration`) writes only the per-servo calibration. Left alone, a `reload_calibration` followed by a replug would silently restore the pre-reload values.
+
+So `SetCalibration` updates **both** under `entry.mu`: the per-servo calibrations (the read/write source of truth) and `entry.calibration` (the session-rebuild seed). `GetControllerStatus`'s custom-vs-default label also reads `entry.calibration`, so it stays meaningful.
+
+Add the accessor the converted method bodies need:
+
+```go
+// calibrationFor replaces manager.go:63's s.calibration.GetMotorCalibrationByID(servoID).
+// It reads entry.calibration, so it must not be called while holding entry.mu.
+func (e *ControllerEntry) calibrationFor(servoID int) *MotorCalibration {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.calibration.GetMotorCalibrationByID(servoID)
+}
+```
+
 - [ ] **Step 4: Check `calculateJointLimits`**
 
 `arm.go:376` consumes `GetCalibration()` to build joint limits. **This is the likeliest place for the collapse to change behavior**, because it previously read `s.calibration` — the copy the registry's acquire-time update never touched. After the collapse it sees post-update values. Read that function and confirm the new values are the correct ones (they are: the per-servo calibration is what the servos actually use). Run `go test -run TestArm -race .` and read any diff in expected limits carefully rather than adjusting the test to match.
@@ -273,11 +358,17 @@ git commit -m "fix: collapse the controller's two calibration copies into one"
 
 Problem 6. The sensor reaches past the controller in eight places, taking no controller lock at all — so those calls are unserialized against every other resource *even in principle*. They are also the raw-bus pointers that would let a caller bypass a session swap, which is why hotplug depends on this task specifically.
 
+Note this is where the sensor's 10 ms `recordPositions` loop starts sharing `busMu` with the arm's motion path for the first time. That contention is the point of problem 6, not a regression.
+
 **Files:**
 - Modify: `manager.go`, `calibration.go`
-- Modify: `manager_test.go`
+- Modify: `manager_test.go`, `hotplug_fake_test.go`
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Extend the fake**
+
+Add to `hotplug_fake_test.go` (mutex-guarded, like the rest): `setRegister(id int, address byte, value []byte)`, `closeCount() int` (incremented in `Close`, needed by Task 9), and a package-level `encodeWordLE(v int) []byte` helper over `feetech.NewProtocol(feetech.ProtocolSTS).EncodeWord`. Note them in Task 11 — hotplug's Task 8 would otherwise add `setRegister` a second time.
+
+- [ ] **Step 2: Write the failing tests**
 
 ```go
 func TestSyncReadPositionsDecodesInsideTheHandle(t *testing.T) {
@@ -297,16 +388,21 @@ func TestPingServoReachesOneServo(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, fakeModelNumber, model)
 }
+
+func TestServoPresentReportsConfiguredServos(t *testing.T) {
+	ft := newFakeTransport()
+	h := testHandle(t, ft)
+	assert.True(t, h.ServoPresent(6))
+	assert.False(t, h.ServoPresent(9), "motorSetupVerify needs absent-vs-unresponsive")
+}
 ```
 
-`encodeWordLE` is a two-line test helper using `feetech.NewProtocol(feetech.ProtocolSTS).EncodeWord`.
+- [ ] **Step 3: Run to verify they fail**
 
-- [ ] **Step 2: Run to verify they fail**
-
-Run: `go test -run 'TestSyncReadPositions|TestPingServo' -race .`
+Run: `go test -run 'TestSyncReadPositions|TestPingServo|TestServoPresent' -race .`
 Expected: FAIL — methods undefined.
 
-- [ ] **Step 3: Add five handle methods**
+- [ ] **Step 4: Add seven handle methods**
 
 ```go
 // SyncReadPositions reads present position for the given servos and returns decoded ticks.
@@ -317,9 +413,17 @@ Expected: FAIL — methods undefined.
 // Protocol() disappears from the sensor entirely.
 func (h *ControllerHandle) SyncReadPositions(ctx context.Context, ids []int) (map[int]int, error)
 
-// PingServo pings one servo and returns its model number. Replaces calibration.go:1045's
-// reach into calibratedServos.
+// PingServo pings one servo and returns its model number.
 func (h *ControllerHandle) PingServo(ctx context.Context, id int) (int, error)
+
+// DetectServoModel runs the servo's model auto-detection and returns the detected name.
+// Wraps the DetectModel + Model().Name pair at calibration.go:1057-1067.
+func (h *ControllerHandle) DetectServoModel(ctx context.Context, id int) (string, error)
+
+// ServoPresent reports whether the session has a servo with this ID. No bus traffic.
+// motorSetupVerify distinguishes "not in the controller" from "did not answer", so a
+// ping-only API cannot express its `not_found` case.
+func (h *ControllerHandle) ServoPresent(id int) bool
 
 // Discover sweeps every bus ID. Replaces calibration.go:1103 and :1165.
 func (h *ControllerHandle) Discover(ctx context.Context) ([]feetech.FoundServo, error)
@@ -329,85 +433,96 @@ func (h *ControllerHandle) SetServoID(ctx context.Context, currentID, targetID i
 func (h *ControllerHandle) SetServoBaudRate(ctx context.Context, id, baudRate int) error
 ```
 
-Each body is a `withSession`/`withSessionValue` call over `sess.bus` or `sess.servos[id]`.
+Read methods use `withSessionRead`; `SetServoID`/`SetServoBaudRate` are writes and use `withSession`.
 
-**`Discover` must return `[]feetech.FoundServo`, not the `[]int` the prior spec sketches.** Both call sites read `servo.Model.Name` (`calibration.go:1113-1115`, `:1179`), so narrowing to IDs would break them. This is a concrete correction to the design of record.
+**`Discover` must return `[]feetech.FoundServo`, not the `[]int` the prior spec sketches.** Both call sites read `servo.Model.Name` (`calibration.go:1113-1115`, `:1179`), so narrowing to IDs breaks them. A concrete correction to the design of record.
 
-- [ ] **Step 4: Convert the eight sites**
+**`SyncReadPositions` passes `dataLen = 2`, not `len(ids)`.** Both existing sites pass `len(cs.cfg.ServoIDs)` as feetech's `dataLen` argument (`calibration.go:463`, `:565`) — wrong but harmless at exactly six servos, since a position is two bytes. Fix it deliberately in the new method; keeping the bug would make the single-id test above panic inside `DecodeWord`.
+
+- [ ] **Step 5: Convert the eight sites**
 
 | Site | Was | Becomes |
 |---|---|---|
 | `calibration.go:463`+`:468` | `bus.SyncRead` + `bus.Protocol().DecodeWord` | `SyncReadPositions` |
 | `:565`+`:570` | same, in `recordPositions` | `SyncReadPositions` |
-| `:1045` | `calibratedServos[id].Ping` | `PingServo` |
+| `:1045` | `calibratedServos[id]` → `Ping`, `DetectModel`, `Model().Name` | `ServoPresent`, `PingServo`, `DetectServoModel` |
 | `:1103` | `bus.Discover` | `Discover` |
 | `:1165` | `bus.Discover` | `Discover` |
 | `:1193` | `calibratedServos[id]` → `Ping`/`SetID`/`SetBaudRate` | `PingServo`, `SetServoID`, `SetServoBaudRate` |
+
+`motorSetupVerify`'s three result states (`not_found`, `not_responding`, `model_detection_failed`, plus `ok`) must all survive the conversion — check the strings against `calibration.go:1044-1070` rather than reconstructing them.
 
 Then verify nothing reaches the bus any more:
 
 Run: `grep -n "controller\.bus\|controller\.calibratedServos" *.go`
 Expected: **no output.** If anything remains, the handle is not the only path to the bus and hotplug's session swap has a hole.
 
-- [ ] **Step 5: Run and commit**
+- [ ] **Step 6: Run and commit**
 
 Run: `go test ./cmd/module/ . -race 2>&1 | tail -20`
 Expected: PASS.
 
 ```bash
 gofmt -s -w . && go vet ./cmd/module/ .
-git add manager.go calibration.go manager_test.go
+git add manager.go calibration.go manager_test.go hotplug_fake_test.go
 git commit -m "refactor(calibration): reach the bus only through the controller handle"
 ```
 
-**Accepted carry-forward:** `SetServoID` changes a servo's ID while the session's `servos` map is still keyed by the old one, so the map is stale until the next acquire. That is exactly today's behavior (`calibratedServos` has the same staleness), the motor-setup workflow is explicitly driven and reconfigures afterwards, and fixing it means rebuilding the session mid-workflow. Left as-is deliberately — note it in the PR body rather than fixing it here.
+**Accepted carry-forward:** `SetServoID` changes a servo's ID while the session's `servos` map is still keyed by the old one, so the map is stale until the next acquire. That is exactly today's behavior (`calibratedServos` has the same staleness), the motor-setup workflow is explicitly driven and reconfigures afterwards, and fixing it means rebuilding the session mid-workflow. Left as-is deliberately — note it in the PR body.
 
----
+## Task 7: `AcquireController` and per-handle identity
 
-## Task 7: Rename to `ControllerHandle` / `AcquireController`
-
-Pure rename plus per-handle identity. No method bodies change. Doing it as its own commit keeps Task 4's behavior-neutral refactor reviewable.
+The rename landed in Task 4. This task adds the acquire API the tests and hotplug need, and the per-handle identity fields.
 
 **Files:**
-- Modify: `manager.go`, `registry.go`, `arm.go`, `calibration.go`, `manual_mode.go`
+- Modify: `manager.go`, `registry.go`, `arm.go`, `calibration.go`
 
-- [ ] **Step 1: Rename the type and constructor**
+- [ ] **Step 1: Add both forms of the acquire API**
 
-`SafeSoArmController` → `ControllerHandle`. `GetSharedControllerWithCalibration` → `AcquireController`, taking the owner's name for diagnostics:
+**Two are needed, and the plan's tests depend on the method form.** Tests must drive a registry with an injected `busFactory`, not `globalRegistry`, so the method is the real entry point and the package-level function is a thin delegate:
 
 ```go
-func AcquireController(
+// AcquireController is the registry-scoped entry point. Tests use this one.
+func (r *ControllerRegistry) AcquireController(
 	owner resource.Name, config *SoArm101Config,
 	calibration SO101FullCalibration, fromFile bool,
 ) (*ControllerHandle, error)
+
+// AcquireController delegates to the process-wide registry. Production uses this one.
+func AcquireController(
+	owner resource.Name, config *SoArm101Config,
+	calibration SO101FullCalibration, fromFile bool,
+) (*ControllerHandle, error) {
+	return globalRegistry.AcquireController(owner, config, calibration, fromFile)
+}
 ```
 
-`ControllerHandle` gains `owner resource.Name` and `released atomic.Bool`.
+The method wraps today's `GetController` and is where Task 9's seam goes.
 
-**`owner` is for diagnostics only — never an identity key.** `resource.Name` is stable across an `AlwaysRebuild` cycle, so a rebuilt resource would otherwise impersonate its predecessor. Identity is the handle pointer. (This matters for step 2's leases; recording it now costs nothing and prevents the wrong habit forming.)
+`ControllerHandle` gains `owner resource.Name`, `released atomic.Bool`, and `releaseOnce sync.Once`.
 
-- [ ] **Step 2: Update the three field declarations and their call sites**
+**`owner` is for diagnostics only — never an identity key.** `resource.Name` is stable across an `AlwaysRebuild` cycle, so a rebuilt resource would otherwise impersonate its predecessor. Identity is the handle pointer. `released` is written here and read only by Change B step 2; that is intentional.
 
-`arm.go`, `calibration.go`, `manual_mode.go`: field type `*SafeSoArmController` → `*ControllerHandle`. The 49 `controller.Method(...)` sites are unaffected — same method names on the same field.
+- [ ] **Step 2: Update the constructors**
 
-Constructors call `AcquireController(name, ...)`. `ReleaseSharedController()` becomes `h.Release()` at `arm.go:1081` and `calibration.go:1239`.
+`arm.go:466` and `calibration.go:172` call `AcquireController(name, ...)` — both already have a `resource.Name` in scope. `ReleaseSharedController()` becomes `h.Release()` at `arm.go:1081` and `calibration.go:1239`.
 
 - [ ] **Step 3: Run and commit**
 
 Run: `go test ./cmd/module/ . -race 2>&1 | tail -20`
-Expected: PASS.
+Expected: PASS. `Release` is still effectively a no-op at this point — Task 9 gives it teeth.
 
 ```bash
 gofmt -s -w . && go vet ./cmd/module/ .
-git add manager.go registry.go arm.go calibration.go manual_mode.go
-git commit -m "refactor: rename the shared controller to ControllerHandle"
+git add manager.go registry.go arm.go calibration.go
+git commit -m "feat(registry): AcquireController with per-handle identity"
 ```
-
----
 
 ## Task 8: Join the sensor's recording goroutine
 
 **This must land before Task 9, not after.** `so101CalibrationSensor.Close` (`calibration.go:1227-1243`) cancels `recordingCtx` but never waits for `recordPositions` (`:544-635`), a 10 ms ticker calling `SyncReadPositions`. Today that is latent *only because `Release` is a no-op and the bus is never closed*. Making `Release` work in Task 9 is what makes it reachable: a reconfigure during `StateRangeRecording` would close the serial port under a live goroutine mid-read.
+
+**The obvious implementation deadlocks.** `Close` holds `cs.mu.Lock()` under a defer for its whole body (`calibration.go:1228-1229`), and `stopRangeRecording` runs inside `DoCommand`, which does the same (`:301-302`). Meanwhile `recordPositions` takes `cs.mu.RLock()` at `:556` and `cs.mu.Lock()` at `:610` on **every tick**. Waiting on a `done` channel while holding `cs.mu` hangs whenever the goroutine is mid-tick, and cancelling the context does not help — it is already past its `select`. The failure is a hung test, not a red one.
 
 **Files:**
 - Modify: `calibration.go`
@@ -416,21 +531,29 @@ git commit -m "refactor: rename the shared controller to ControllerHandle"
 
 ```go
 func TestClosingDuringRecordingJoinsTheGoroutine(t *testing.T) {
-	// Start recording, then Close, and assert the goroutine has exited before Close
-	// returns -- otherwise Task 9's bus close lands under a live SyncReadPositions.
-	// Assert on the done channel, not on a sleep.
+	// Start range recording, then Close, and assert recordPositions has exited BEFORE
+	// Close returns -- otherwise Task 9's bus close lands under a live SyncReadPositions.
+	// Assert on the done channel, never on a sleep. Bound the wait and t.Fatal on timeout
+	// so the deadlock described above surfaces as a failure rather than a hang.
 }
 ```
 
-Write it against the sensor's actual construction path; if the sensor cannot be built without hardware, assert on `recordPositions`' `done` channel directly through a small exported-for-test seam rather than skipping the test.
+Write it against the sensor's real construction path. If the sensor cannot be built without hardware, assert on `recordPositions`' `done` channel through a small test-only seam rather than skipping the test — an untested join is what this task exists to prevent.
 
-- [ ] **Step 2: Add the done channel**
+- [ ] **Step 2: Add the done channel, and drop the lock before joining**
 
-`recordPositions` gains a `done chan struct{}` closed on exit. `Close` (`calibration.go:1227`) and `stopRangeRecording` (`:645-648`) both cancel *and then join* it. This is the same audit manual mode already passes (`manual_mode.go:111` — `stop()` is synchronous).
+`recordPositions` gains a `done chan struct{}` closed on exit. Both `Close` and `stopRangeRecording` (`:645-648`) must:
+
+1. take `cs.mu`, copy `recordingCancel` and `done` into locals, clear the fields, **release `cs.mu`**;
+2. call cancel;
+3. wait on `done` (bounded — log and continue on timeout rather than hanging a reconfigure forever).
+
+For `stopRangeRecording` that means restructuring `DoCommand`'s lock scope so the join happens outside it. This is the same audit manual mode already passes (`manual_mode.go:111` — `stop()` is synchronous).
 
 - [ ] **Step 3: Run and commit**
 
-Run: `go test ./cmd/module/ . -race 2>&1 | tail -20`
+Run: `go test ./cmd/module/ . -race -timeout 120s 2>&1 | tail -20`
+Expected: PASS. A timeout here means the lock was still held across the join.
 
 ```bash
 gofmt -s -w . && go vet ./cmd/module/ .
@@ -438,17 +561,19 @@ git add calibration.go
 git commit -m "fix(calibration): join the recording goroutine before returning from Close"
 ```
 
----
-
 ## Task 9: Make `Release` real
 
-The heart of it. This is where hotplug's five lifecycle contracts get built.
+The heart of it, and where hotplug's lifecycle contracts get built.
 
 **Files:**
 - Modify: `registry.go`, `manager.go`
 - Modify: `registry_test.go`
 
-- [ ] **Step 1: Write the failing tests**
+- [ ] **Step 1: Convert `refCount` off `sync/atomic`**
+
+It is an `int64` driven by `atomic` in eight places (`registry.go:19`, `:64`, `:95`, `:210`, `:241`, `:256`, `:282`, `:301`; `manager.go:551`). The teardown logic below needs it read together with `pins` under one lock, and a mixed atomic/mutex field is the kind of thing that reads as correct and is not. Make it a plain `int` guarded by `entry.mu` and convert every site.
+
+- [ ] **Step 2: Write the failing tests**
 
 ```go
 func TestReleaseClosesTheBusOnlyAfterTheLastHolder(t *testing.T) {
@@ -459,12 +584,14 @@ func TestReleaseClosesTheBusOnlyAfterTheLastHolder(t *testing.T) {
 
 	h1.Release()
 	assert.NotNil(t, entry.session.Load(), "one holder left; the bus must stay open")
+	assert.Equal(t, 0, ft.closeCount())
 
 	h2.Release()
 	r.mu.RLock()
 	_, present := r.entries["/dev/fake0"]
 	r.mu.RUnlock()
 	assert.False(t, present, "the last release must evict the entry")
+	assert.Equal(t, 1, ft.closeCount())
 }
 
 func TestReleaseIsIdempotent(t *testing.T) {
@@ -472,8 +599,10 @@ func TestReleaseIsIdempotent(t *testing.T) {
 	r, h := testRegistryAndHandle(t, ft)
 	h.Release()
 	h.Release() // a double Close must not double-decrement into a negative refCount
+	assert.Equal(t, 1, ft.closeCount())
+
 	h2 := acquireTestHandle(t, r)
-	assert.NotNil(t, h2.entry.session.Load())
+	assert.NotNil(t, h2.entry.session.Load(), "a fresh acquire must open a fresh entry")
 }
 
 func TestTryPinRefusesOnceTeardownHasBegun(t *testing.T) {
@@ -491,29 +620,38 @@ func TestTeardownRunsExactlyOnce(t *testing.T) {
 	entry := h.entry
 
 	h.Release()
-	// A pin acquired before teardown, released after, must not tear down a second time.
+	entry.teardownIfLast() // a redundant call must be inert
 	entry.teardownIfLast()
-	entry.teardownIfLast()
-	// No panic, no double delete; the fake's Close is counted.
 	assert.Equal(t, 1, ft.closeCount())
+}
+
+func TestAcquireNeverJoinsATornDownEntry(t *testing.T) {
+	ft := newFakeTransport()
+	r, h := testRegistryAndHandle(t, ft)
+	torn := h.entry
+
+	h.Release()
+	h2 := acquireTestHandle(t, r)
+	assert.NotSame(t, torn, h2.entry,
+		"joining a torn-down entry would hand back a permanently dead handle")
+	assert.NotNil(t, h2.entry.session.Load())
 }
 ```
 
-Add `closeCount()` to the fake (mutex-guarded counter incremented in `Close`).
+- [ ] **Step 3: Run to verify they fail**
 
-- [ ] **Step 2: Run to verify they fail**
-
-Run: `go test -run 'TestRelease|TestTryPin|TestTeardown' -race .`
+Run: `go test -run 'TestRelease|TestTryPin|TestTeardown|TestAcquireNever' -race .`
 Expected: FAIL — `Release` is the PC-keyed no-op; `tryPin`/`teardownIfLast` undefined.
 
-- [ ] **Step 3: Build the counters and the teardown**
+- [ ] **Step 4: Build the counters and the teardown**
 
 ```go
 // ControllerEntry lifecycle:
 //   refCount -- live handles
-//   pins     -- in-flight users that are NOT handles: an acquire mid-flight today, and
-//               serial hotplug's reconnect goroutine later
-//   torndown -- once guard
+//   pins     -- in-flight users that are NOT handles. Built and tested here, WIRED BY
+//               NOTHING until serial hotplug's reconnect goroutine. See the lifecycle
+//               contracts at the top of this plan before looking for a caller.
+//   torndown -- once guard; also makes the entry invisible to a new acquire
 //
 // Whichever of refCount and pins reaches zero LAST performs the teardown. Release is
 // idempotent via a per-handle once, so the releasing handle structurally cannot come back
@@ -521,7 +659,7 @@ Expected: FAIL — `Release` is the PC-keyed no-op; `tryPin`/`teardownIfLast` un
 func (e *ControllerEntry) tryPin() bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.torndown || e.tearingDown {
+	if e.torndown {
 		return false // REFUSABLE: hotplug relies on this to not start a doomed loop
 	}
 	e.pins++
@@ -530,33 +668,46 @@ func (e *ControllerEntry) tryPin() bool {
 
 func (e *ControllerEntry) unpin() {
 	e.mu.Lock()
-	last := e.pins-1 == 0 && e.refCount == 0
 	e.pins--
 	e.mu.Unlock()
-	if last {
-		e.teardownIfLast()
-	}
+	e.teardownIfLast() // safe to call unconditionally; it re-reads both counters
 }
 
-// teardownIfLast closes the bus and evicts the entry, at most once. It is once-guarded
-// rather than a re-read of the counters: the two decrements race, and a predicate that
-// re-read them could fire twice.
+// teardownIfLast closes the bus and evicts the entry, at most once.
+//
+// It takes registry.mu BEFORE entry.mu and evicts inside the same critical section that
+// sets torndown. Both halves matter: taking entry.mu first would invert the order against
+// GetController (which holds r.mu and then entry.mu), and evicting after releasing the
+// locks leaves a window where GetController finds a dead entry, raises its refCount, and
+// hands back a permanently disconnected handle -- after which the eviction lands and the
+// next acquire opens a SECOND bus on the same port. TestConcurrentRegistryAccess
+// (registry_test.go:378-410) hammers exactly this path.
+//
+// The bus is closed only after both locks are released: Close can block, and nothing else
+// needs to wait behind it. In-flight bus ops are safe -- feetech.Bus.Close sets closed
+// under its own mutex, so they finish and later ones get ErrBusClosed.
 func (e *ControllerEntry) teardownIfLast() {
+	r := e.registry
+	r.mu.Lock()
 	e.mu.Lock()
 	if e.torndown || e.refCount > 0 || e.pins > 0 {
 		e.mu.Unlock()
+		r.mu.Unlock()
 		return
 	}
 	e.torndown = true
 	sess := e.session.Swap(nil)
+	if r.entries[e.port] == e {
+		delete(r.entries, e.port)
+	}
 	e.mu.Unlock()
+	r.mu.Unlock()
 
 	if sess != nil {
 		if err := sess.bus.Close(); err != nil && e.logger != nil {
 			e.logger.Warnf("error closing shared bus for port %s: %v", e.port, err)
 		}
 	}
-	e.registry.evict(e.port)
 }
 ```
 
@@ -569,51 +720,56 @@ func (h *ControllerHandle) Release() {
 		e := h.entry
 		e.mu.Lock()
 		e.refCount--
-		last := e.refCount == 0 && e.pins == 0
 		e.mu.Unlock()
-		// NO entry lock held here. Serial hotplug inserts e.cancelReconnect() at this
-		// point, and that path takes reconnectMu then entry.mu -- holding entry.mu here
-		// would invert the order. See the lifecycle contracts at the top of this plan.
-		if last {
-			e.teardownIfLast()
-		}
+		// NO lock held here. Serial hotplug inserts e.cancelReconnect() at this point,
+		// and that path takes reconnectMu then entry.mu -- holding entry.mu here would
+		// invert the order. See the lifecycle contracts at the top of this plan.
+		e.teardownIfLast()
 	})
 }
 ```
 
-Name the fields and the once whatever fits, but keep three properties: `Release` is idempotent, it reaches `teardownIfLast` with no lock held, and `teardownIfLast` is once-guarded.
+Calling `teardownIfLast` unconditionally, rather than precomputing a `last` flag, is deliberate: it re-reads both counters under the lock, so a concurrent `unpin` and `Release` in either order reach a correct decision exactly once.
 
-- [ ] **Step 4: Leave the acquire seam**
+**Belt-and-braces for the acquire path:** have `getExistingController` treat a `torndown` entry as absent and return a sentinel that makes `GetController` fall through to `createNewController`. The eviction above already closes the window; this makes a future refactor that reopens it fail loudly instead of silently.
 
-In `AcquireController`, after `getExistingController` has returned and **its `entry.mu` is released**:
+- [ ] **Step 5: Retire the old teardown**
+
+`ControllerRegistry.ReleaseController` (`registry.go:229-259`) is the *previous* teardown: it decrements `refCount` atomically, closes the bus, and deletes the entry, entirely outside the new `torndown` guard. Left in place there are two teardown paths — double `bus.Close()`, negative `refCount`. Either delete it or reduce it to `entry.mu` decrement + `teardownIfLast()`. Two existing tests drive it (`registry_test.go:87`, `:236`) and must be rewritten against `Release`.
+
+- [ ] **Step 6: Leave the acquire seam**
+
+In `(*ControllerRegistry).AcquireController`, after `GetController` returns — so outside both `r.mu` and `entry.mu`:
 
 ```go
-	h, err := r.getExistingController(entry, config, calibration, fromFile)
+	h, err := r.GetController(config.Port, config, calibration, fromFile)
 	if err != nil {
 		return nil, err
 	}
-	// Seam: serial hotplug calls entry.resumeReconnect() here. It MUST stay outside
-	// getExistingController, which holds entry.mu under a defer for its whole body
-	// (registry.go:52-53) -- calling in from inside self-deadlocks through tryPin.
+	h.owner = owner
+	// Seam: serial hotplug calls h.entry.resumeReconnect() here.
+	//
+	// It must be HERE and nowhere deeper. getExistingController holds entry.mu under a
+	// defer for its whole body (registry.go:52-53), and createNewController calls it
+	// (registry.go:112) while holding r.mu -- so a seam placed in either would run under
+	// a lock that resumeReconnect's tryPin needs.
 	return h, nil
 ```
 
 Leave the comment even though nothing calls it yet. It is the whole reason this seam exists.
 
-- [ ] **Step 5: Run to verify they pass**
+- [ ] **Step 7: Run to verify they pass**
 
 Run: `go test ./cmd/module/ . -race 2>&1 | tail -30`
 Expected: PASS. Watch for pre-existing tests that assumed a growing refCount — `TestGetControllerStatus` and friends may need updating, and that is a real behavior change, not a test to paper over.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 gofmt -s -w . && go vet ./cmd/module/ .
 git add registry.go manager.go registry_test.go
 git commit -m "fix(registry): make Release actually release, with refcount and pins"
 ```
-
----
 
 ## Task 10: Delete the dead machinery
 
@@ -622,14 +778,15 @@ git commit -m "fix(registry): make Release actually release, with refcount and p
 
 - [ ] **Step 1: Delete**
 
-- `trackCaller`, `releaseFromCaller`, `callerPorts`, `callerMu` (`registry.go`) — the `runtime.Caller` PC map that made `Release` a no-op.
+- `trackCaller`, `releaseFromCaller`, `callerPorts`, `callerMu` (`registry.go`) — the `runtime.Caller` PC map that made `Release` a no-op. `registry_test.go:41` asserts `registry.callerPorts != nil` and must go with it.
 - `ReleaseSharedController`, `GetSharedController` (`manager.go:512`), `ForceCloseSharedController` (`manager.go:524`) — all callerless.
-- `ForceCloseController` — keep only if a test needs it; it had no production callers.
+- `ControllerRegistry.ReleaseController` and `ForceCloseController`, if Task 9 Step 5 did not already fold them in. Neither had a production caller.
+- `getCalibrationForServo` (`manager.go:474`) — **delete rather than convert**; its only two callers are commented out (`calibration.go:441`, `:587`).
 - `gripper.go:153-157`'s `ReleaseSharedController()` — the gripper has held no controller since the arm-dependency change (`gripper.go:94` says so), and it no-oped anyway.
 
 - [ ] **Step 2: Verify**
 
-Run: `grep -rn "runtime.Caller\|callerPorts\|ReleaseSharedController\|GetSharedController\b" *.go`
+Run: `grep -rn "runtime.Caller\|callerPorts\|ReleaseSharedController\|GetSharedController\b\|getCalibrationForServo" *.go`
 Expected: no output.
 
 - [ ] **Step 3: Run and commit**
@@ -638,24 +795,31 @@ Run: `go test ./cmd/module/ . -race 2>&1 | tail -20`
 
 ```bash
 gofmt -s -w . && go vet ./cmd/module/ .
-git add registry.go manager.go gripper.go
+git add registry.go manager.go gripper.go registry_test.go
 git commit -m "chore: delete the PC-keyed release machinery and its callerless helpers"
 ```
-
----
 
 ## Task 11: Reconcile the serial-hotplug plan
 
 **Files:**
 - Modify: `docs/superpowers/plans/2026-08-21-serial-hotplug.md`
 
-- [ ] **Step 1: Strike the absorbed tasks**
+- [ ] **Step 1: Record exactly which halves landed**
 
-Tasks 1, 2, 3, 4, and 13 of that plan are built here. Replace each with a one-line pointer to this plan rather than deleting it, so the task numbers its later steps reference stay stable. Update its "READ THIS FIRST" to say the prerequisite is **built** and name the commit range.
+"Tasks 1-4 are absorbed" is too coarse to act on. Be specific, because hotplug's Task 5 builds directly on these:
 
-- [ ] **Step 2: Restore `stopReconnectAndWait`**
+| Hotplug task | Status after this plan |
+|---|---|
+| Task 1 (fake transport) | **Built**, plus `setRegister`, `closeCount`, `encodeWordLE`, `isUnplugged`, `noteOpen`/`openCount` |
+| Task 2 (`busFactory`) | **Built** |
+| Task 3 (poisoning fix) | **Built** |
+| Task 4 (session + `withSession`) | **Built**, but with `withSession`/`withSessionRead` taking `busMu` — *not* the lock-free version that plan sketches. `report` exists as a pass-through; hotplug's Task 5 replaces its body and must not re-declare it. `entry.calibrationFor` is built. `stopReconnectAndWait` is **not** built (it needs reconnect fields) and moves to hotplug's Task 6. |
+| Task 8 (`setRegister`) | The fake helper is built here; the generation guard itself is not |
+| Task 13 (gripper release) | **Built** |
 
-Task 4 of this plan omitted it (it references reconnect fields that do not exist yet). It belongs with hotplug's Task 6 — note that in the hotplug plan's helper block.
+- [ ] **Step 2: Update its prerequisite section**
+
+Its "READ THIS FIRST" says the prerequisite is unbuilt and that signatures must be reconciled before Task 4. Replace that with the built commit range, and note the two API facts that differ from what it assumed: `withSession` acquires `busMu`, and `AcquireController` exists in both registry-method and package-level forms.
 
 - [ ] **Step 3: Commit**
 
@@ -663,8 +827,6 @@ Task 4 of this plan omitted it (it references reconnect fields that do not exist
 git add docs/superpowers/plans/2026-08-21-serial-hotplug.md
 git commit -m "docs: point the hotplug plan at the built bus-ownership work"
 ```
-
----
 
 ## Final verification
 
@@ -675,12 +837,16 @@ git commit -m "docs: point the hotplug plan at the built bus-ownership work"
 - [ ] `grep -rn "controller\.bus\|controller\.calibratedServos" *.go` returns nothing — the handle is the only path to the bus
 - [ ] `grep -rn "runtime.Caller\|callerPorts" *.go` returns nothing
 - [ ] `grep -rn "\.calibration\b" manager.go` returns nothing — every read goes through `Calibration()`
+- [ ] `grep -rn "atomic.*refCount" *.go` returns nothing — one lock, not a mixed field
+- [ ] `grep -rn "controller\.controller\|entry.controller" *.go` returns nothing
 - [ ] The five lifecycle contracts at the top of this plan are each satisfied, checked by reading the code, not by a test
+- [ ] `pins` has no caller, and that is intentional (contract 1)
 
 ## Hardware verification before merging
 
 The bus is now genuinely closed on the last release, which has never happened in this module before. Tests cannot cover what a real serial port does when closed and reopened by a live viam-server.
 
+- [ ] **Reconfigure the arm alone and confirm it comes back.** rdk closes a resource before constructing its replacement (`module/resources.go:559`), so with the arm as sole holder this now closes and reopens the port on every config edit. Change an unrelated attribute (e.g. `speed_degs_per_sec`) several times in a row and confirm no `EBUSY`, no permanently dead arm, and no servo jolt. This is the most likely field regression in the whole plan.
 - [ ] Configure an arm and a calibration sensor on one port, confirm both work, then remove the sensor from the config and confirm the arm keeps working (the sensor's `Release` must not close a bus the arm holds).
 - [ ] Remove both, confirm the port is released — `lsof` shows no handle — then add them back and confirm they reconnect.
 - [ ] Run a range-recording calibration and reconfigure mid-recording. Before Task 8 this closed the port under a live goroutine; confirm it now exits cleanly.
