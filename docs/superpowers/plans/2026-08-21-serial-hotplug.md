@@ -14,15 +14,29 @@
 
 ## READ THIS FIRST
 
-### Prerequisite: Change B step 1 is not built yet
+### Prerequisite: Change B step 1 is BUILT
 
-This plan assumes **Change B step 1** of `docs/superpowers/specs/2026-08-17-gripper-arm-dependency-design.md` has landed: `AcquireController`, a `ControllerHandle` carrying the bus surface, a working `Release` with the `refCount`/`pins` split, the calibration collapse, `bus.Protocol()` folded into `SyncReadPositions`, and the `recordPositions` done channel. **It has not been built.** It needs its own plan.
+Built by `docs/superpowers/plans/2026-08-21-bus-ownership-step1.md`, commits `0bb226a..cee1543`. Start this plan at **Task 5**.
 
-Why it cannot be skipped: a session swap is only sound once nothing holds a raw bus pointer across it. Today `SafeSoArmController` copies hold `bus` by value (`registry.go:98`, `:220`) and the calibration sensor reaches `bus.SyncRead`/`bus.Protocol()` directly (`calibration.go:464`/`:468`, `:565`/`:570`). Build hotplug first and the arm reconnects while the sensor keeps writing to a closed descriptor.
+What landed, and where it differs from what this plan assumed:
 
-**If B step 1's actual API differs from what that spec designed**, the shape below still holds — a session pointer on the entry, a `withSession` accessor, generation-scoped reporting — but every signature in this plan referencing `ControllerHandle` must be reconciled against what was actually built. Do that reconciliation as a first pass over the whole plan before starting Task 2, not task-by-task.
+| This plan's task | Status |
+|---|---|
+| Task 1 (fake transport) | **Built** — `hotplug_fake_test.go`, plus `isUnplugged`, `noteOpen`/`openCount`, `setRegister`, `closeCount`, and `encodeWordLE` |
+| Task 2 (`busFactory`) | **Built** |
+| Task 3 (poisoning fix) | **Built** — `lastError` is gone |
+| Task 4 (session + `withSession`) | **Built, with two differences below** |
+| Task 8's `setRegister` helper | **Built** (the generation guard itself is not) |
+| Task 13 (gripper release) | **Built** |
 
-Tasks 1 and 13 are the only ones that do **not** depend on the prerequisite. They can be done now.
+Two API facts that differ from what this plan sketched:
+
+1. **`withSession` acquires a lock.** There are two accessors, `withSession` (exclusive, for bus writes) and `withSessionRead` (shared, for reads), both taking `entry.busMu` — a mutex separate from `entry.mu`, which guards bookkeeping. The lock-free version sketched below was written for an already-shared controller; it is superseded. Lock order is `busMu → entry.mu`, and `report` is called with `busMu` held, so it must never take `busMu` (taking `entry.mu` is fine).
+2. **`report` already exists** in `bus_session.go` as a generation-scoped pass-through with the signature `report(gen uint64, err error) error`. Task 5 replaces its **body**; do not re-declare it.
+
+Also note: `entry.calibrationFor` was **not** built — method bodies read calibration off the session they already hold (`sess.servos[id].Calibration()`), which is what keeps the single source of truth structural. And `stopReconnectAndWait` is not built; it belongs with Task 6 here, since it references reconnect fields.
+
+The lifecycle contracts this plan depends on are all in place: `tryPin` is refusable, `teardownIfLast` is once-guarded, `Release` reaches it holding no lock, and `(*ControllerRegistry).AcquireController` carries the documented seam comment where `resumeReconnect()` goes.
 
 ### Release boundary
 
@@ -60,6 +74,8 @@ The spec forbids shipping detection without reconnect: a disconnect verdict with
 ---
 
 ## Task 1: The fake transport
+
+> **BUILT** by `docs/superpowers/plans/2026-08-21-bus-ownership-step1.md` (commits `0bb226a..cee1543`). Kept for its rationale and code, which the prerequisite plan references. Skip to the next task; see this plan's prerequisite section for the two places the built version differs.
 
 Everything else is untestable without this. `transports.MockTransport` cannot be used: its fields are read and written without a lock, and the reconnect loop runs on its own goroutine, so `-race` would fail. `transports.Script` is documented as single-goroutine only.
 
@@ -315,6 +331,8 @@ git commit -m "test: concurrency-safe fake feetech transport for hotplug tests"
 
 ## Task 2: `busFactory` seam on the registry
 
+> **BUILT** by `docs/superpowers/plans/2026-08-21-bus-ownership-step1.md` (commits `0bb226a..cee1543`). Kept for its rationale and code, which the prerequisite plan references. Skip to the next task; see this plan's prerequisite section for the two places the built version differs.
+
 **Files:**
 - Modify: `registry.go` (the `ControllerRegistry` struct, `NewControllerRegistry`, and `createNewController`'s `feetech.NewBus` call at `:140`)
 - Modify: `registry_test.go`
@@ -385,6 +403,8 @@ git commit -m "refactor(registry): inject the bus factory"
 ---
 
 ## Task 3: Poisoning fix
+
+> **BUILT** by `docs/superpowers/plans/2026-08-21-bus-ownership-step1.md` (commits `0bb226a..cee1543`). Kept for its rationale and code, which the prerequisite plan references. Skip to the next task; see this plan's prerequisite section for the two places the built version differs.
 
 Independent of the session work, and it is the fix that lets viam-server's 5s `completeConfigWorker` retry actually reach the port.
 
@@ -459,6 +479,8 @@ git commit -m "fix(registry): stop caching a failed bus open per port"
 ---
 
 ## Task 4: `busSession` and `withSession`
+
+> **BUILT** by `docs/superpowers/plans/2026-08-21-bus-ownership-step1.md` (commits `0bb226a..cee1543`). Kept for its rationale and code, which the prerequisite plan references. Skip to the next task; see this plan's prerequisite section for the two places the built version differs.
 
 Behavior-neutral by construction: the session is always non-nil until Task 6, so this is a wide mechanical refactor that must not change what any caller observes.
 
@@ -1901,6 +1923,8 @@ git commit -m "feat(arm): reinitialize forces an immediate reopen"
 ---
 
 ## Task 13: Delete the stale gripper release
+
+> **BUILT** by `docs/superpowers/plans/2026-08-21-bus-ownership-step1.md` (commits `0bb226a..cee1543`). Kept for its rationale and code, which the prerequisite plan references. Skip to the next task; see this plan's prerequisite section for the two places the built version differs.
 
 Independent of everything else — do it any time. The gripper has held no controller since the arm-dependency change (`gripper.go:94` documents it), and `releaseFromCaller` no-ops anyway.
 
