@@ -36,10 +36,3 @@ PRPs/
 .canon.yaml
 reload-dist/
 docs/plans/
-
-# Bench-harness output (cmd/cli/profile_bench.go). These CSVs are measurement
-# data, not source; Task 12 writes them into ./bench-out by default.
-bench-out/
-writerate*.csv
-goaltime*.csv
-accel*.csv
