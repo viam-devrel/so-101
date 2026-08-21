@@ -895,6 +895,10 @@ func (s *so101) moveJoints(
 	caps []jointLimits,
 	wait bool,
 ) error {
+	// Note this loop computes the same maximum that coordinatedProfiles computes
+	// internally. The duplication is deliberate -- moveJoints needs maxTravelDeg for the
+	// timeout distance -- but the two must agree, and a mutation test showed this exact
+	// scan is easy to get wrong in a way no ordering-naive test catches.
 	travelsDeg := make([]float64, len(to))
 	maxTravelDeg := 0.0
 	for i := range to {
@@ -937,10 +941,26 @@ func (s *so101) moveJoints(
 		}
 	}
 
-	timeout := moveTimeoutMs(maxTravelDeg, speedDegsPerSec)
-	s.logger.Debugf("moveJoints: ref %.1f deg/s, %.0f deg/s^2, max travel %.1f deg, "+
-		"%d joint(s) at the acceleration floor, wait timeout %d ms",
-		speedDegsPerSec, accelDegsPerSecSq, maxTravelDeg, floored, timeout)
+	// Time against the speed ACTUALLY COMMANDED, not the reference the caller requested.
+	// A MoveOptions cap can reduce the shared reference well below the request -- the cap
+	// tests in motion_profile_test.go reduce 50 deg/s to 20, a 2.5x slowdown against
+	// moveTimeoutFactor = 2.0 -- so timing against the request would abort a move that is
+	// proceeding perfectly correctly, and only once Task 8 supplies caps.
+	effectiveSpeed := speedDegsPerSec
+	maxSteps := 0
+	for _, p := range profiles {
+		if p.speedSteps > maxSteps {
+			maxSteps = p.speedSteps
+		}
+	}
+	if maxSteps > 0 {
+		effectiveSpeed = float64(maxSteps) / stepsPerDegree
+	}
+
+	timeout := moveTimeoutMs(maxTravelDeg, effectiveSpeed)
+	s.logger.Debugf("moveJoints: ref %.1f deg/s (effective %.1f), %.0f deg/s^2, max travel "+
+		"%.1f deg, %d joint(s) at the acceleration floor, wait timeout %d ms",
+		speedDegsPerSec, effectiveSpeed, accelDegsPerSecSq, maxTravelDeg, floored, timeout)
 	return s.controller.WaitForServosToStop(ctx, s.armServoIDs, timeout)
 }
 
@@ -1097,6 +1117,58 @@ Replace the `maxVelRads` block (`arm.go:701-705`) with:
 ```
 
 Then change the `moveJoints` call in the loop to pass `caps` instead of `nil`.
+
+- [ ] **Step 1b: Do not discard caps on the read-failure fallback**
+
+Task 7's fallback calls `moveJointsUniform`, which has no travel reference and so cannot
+scale per joint. Left alone it would silently ignore every per-joint cap — the exact failure
+the wrong-length rejection exists to prevent, arriving instead through a transient bus error.
+
+Without travels there is no way to honor caps proportionally, but taking the **minimum** cap
+as a uniform speed honors all of them conservatively. Add to `motion_profile.go`:
+
+```go
+// uniformSpeedUnderCaps returns the fastest uniform speed that violates no per-joint cap.
+//
+// Used only on the read-failure fallback path, where there is no travel reference and so no
+// way to scale per joint. Taking the minimum is conservative -- every joint ends at or below
+// its own cap -- and is far better than discarding caps the caller believes are in force.
+func uniformSpeedUnderCaps(speed float64, caps []jointLimits) float64 {
+	for _, c := range caps {
+		if c.maxSpeedDegsPerSec > 0 && c.maxSpeedDegsPerSec < speed {
+			speed = c.maxSpeedDegsPerSec
+		}
+	}
+	return speed
+}
+```
+
+Add a test alongside the others in `motion_profile_test.go`:
+
+```go
+func TestUniformSpeedUnderCaps(t *testing.T) {
+	caps := []jointLimits{{maxSpeedDegsPerSec: 30}, {maxSpeedDegsPerSec: 8}, {}}
+	if got := uniformSpeedUnderCaps(50, caps); got != 8 {
+		t.Errorf("got %v, want 8 (the tightest cap must bind)", got)
+	}
+	if got := uniformSpeedUnderCaps(5, caps); got != 5 {
+		t.Errorf("got %v, want 5 (a cap must never RAISE the speed)", got)
+	}
+	if got := uniformSpeedUnderCaps(50, nil); got != 50 {
+		t.Errorf("got %v, want 50 (no caps means no reduction)", got)
+	}
+	if got := uniformSpeedUnderCaps(50, []jointLimits{{maxSpeedDegsPerSec: -5}}); got != 50 {
+		t.Errorf("got %v, want 50 (a negative cap must not bind)", got)
+	}
+}
+```
+
+Then use it at both fallback call sites, in `MoveToJointPositions` and in
+`MoveThroughJointPositions`:
+
+```go
+		return s.moveJointsUniform(ctx, clamped, uniformSpeedUnderCaps(speed, caps), parseWaitExtra(extra))
+```
 
 - [ ] **Step 2: Verify build, vet, format, tests**
 
