@@ -19,8 +19,7 @@ import (
 type ControllerEntry struct {
 	config      *SoArm101Config
 	calibration SO101FullCalibration // the seed newBusSession wraps servos in
-	refCount    int                  // live handles; guarded by mu, never atomics
-	pins        int                  // in-flight users that are NOT handles
+	refCount    int                  // live handles; guarded by mu
 	torndown    bool                 // once guard; also hides the entry from a new acquire
 	mu          sync.RWMutex         // guards bookkeeping: config, calibration, refCount
 
@@ -32,50 +31,12 @@ type ControllerEntry struct {
 	session atomic.Pointer[busSession] // nil == disconnected
 }
 
-// --- Entry lifecycle ---
+// teardownIfLast closes the bus and evicts the entry once no handles are left, at most once.
 //
-// refCount counts live handles. pins counts in-flight users that are not handles: serial
-// hotplug's reconnect goroutine, and any future mid-flight acquire. Whichever of the two
-// reaches zero LAST performs the teardown. Release is idempotent via a per-handle once, so
-// the releasing handle structurally cannot come back and finish the job -- the deferred
-// close is an entry-level responsibility.
-//
-// pins ships built, tested, and deliberately unwired: nothing on the acquire path takes one,
-// because getExistingController holds entry.mu for its whole body while tryPin locks the
-// same mutex. It exists so hotplug's reconnect loop has a correct primitive to attach to.
-
-// tryPin registers a non-handle user of this entry, or refuses once teardown has begun.
-// The refusal is what keeps hotplug from starting a reconnect loop for a dying entry.
-func (e *ControllerEntry) tryPin() bool {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if e.torndown {
-		return false
-	}
-	e.pins++
-	return true
-}
-
-// unpin drops a pin and tears the entry down if it was the last user.
-func (e *ControllerEntry) unpin() {
-	e.mu.Lock()
-	e.pins--
-	e.mu.Unlock()
-	e.teardownIfLast()
-}
-
-// teardownIfLast closes the bus and evicts the entry, at most once.
-//
-// It takes registry.mu BEFORE entry.mu and evicts inside the same critical section that sets
-// torndown. Both halves matter. Taking entry.mu first would invert the order against
-// GetController, which holds r.mu and then entry.mu. And evicting after releasing the locks
-// would leave a window where GetController finds a dead entry, raises its refCount, and
-// hands back a permanently disconnected handle -- after which the eviction lands and the
-// next acquire opens a SECOND bus on the same port.
-//
-// The bus is closed only after both locks are released: Close can block, and nothing else
-// needs to wait behind it. In-flight bus ops are safe, since feetech.Bus.Close sets its
-// closed flag under its own mutex -- they finish and later ones get ErrBusClosed.
+// Takes registry.mu before entry.mu, matching both acquire paths, and evicts in the same
+// critical section that sets torndown -- otherwise an acquire could join a dead entry and
+// the next one would open a second bus on the same port. The bus is closed after both locks
+// are released; in-flight operations finish and later ones get feetech.ErrBusClosed.
 func (e *ControllerEntry) teardownIfLast() {
 	r := e.registry
 	if r == nil {
@@ -84,7 +45,7 @@ func (e *ControllerEntry) teardownIfLast() {
 
 	r.mu.Lock()
 	e.mu.Lock()
-	if e.torndown || e.refCount > 0 || e.pins > 0 {
+	if e.torndown || e.refCount > 0 {
 		e.mu.Unlock()
 		r.mu.Unlock()
 		return
@@ -138,11 +99,6 @@ func (r *ControllerRegistry) AcquireController(
 		return nil, err
 	}
 	h.owner = owner
-	// Seam: serial hotplug calls h.entry.resumeReconnect() here.
-	//
-	// It must be HERE and nowhere deeper. getExistingController holds entry.mu under a
-	// defer for its whole body, and createNewController calls it while holding r.mu -- so
-	// a seam placed in either would run under a lock that resumeReconnect's tryPin needs.
 	return h, nil
 }
 
@@ -169,9 +125,8 @@ func (r *ControllerRegistry) getExistingController(entry *ControllerEntry, confi
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
 
-	// Belt-and-braces: teardownIfLast evicts under the same lock that sets torndown, so
-	// this should be unreachable. Keeping the check means a future refactor that reopens
-	// that window fails loudly here instead of handing back a dead handle.
+	// Should be unreachable, since teardownIfLast evicts under the lock that sets this.
+	// Kept so a regression surfaces here instead of as a dead handle.
 	if entry.torndown {
 		return nil, errEntryTornDown
 	}
@@ -282,12 +237,9 @@ func (r *ControllerRegistry) createNewController(portPath string, config *SoArm1
 	return &ControllerHandle{entry: entry, logger: config.Logger}, nil
 }
 
-// ReleaseController drops one reference by port path.
-//
-// It delegates to teardownIfLast rather than closing the bus itself. Its old body held
-// entry.mu and then r.mu -- the only reversed lock order in this package, against the
-// r.mu-then-entry.mu that both acquire paths and teardownIfLast use. Keeping that body,
-// even as a compatibility shim, would have been an ABBA deadlock waiting to happen.
+// ReleaseController drops one reference by port path. Delegates the close to
+// teardownIfLast rather than doing it here, which is also what keeps the lock order
+// consistent -- its old body took entry.mu before r.mu.
 func (r *ControllerRegistry) ReleaseController(portPath string) {
 	r.mu.RLock()
 	entry, exists := r.entries[portPath]

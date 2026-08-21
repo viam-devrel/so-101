@@ -11,17 +11,13 @@ import (
 	"go.viam.com/rdk/components/arm"
 )
 
-// testRegistry returns a registry whose bus factory opens every bus over `ft` -- the SAME
-// fake the test holds.
+// testRegistry returns a registry whose bus factory opens every bus over the caller's fake,
+// and fails the open while that fake is unplugged.
 //
-// This is the most important detail in these tests. A factory that creates a fresh fake per
-// call would make every reconnect test pass vacuously: a reopen would get a brand-new
-// healthy transport no matter what ft.unplug() did.
-//
-// The factory also FAILS THE OPEN while the fake is unplugged. That models production, where
-// serial.Open on a vanished device node errors -- feetech.NewBus with a non-nil Transport
-// never fails on its own, so without this a fresh acquire during an outage would publish a
-// live session over a dead port, which cannot happen with real hardware.
+// Both details matter: a factory handing out a fresh fake per call would let a test pass
+// against a transport it never touched, and feetech.NewBus with a non-nil Transport never
+// fails on its own, so without the unplugged check a test could open a working bus over a
+// port that is supposed to be gone.
 func testRegistry(ft *fakeTransport) *ControllerRegistry {
 	r := NewControllerRegistry()
 	r.busFactory = func(cfg feetech.BusConfig) (*feetech.Bus, error) {
@@ -58,11 +54,9 @@ func testHandle(t *testing.T, ft *fakeTransport) *ControllerHandle {
 	return h
 }
 
-// cloneCalibration deep-copies a calibration. SO101FullCalibration's six fields are all
-// *MotorCalibration (config.go:33-40), so `cal := DefaultSO101FullCalibration` shares every
-// pointer with the package-level default -- mutating the copy corrupts that default for
-// every later test in the process, including TestGetControllerStatus, which branches on
-// DefaultSO101FullCalibration.ShoulderPan.HomingOffset.
+// cloneCalibration deep-copies a calibration. The six fields are all pointers, so a plain
+// struct copy of DefaultSO101FullCalibration shares them with the package-level default and
+// mutating it corrupts every later test in the process.
 func cloneCalibration(src SO101FullCalibration) SO101FullCalibration {
 	return SO101FullCalibration{
 		ShoulderPan:  copyMotorCalibration(src.ShoulderPan),

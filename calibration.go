@@ -432,38 +432,6 @@ func (cs *so101CalibrationSensor) setHomingPosition(ctx context.Context) (map[st
 	// Brief delay to ensure register writes are complete before reading positions
 	time.Sleep(100 * time.Millisecond)
 
-	// Read current positions for all configured servos
-	// radianPositions, err := cs.controller.GetJointPositionsForServos(ctx, cs.cfg.ServoIDs)
-	// if err != nil {
-	// 	cs.setState(StateError, fmt.Sprintf("Failed to read servo positions: %v", err))
-	// 	return map[string]any{"success": false}, err
-	// }
-
-	// // Convert from radians back to raw positions for calibration
-	// positions := make(map[int]int)
-	// for i, servoID := range cs.cfg.ServoIDs {
-	// 	cal := cs.controller.getCalibrationForServo(servoID)
-	// 	if cal == nil {
-	// 		cs.setState(StateError, fmt.Sprintf("No calibration found for servo %d", servoID))
-	// 		return map[string]any{"success": false}, fmt.Errorf("no calibration for servo %d", servoID)
-	// 	}
-
-	// 	var normalized float64
-	// 	if servoID == 6 {
-	// 		// Gripper: convert from radians representation to percentage
-	// 		normalized = (radianPositions[i]/math.Pi + 1.0) / 2.0 * 100.0
-	// 	} else {
-	// 		// Arm: convert from radians to degrees
-	// 		normalized = radianPositions[i] * 180.0 / math.Pi
-	// 	}
-
-	// 	raw, err := cal.Denormalize(normalized)
-	// 	if err != nil {
-	// 		cs.setState(StateError, fmt.Sprintf("Failed to denormalize position for servo %d: %v", servoID, err))
-	// 		return map[string]any{"success": false}, err
-	// 	}
-	// 	positions[servoID] = raw
-	// }
 	rawPositions, err := cs.controller.SyncReadPositions(ctx, cs.cfg.ServoIDs)
 	if err != nil {
 		cs.setState(StateError, fmt.Sprintf("Failed to read servo positions: %v", err))
@@ -581,38 +549,6 @@ func (cs *so101CalibrationSensor) recordPositions(recordingCtx context.Context, 
 				cs.logger.Errorf("Failed to read positions during recording: %v", err)
 				continue
 			}
-
-			// radianPositions, err := cs.controller.GetJointPositionsForServos(recordingCtx, cs.cfg.ServoIDs)
-			// if err != nil {
-			// 	cs.logger.Errorf("Failed to read positions during recording: %v", err)
-			// 	continue
-			// }
-
-			// // Convert from radians to raw positions
-			// rawPositions := make(map[int]int)
-			// for i, servoID := range cs.cfg.ServoIDs {
-			// 	cal := cs.controller.getCalibrationForServo(servoID)
-			// 	if cal == nil {
-			// 		cs.logger.Errorf("No calibration for servo %d during recording", servoID)
-			// 		continue
-			// 	}
-
-			// 	var normalized float64
-			// 	if servoID == 6 {
-			// 		// Gripper: convert from radians representation to percentage
-			// 		normalized = (radianPositions[i]/math.Pi + 1.0) / 2.0 * 100.0
-			// 	} else {
-			// 		// Arm: convert from radians to degrees
-			// 		normalized = radianPositions[i] * 180.0 / math.Pi
-			// 	}
-
-			// 	raw, err := cal.Denormalize(normalized)
-			// 	if err != nil {
-			// 		cs.logger.Errorf("Failed to denormalize servo %d: %v", servoID, err)
-			// 		continue
-			// 	}
-			// 	rawPositions[servoID] = raw
-			// }
 
 			cs.mu.Lock()
 			if cs.recordingActive {

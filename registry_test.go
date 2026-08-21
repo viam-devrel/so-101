@@ -499,15 +499,6 @@ func TestReleaseIsIdempotent(t *testing.T) {
 	assert.NotNil(t, h2.entry.session.Load(), "a fresh acquire must open a fresh entry")
 }
 
-func TestTryPinRefusesOnceTeardownHasBegun(t *testing.T) {
-	ft := newFakeTransport()
-	_, h := testRegistryAndHandle(t, ft)
-	entry := h.entry
-
-	h.Release() // last holder: teardown runs
-	assert.False(t, entry.tryPin(), "a pin after teardown must be refused, not granted")
-}
-
 func TestTeardownRunsExactlyOnce(t *testing.T) {
 	ft := newFakeTransport()
 	_, h := testRegistryAndHandle(t, ft)
@@ -517,22 +508,6 @@ func TestTeardownRunsExactlyOnce(t *testing.T) {
 	entry.teardownIfLast() // a redundant call must be inert
 	entry.teardownIfLast()
 	assert.Equal(t, 1, ft.closeCount())
-}
-
-func TestAPinKeepsTheEntryAliveAcrossTheLastRelease(t *testing.T) {
-	ft := newFakeTransport()
-	_, h := testRegistryAndHandle(t, ft)
-	entry := h.entry
-
-	require.True(t, entry.tryPin(), "a pin on a live entry must be granted")
-
-	h.Release()
-	assert.Equal(t, 0, ft.closeCount(),
-		"the pin holder is still using the entry; teardown must wait for it")
-	assert.NotNil(t, entry.session.Load())
-
-	entry.unpin()
-	assert.Equal(t, 1, ft.closeCount(), "the last decrement performs the teardown")
 }
 
 func TestAcquireNeverJoinsATornDownEntry(t *testing.T) {

@@ -51,12 +51,11 @@ func TestFakeTransportIsSilentForAbsentServos(t *testing.T) {
 		"a silent servo must be distinguishable from an unplugged port")
 }
 
-// fakeTransport answers real Feetech protocol packets from an in-memory register file,
-// and can be flipped to fail every write with syscall.EIO the way an unplugged port does
-// (go.bug.st/serial's unixPort.Write returns the raw errno; serial_unix.go:112-118).
+// fakeTransport answers real Feetech protocol packets from an in-memory register file, and
+// can be flipped to fail writes with syscall.EIO the way an unplugged port does.
 //
-// Safe for concurrent use, unlike transports.MockTransport and transports.Script -- the
-// reconnect loop drives a bus from its own goroutine, so -race demands it.
+// Concurrency-safe, unlike transports.MockTransport and transports.Script, so tests can
+// drive a bus from more than one goroutine under -race.
 type fakeTransport struct {
 	mu        sync.Mutex
 	proto     *feetech.Protocol

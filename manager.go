@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"math"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/hipsterbrown/feetech-servo/feetech"
@@ -21,21 +20,15 @@ func isGripperServo(servoID int) bool {
 
 var globalRegistry = NewControllerRegistry()
 
-// ControllerHandle is one resource's view of a port's shared bus. It holds no bus of its
-// own: every operation goes through the entry's current busSession, so all holders on a
-// port observe the same state and serialize against each other.
+// ControllerHandle is one resource's view of a port's shared bus. It holds no bus itself;
+// every operation goes through the entry's session, so all holders share one state.
 type ControllerHandle struct {
 	entry  *ControllerEntry
 	logger logging.Logger // per-holder, so log lines name the component that acted
 
-	// owner is DIAGNOSTICS ONLY -- never an identity key. resource.Name is stable across
-	// an AlwaysRebuild cycle, so a rebuilt resource would otherwise impersonate its own
-	// predecessor. Identity is the handle pointer.
-	owner resource.Name
-
-	// released is set by Release and read by Change B step 2's preemption hooks, which
-	// must skip a handle whose Close has begun. Nothing reads it yet, by design.
-	released    atomic.Bool
+	// owner is for diagnostics only, never an identity key: resource.Name survives an
+	// AlwaysRebuild cycle, so a rebuilt resource would look like its own predecessor.
+	owner       resource.Name
 	releaseOnce sync.Once
 }
 
@@ -340,8 +333,8 @@ func (h *ControllerHandle) GetJointPositionsForServos(ctx context.Context, servo
 			if !ok {
 				return fmt.Errorf("servo %d not available", servoID)
 			}
-			// Calibration(), not the field: UpdateCalibration can run concurrently from
-			// another resource on this bus, and an unguarded read raced it (problem 3).
+			// Calibration(), not the field: another resource on this bus can be updating
+			// it concurrently.
 			normalized, err := cs.Calibration().Normalize(rawPos)
 			if err != nil {
 				return fmt.Errorf("failed to normalize raw servo value for id %d: %w", servoID, err)
@@ -509,10 +502,9 @@ func (h *ControllerHandle) ReadServoRegister(ctx context.Context, servoID int, r
 }
 
 // SetCalibration replaces the calibration every servo on this bus normalizes through.
-//
-// It writes BOTH the per-servo calibrations -- the single source of truth for every read
-// and write path -- and entry.calibration, which is the seed newBusSession uses. Skipping
-// the seed would mean a session rebuild silently resurrected the pre-update values.
+// Writes both the per-servo copies, which every read and write path uses, and
+// entry.calibration, which seeds any later session -- skip the seed and a rebuilt session
+// would restore the old values.
 func (h *ControllerHandle) SetCalibration(calibration SO101FullCalibration) error {
 	h.entry.busMu.Lock()
 	defer h.entry.busMu.Unlock()
@@ -617,20 +609,14 @@ func GetCurrentCalibrationForPort(portPath string) SO101FullCalibration {
 
 // --- Operations the calibration sensor needs ---
 //
-// These exist so the sensor stops reaching past the handle into the raw bus. Every one of
-// them used to be a direct entry.controller.bus or .calibratedServos access taking no
-// controller lock at all, so those calls were unserialized against every other resource
-// even in principle (problem 6). They are also what would let a caller keep using a bus
-// across a session swap, which is why serial hotplug depends on them.
+// The sensor used to reach past the handle straight into the bus and the servo map, taking
+// no controller lock at all. These give it the same reach under the shared lock.
 
 // SyncReadPositions reads present position for the given servos and returns decoded ticks.
+// Decoding stays inside the handle: exposing Protocol() would hand the raw bus back out.
 //
-// The decode lives HERE on purpose: the sensor previously called bus.SyncRead and then
-// bus.Protocol().DecodeWord, and adding a Protocol() passthrough to the handle would
-// re-leak the bus and defeat the point. Protocol() is gone from the sensor entirely.
-//
-// dataLen is 2, the width of a position register. The old call sites passed len(ids), which
-// was wrong-but-harmless at exactly six servos.
+// dataLen is 2, a position register's width. The old call sites passed len(ids), which
+// happened to be harmless at exactly six servos.
 func (h *ControllerHandle) SyncReadPositions(ctx context.Context, ids []int) (out map[int]int, err error) {
 	err = h.withSessionRead(func(sess *busSession) error {
 		data, err := sess.bus.SyncRead(ctx, feetech.RegPresentPosition.Address, 2, ids)
@@ -686,9 +672,7 @@ func (h *ControllerHandle) DetectServoModel(ctx context.Context, id int) (name s
 }
 
 // ServoPresent reports whether the session has a servo with this ID. No bus traffic.
-//
-// motorSetupVerify distinguishes "not in the controller" from "did not answer", so a
-// ping-only API cannot express its not_found case.
+// motorSetupVerify needs "absent" and "did not answer" to be different answers.
 func (h *ControllerHandle) ServoPresent(id int) bool {
 	sess := h.entry.session.Load()
 	if sess == nil {
@@ -698,11 +682,8 @@ func (h *ControllerHandle) ServoPresent(id int) bool {
 	return ok
 }
 
-// Discover sweeps every bus ID.
-//
-// It returns []feetech.FoundServo rather than a list of IDs because both callers read
-// servo.Model.Name. Note this holds the shared bus lock for the whole sweep -- seconds on a
-// sparse bus -- so arm motion blocks during motor setup. That exclusion is the point.
+// Discover sweeps every bus ID. Holds the shared lock for the whole sweep, which is
+// seconds on a sparse bus, so arm motion waits during motor setup.
 func (h *ControllerHandle) Discover(ctx context.Context) (out []feetech.FoundServo, err error) {
 	err = h.withSessionRead(func(sess *busSession) error {
 		found, err := sess.bus.Discover(ctx)
@@ -715,11 +696,8 @@ func (h *ControllerHandle) Discover(ctx context.Context) (out []feetech.FoundSer
 	return out, err
 }
 
-// SetServoID changes a servo's ID.
-//
-// Known carry-forward: the session's servo map stays keyed by the old ID until the next
-// acquire, exactly as calibratedServos did before. The motor-setup workflow is explicitly
-// driven and reconfigures afterwards.
+// SetServoID changes a servo's ID. The session's servo map stays keyed by the old ID until
+// the next acquire, as it did before this refactor; motor setup reconfigures afterwards.
 func (h *ControllerHandle) SetServoID(ctx context.Context, currentID, targetID int) error {
 	return h.withSession(func(sess *busSession) error {
 		cs, ok := sess.servos[currentID]
@@ -742,23 +720,16 @@ func (h *ControllerHandle) SetServoBaudRate(ctx context.Context, id, baudRate in
 }
 
 // Release drops this handle's claim on the port, closing the shared bus and evicting the
-// entry once this was the last holder.
+// entry once this was the last holder. Idempotent, since rdk can Close a resource twice.
 func (h *ControllerHandle) Release() {
 	h.releaseOnce.Do(func() {
-		h.released.Store(true)
-
 		e := h.entry
 		e.mu.Lock()
 		e.refCount--
 		e.mu.Unlock()
 
-		// NO lock held here. Serial hotplug inserts e.cancelReconnect() at this point, and
-		// that path takes reconnectMu then entry.mu -- holding entry.mu here would invert
-		// the lock order.
-		//
-		// teardownIfLast is called unconditionally rather than behind a precomputed flag:
-		// it re-reads both counters under the lock, so a concurrent unpin and Release in
-		// either order reach a correct decision exactly once.
+		// Called with no lock held, and re-reads refCount itself, so a concurrent acquire
+		// and release settle on one answer.
 		e.teardownIfLast()
 	})
 }

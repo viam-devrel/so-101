@@ -12,9 +12,9 @@ import (
 	"go.viam.com/rdk/logging"
 )
 
-// testRecordingSensor builds a calibration sensor around a fake-backed handle. It is
-// constructed field-by-field rather than through NewSO101CalibrationSensor, which acquires
-// through the process-wide registry and so needs real serial hardware.
+// testRecordingSensor builds a sensor field-by-field around a fake-backed handle.
+// NewSO101CalibrationSensor acquires through the process-wide registry, which needs real
+// serial hardware.
 func testRecordingSensor(t *testing.T, ft *fakeTransport) *so101CalibrationSensor {
 	t.Helper()
 	h := testHandle(t, ft)
@@ -62,15 +62,15 @@ func TestClosingDuringRecordingJoinsTheGoroutine(t *testing.T) {
 	case err := <-closed:
 		require.NoError(t, err)
 	case <-time.After(5 * time.Second):
-		t.Fatal("Close deadlocked -- it is holding cs.mu across the join while the " +
-			"recording goroutine needs that same lock every tick")
+		t.Fatal("Close deadlocked: it is holding cs.mu across the join, and the recording " +
+			"goroutine needs that lock every tick")
 	}
 
 	select {
 	case <-done:
 	default:
-		t.Fatal("Close returned before the recording goroutine exited; a working Release " +
-			"would then close the bus under a live SyncReadPositions")
+		t.Fatal("Close returned before the recording goroutine exited, so Release would " +
+			"close the bus under a live read")
 	}
 }
 
@@ -88,14 +88,12 @@ func TestStopRangeRecordingLetsTheGoroutineExit(t *testing.T) {
 	require.NotNil(t, done)
 
 	cs.mu.Lock()
-	// The result is expected to report invalid ranges: nothing moved, so every joint's
-	// recorded min equals its max. This test is about the goroutine's lifetime, not the
-	// range validation.
+	// Reports invalid ranges, since nothing moved. This test is about the goroutine.
 	_, _ = cs.stopRangeRecording(context.Background())
 	cs.mu.Unlock()
 
-	// stopRangeRecording deliberately does not join -- the port stays open, so there is no
-	// use-after-close to guard. The goroutine must still exit on its own.
+	// stopRangeRecording does not join: the port stays open, so there is nothing to guard
+	// against. The goroutine must still exit on its own.
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
