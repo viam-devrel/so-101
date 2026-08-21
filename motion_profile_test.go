@@ -1,6 +1,12 @@
 package so_arm
 
-import "testing"
+import (
+	"math"
+	"testing"
+
+	"go.viam.com/rdk/components/arm"
+	"go.viam.com/rdk/utils"
+)
 
 func TestDegPerSecSqToAccUnits(t *testing.T) {
 	tests := []struct {
@@ -222,6 +228,76 @@ func TestReduceReferenceAndCaps(t *testing.T) {
 		if want := degPerSecToStepsPerSec(refSpeed); got[0].speedSteps != want {
 			t.Errorf("got %d, want %d (an unset cap must not pin the arm to zero)",
 				got[0].speedSteps, want)
+		}
+	})
+}
+
+func TestJointLimitsFromMoveOptions(t *testing.T) {
+	t.Run("nil options means no caps", func(t *testing.T) {
+		got, err := jointLimitsFromMoveOptions(nil, 5)
+		if err != nil || got != nil {
+			t.Errorf("got (%v, %v), want (nil, nil)", got, err)
+		}
+	})
+
+	t.Run("a scalar applies to every joint", func(t *testing.T) {
+		opts := &arm.MoveOptions{MaxVelRads: utils.DegToRad(30)}
+		got, err := jointLimitsFromMoveOptions(opts, 3)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, l := range got {
+			if math.Abs(l.maxSpeedDegsPerSec-30) > 1e-9 {
+				t.Errorf("joint %d = %v, want 30", i, l.maxSpeedDegsPerSec)
+			}
+		}
+	})
+
+	t.Run("a per-joint slice IGNORES the scalar, per arm.proto", func(t *testing.T) {
+		// arm.proto: the scalar is "Ignored when max_vel_degs_per_sec_joints is set".
+		// RDK deliberately does not enforce this, so this driver must.
+		opts := &arm.MoveOptions{
+			MaxVelRads:       utils.DegToRad(30),
+			MaxVelRadsJoints: []float64{utils.DegToRad(10), utils.DegToRad(20)},
+		}
+		got, err := jointLimitsFromMoveOptions(opts, 2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if math.Abs(got[0].maxSpeedDegsPerSec-10) > 1e-9 {
+			t.Errorf("joint 0 = %v, want 10 (the scalar 30 must be ignored)", got[0].maxSpeedDegsPerSec)
+		}
+		if math.Abs(got[1].maxSpeedDegsPerSec-20) > 1e-9 {
+			t.Errorf("joint 1 = %v, want 20", got[1].maxSpeedDegsPerSec)
+		}
+	})
+
+	t.Run("a wrong-length slice is rejected", func(t *testing.T) {
+		// RDK sizes the slice from whatever the client sent with no DoF check, so silently
+		// ignoring or truncating would violate a cap the caller believes is in force.
+		opts := &arm.MoveOptions{MaxVelRadsJoints: []float64{1, 2, 3}}
+		if _, err := jointLimitsFromMoveOptions(opts, 5); err == nil {
+			t.Error("a 3-entry slice on a 5-DoF arm was accepted, want an error")
+		}
+	})
+
+	t.Run("velocity and acceleration are independent", func(t *testing.T) {
+		opts := &arm.MoveOptions{
+			MaxVelRadsJoints: []float64{utils.DegToRad(10), utils.DegToRad(20)},
+			MaxAccRads:       utils.DegToRad(400),
+		}
+		got, err := jointLimitsFromMoveOptions(opts, 2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Per-joint velocity set, scalar acceleration still applies to all.
+		if math.Abs(got[0].maxSpeedDegsPerSec-10) > 1e-9 {
+			t.Errorf("joint 0 speed = %v, want 10", got[0].maxSpeedDegsPerSec)
+		}
+		for i, l := range got {
+			if math.Abs(l.maxAccelDegsPerSecSq-400) > 1e-9 {
+				t.Errorf("joint %d accel = %v, want 400", i, l.maxAccelDegsPerSecSq)
+			}
 		}
 	})
 }

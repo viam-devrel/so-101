@@ -1,6 +1,12 @@
 package so_arm
 
-import "math"
+import (
+	"fmt"
+	"math"
+
+	"go.viam.com/rdk/components/arm"
+	"go.viam.com/rdk/utils"
+)
 
 // Acceleration-register calibration, measured on hardware 2026-08-19 (see
 // docs/superpowers/results/2026-08-19-bench-run.md).
@@ -121,4 +127,52 @@ func reduceReference(travelsDeg []float64, maxTravel, speed, accel float64, caps
 		}
 	}
 	return speed, accel
+}
+
+// jointLimitsFromMoveOptions converts arm.MoveOptions into per-joint caps.
+//
+// Per arm.proto the scalar limit is IGNORED when the corresponding per-joint slice is set,
+// rather than merged with it. RDK's own conversion explicitly leaves that to the
+// implementer (components/arm/pb_helpers.go), so this driver enforces it.
+//
+// Returns an error for a per-joint slice whose length does not match the arm's DoF: RDK
+// sizes the slice from whatever the client sent without checking, and silently ignoring or
+// truncating it would produce motion that violates a cap the caller believes is in force.
+func jointLimitsFromMoveOptions(opts *arm.MoveOptions, dof int) ([]jointLimits, error) {
+	if opts == nil {
+		return nil, nil
+	}
+	limits := make([]jointLimits, dof)
+
+	if n := len(opts.MaxVelRadsJoints); n > 0 {
+		if n != dof {
+			return nil, fmt.Errorf(
+				"MoveOptions.MaxVelRadsJoints has %d entries but the arm has %d joints", n, dof)
+		}
+		for i, v := range opts.MaxVelRadsJoints {
+			limits[i].maxSpeedDegsPerSec = utils.RadToDeg(v)
+		}
+	} else if opts.MaxVelRads > 0 {
+		d := utils.RadToDeg(opts.MaxVelRads)
+		for i := range limits {
+			limits[i].maxSpeedDegsPerSec = d
+		}
+	}
+
+	if n := len(opts.MaxAccRadsJoints); n > 0 {
+		if n != dof {
+			return nil, fmt.Errorf(
+				"MoveOptions.MaxAccRadsJoints has %d entries but the arm has %d joints", n, dof)
+		}
+		for i, a := range opts.MaxAccRadsJoints {
+			limits[i].maxAccelDegsPerSecSq = utils.RadToDeg(a)
+		}
+	} else if opts.MaxAccRads > 0 {
+		d := utils.RadToDeg(opts.MaxAccRads)
+		for i := range limits {
+			limits[i].maxAccelDegsPerSecSq = d
+		}
+	}
+
+	return limits, nil
 }
