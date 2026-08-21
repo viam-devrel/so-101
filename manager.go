@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -31,6 +32,11 @@ type ControllerHandle struct {
 	// an AlwaysRebuild cycle, so a rebuilt resource would otherwise impersonate its own
 	// predecessor. Identity is the handle pointer.
 	owner resource.Name
+
+	// released is set by Release and read by Change B step 2's preemption hooks, which
+	// must skip a handle whose Close has begun. Nothing reads it yet, by design.
+	released    atomic.Bool
+	releaseOnce sync.Once
 }
 
 // writePositions writes goal positions to the servo group. When speed > 0 it commands
@@ -500,12 +506,13 @@ func fullCalibrationsEqual(a, b SO101FullCalibration) bool {
 	return a.Equal(b)
 }
 
-func GetSharedController(config *SoArm101Config) (*ControllerHandle, error) {
-	return GetSharedControllerWithCalibration(config, DefaultSO101FullCalibration, false)
-}
-
-func GetSharedControllerWithCalibration(config *SoArm101Config, calibration SO101FullCalibration, fromFile bool) (*ControllerHandle, error) {
-	return globalRegistry.GetController(config.Port, config, calibration, fromFile)
+// AcquireController delegates to the process-wide registry. Production uses this one;
+// tests use the registry method so they can inject a bus factory.
+func AcquireController(
+	owner resource.Name, config *SoArm101Config,
+	calibration SO101FullCalibration, fromFile bool,
+) (*ControllerHandle, error) {
+	return globalRegistry.AcquireController(owner, config, calibration, fromFile)
 }
 
 func ReleaseSharedController() {
@@ -707,5 +714,8 @@ func (h *ControllerHandle) SetServoBaudRate(ctx context.Context, id, baudRate in
 // ReleaseController never runs. Making this actually release is its own change, because it
 // is what makes the calibration sensor's recording-goroutine use-after-close reachable.
 func (h *ControllerHandle) Release() {
-	globalRegistry.releaseFromCaller()
+	h.releaseOnce.Do(func() {
+		h.released.Store(true)
+		globalRegistry.releaseFromCaller()
+	})
 }
