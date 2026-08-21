@@ -23,11 +23,13 @@ in `README.md` (one `## Model …` section each).
 
 - The SO-101 has 6 servos on one serial bus: the **arm uses servos 1-5**, the **gripper
   uses servo 6**. The arm and gripper components therefore need the *same* serial port.
-- The **shared controller** (`registry.go`, `manager.go`, `calibrated_servo.go`) is
-  ref-counted — `GetSharedControllerWithCalibration` / `ReleaseSharedController` — so the
-  arm and gripper on one SO-101 share a single serial connection instead of contending
-  for the port. `SafeSoArmController` is the thread-safe wrapper with per-servo
-  calibration applied.
+- The **shared controller** (`registry.go`, `manager.go`, `bus_session.go`,
+  `calibrated_servo.go`) is ref-counted — `AcquireController` / `handle.Release()` — so
+  every component on one SO-101 shares a single serial connection instead of contending for
+  the port. A `ControllerEntry` owns the port: it holds the open bus in a `busSession`, the
+  one calibration all servos normalize through, the reference count, and the mutex that
+  serializes bus work. Components hold a `ControllerHandle`, which reaches the bus only
+  through that entry. The last `Release()` closes the port and evicts the entry.
 - **Calibration** (`config.go`): priority is calibration file → servo registers →
   hardcoded defaults. The `devrel:so101:calibration` sensor runs a homing / range-recording
   workflow via `DoCommand` and persists calibration files.
@@ -106,6 +108,15 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
   hardware — environment-dependent, not a regression.
 
 ## Gotchas
+
+- **A component's `Close` really does close the serial port** once it was the last holder,
+  and rdk closes a resource *before* constructing its replacement, so any reconfigure of a
+  sole holder closes and reopens the port. Two components on one port (say an arm and a
+  calibration sensor) keep it open for each other.
+- **The arm and the calibration sensor still share the bus without excluding each other.**
+  One mutex serializes individual operations, so their transactions cannot interleave, but
+  nothing stops an arm move during a calibration workflow. `Discover` holds that mutex for
+  the whole ID sweep — seconds on a sparse bus — so motion waits during motor setup.
 
 - A `*_arm.go` filename is treated by Go as a GOARCH=`arm`-only file — the simulated-arm
   model lives in `simulated.go` (not `simulated_arm.go`), its tests in `simulated_test.go`.

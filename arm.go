@@ -204,7 +204,7 @@ type so101 struct {
 	logger     logging.Logger
 	cfg        *SO101ArmConfig
 	opMgr      *operation.SingleOperationManager
-	controller *SafeSoArmController
+	controller *ControllerHandle
 	manual     *manualSession
 
 	// goalCloud is the resolved approach-axis tolerance pair. Set once in NewSO101 and
@@ -465,14 +465,14 @@ func NewSO101(ctx context.Context, deps resource.Dependencies, name resource.Nam
 		logger.Debug("Using default calibration for SO-101")
 	}
 
-	controller, err := GetSharedControllerWithCalibration(controllerConfig, calibration, fromFile)
+	controller, err := AcquireController(name, controllerConfig, calibration, fromFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get shared SO-ARM controller: %w", err)
 	}
 
 	model, err := makeModelFrame(conf, name.Name)
 	if err != nil {
-		ReleaseSharedController() // Clean up on error
+		controller.Release() // Clean up on error
 		return nil, fmt.Errorf("failed to create kinematic model: %w", err)
 	}
 
@@ -517,7 +517,7 @@ func NewSO101(ctx context.Context, deps resource.Dependencies, name resource.Nam
 
 	// Initialize and verify servo connections
 	if err := arm.initializeServos(); err != nil {
-		ReleaseSharedController() // Clean up on error
+		controller.Release() // Clean up on error
 		return nil, fmt.Errorf("failed to initialize servos: %w", err)
 	}
 
@@ -1207,7 +1207,7 @@ func (s *so101) Close(context.Context) error {
 	s.mu.Unlock()
 
 	s.cancelFunc()
-	ReleaseSharedController()
+	s.controller.Release()
 	return nil
 }
 

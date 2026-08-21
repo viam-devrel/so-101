@@ -1,0 +1,102 @@
+package so_arm
+
+import (
+	"context"
+	"sync"
+	"testing"
+
+	"github.com/hipsterbrown/feetech-servo/feetech"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func TestCalibrationHasASingleSourceOfTruth(t *testing.T) {
+	ft := newFakeTransport()
+	r, h1 := testRegistryAndHandle(t, ft)
+	h2 := acquireTestHandle(t, r)
+
+	updated := cloneCalibration(DefaultSO101FullCalibration)
+	updated.Gripper.RangeMin = 1234
+	require.NoError(t, h1.SetCalibration(updated))
+
+	assert.Equal(t, 1234, h1.entry.calibration.Gripper.RangeMin,
+		"the session-rebuild seed must track SetCalibration, or a replug undoes it")
+
+	// The read path and the write path must agree, through either holder.
+	assert.Equal(t, 1234, h2.GetCalibration().Gripper.RangeMin)
+	assert.Equal(t, 1234, h2.entry.session.Load().servos[6].Calibration().RangeMin,
+		"the per-servo calibration is the one source of truth; nothing may hold a second copy")
+}
+
+func TestCalibrationUpdateDoesNotMutateTheDefault(t *testing.T) {
+	before := DefaultSO101FullCalibration.Gripper.RangeMin
+
+	h := testHandle(t, newFakeTransport())
+	updated := cloneCalibration(DefaultSO101FullCalibration)
+	updated.Gripper.RangeMin = 999
+	require.NoError(t, h.SetCalibration(updated))
+
+	assert.Equal(t, before, DefaultSO101FullCalibration.Gripper.RangeMin,
+		"a calibration update must not reach through shared pointers into the package default")
+}
+
+func TestConcurrentCalibrationUpdateAndReadIsRaceFree(t *testing.T) {
+	h := testHandle(t, newFakeTransport())
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			c := cloneCalibration(DefaultSO101FullCalibration)
+			c.Gripper.RangeMin = 1000 + i
+			_ = h.SetCalibration(c)
+		}(i)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = h.GetCalibration()
+		}()
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = h.GetJointPositionsForServos(context.Background(), []int{1, 2, 3, 4, 5})
+		}()
+	}
+	wg.Wait()
+}
+
+func TestSyncReadPositionsDecodesInsideTheHandle(t *testing.T) {
+	ft := newFakeTransport()
+	ft.setRegister(1, feetech.RegPresentPosition.Address, encodeWordLE(2048))
+	h := testHandle(t, ft)
+
+	positions, err := h.SyncReadPositions(context.Background(), []int{1})
+	require.NoError(t, err)
+	assert.Equal(t, 2048, positions[1],
+		"decoding belongs inside the handle; exposing Protocol() would re-leak the bus")
+}
+
+func TestPingServoReachesOneServo(t *testing.T) {
+	h := testHandle(t, newFakeTransport())
+	model, err := h.PingServo(context.Background(), 3)
+	require.NoError(t, err)
+	assert.Equal(t, fakeModelNumber, model)
+}
+
+func TestServoPresentReportsConfiguredServos(t *testing.T) {
+	h := testHandle(t, newFakeTransport())
+	assert.True(t, h.ServoPresent(6))
+	assert.False(t, h.ServoPresent(9), "motorSetupVerify needs absent-vs-unresponsive")
+}
+
+func TestHandleOperationsFailFastWhileDisconnected(t *testing.T) {
+	h := testHandle(t, newFakeTransport())
+	h.entry.session.Store(nil)
+
+	_, err := h.SyncReadPositions(context.Background(), []int{1})
+	assert.ErrorIs(t, err, ErrPortDisconnected)
+	_, err = h.PingServo(context.Background(), 1)
+	assert.ErrorIs(t, err, ErrPortDisconnected)
+	assert.ErrorIs(t, h.SetTorqueEnable(context.Background(), true), ErrPortDisconnected)
+	assert.False(t, h.ServoPresent(1), "no session means no servos")
+}

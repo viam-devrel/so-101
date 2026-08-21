@@ -2,66 +2,141 @@ package so_arm
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/hipsterbrown/feetech-servo/feetech"
+	"go.viam.com/rdk/logging"
+	"go.viam.com/rdk/resource"
 )
 
+// ControllerEntry is the single owner of one port's bus. Every handle on that port reaches
+// the bus through this entry's current session, so all holders share one state.
 type ControllerEntry struct {
-	controller  *SafeSoArmController
 	config      *SoArm101Config
-	calibration SO101FullCalibration
-	refCount    int64 // Atomic reference counter
-	lastError   error
-	mu          sync.RWMutex
+	calibration SO101FullCalibration // the seed newBusSession wraps servos in
+	refCount    int                  // live handles; guarded by mu
+	torndown    bool                 // once guard; also hides the entry from a new acquire
+	mu          sync.RWMutex         // guards bookkeeping: config, calibration, refCount
+
+	port     string              // for error messages; no longer only in config
+	registry *ControllerRegistry // for eviction at teardown
+	logger   logging.Logger      // was reached via entry.config.Logger
+	busMu    sync.RWMutex        // serializes bus work; the shared mutex problem 1 needed
+
+	session atomic.Pointer[busSession] // nil == disconnected
+}
+
+// teardownIfLast closes the bus and evicts the entry once no handles are left, at most once.
+//
+// Takes registry.mu before entry.mu, matching both acquire paths, and evicts in the same
+// critical section that sets torndown -- otherwise an acquire could join a dead entry and
+// the next one would open a second bus on the same port. The bus is closed after both locks
+// are released; in-flight operations finish and later ones get feetech.ErrBusClosed.
+func (e *ControllerEntry) teardownIfLast() {
+	r := e.registry
+	if r == nil {
+		return // entries built by hand in tests
+	}
+
+	r.mu.Lock()
+	e.mu.Lock()
+	if e.torndown || e.refCount > 0 {
+		e.mu.Unlock()
+		r.mu.Unlock()
+		return
+	}
+	e.torndown = true
+	sess := e.session.Swap(nil)
+	if r.entries[e.port] == e {
+		delete(r.entries, e.port)
+	}
+	e.mu.Unlock()
+	r.mu.Unlock()
+
+	if sess != nil && sess.bus != nil {
+		if err := sess.bus.Close(); err != nil && e.logger != nil {
+			e.logger.Warnf("error closing shared bus for port %s: %v", e.port, err)
+		}
+	}
+}
+
+// currentCalibration reads the session-rebuild seed.
+func (e *ControllerEntry) currentCalibration() SO101FullCalibration {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.calibration
 }
 
 type ControllerRegistry struct {
 	entries map[string]*ControllerEntry // port path -> entry
 	mu      sync.RWMutex
 
-	// For backward API compatibility - track which caller uses which port
-	callerPorts map[uintptr]string // caller pointer -> port path
-	callerMu    sync.RWMutex
+	// busFactory opens a bus. Injectable so tests can simulate an unplug and replug
+	// without serial hardware; production always uses feetech.NewBus.
+	busFactory func(feetech.BusConfig) (*feetech.Bus, error)
 }
 
 func NewControllerRegistry() *ControllerRegistry {
 	return &ControllerRegistry{
-		entries:     make(map[string]*ControllerEntry),
-		callerPorts: make(map[uintptr]string),
+		entries:    make(map[string]*ControllerEntry),
+		busFactory: feetech.NewBus,
 	}
 }
 
-func (r *ControllerRegistry) GetController(portPath string, config *SoArm101Config, calibration SO101FullCalibration, fromFile bool) (*SafeSoArmController, error) {
+// AcquireController is the registry-scoped entry point. Tests use this one so they can
+// drive an injected busFactory; production goes through the package-level delegate.
+func (r *ControllerRegistry) AcquireController(
+	owner resource.Name, config *SoArm101Config,
+	calibration SO101FullCalibration, fromFile bool,
+) (*ControllerHandle, error) {
+	h, err := r.GetController(config.Port, config, calibration, fromFile)
+	if err != nil {
+		return nil, err
+	}
+	h.owner = owner
+	return h, nil
+}
+
+// errEntryTornDown means the entry found in the map was already torn down, so the caller
+// should build a fresh one rather than join it.
+var errEntryTornDown = errors.New("controller entry torn down")
+
+func (r *ControllerRegistry) GetController(portPath string, config *SoArm101Config, calibration SO101FullCalibration, fromFile bool) (*ControllerHandle, error) {
 	r.mu.RLock()
 	entry, exists := r.entries[portPath]
 	r.mu.RUnlock()
 
 	if exists {
-		return r.getExistingController(entry, config, calibration, fromFile)
+		h, err := r.getExistingController(entry, config, calibration, fromFile)
+		if !errors.Is(err, errEntryTornDown) {
+			return h, err
+		}
 	}
 
 	return r.createNewController(portPath, config, calibration, fromFile)
 }
 
-func (r *ControllerRegistry) getExistingController(entry *ControllerEntry, config *SoArm101Config, calibration SO101FullCalibration, fromFile bool) (*SafeSoArmController, error) {
+func (r *ControllerRegistry) getExistingController(entry *ControllerEntry, config *SoArm101Config, calibration SO101FullCalibration, fromFile bool) (*ControllerHandle, error) {
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
 
-	if entry.controller == nil {
-		if entry.lastError != nil {
-			return nil, fmt.Errorf("cached controller creation error: %w", entry.lastError)
-		}
+	// Should be unreachable, since teardownIfLast evicts under the lock that sets this.
+	// Kept so a regression surfaces here instead of as a dead handle.
+	if entry.torndown {
+		return nil, errEntryTornDown
+	}
+
+	if entry.session.Load() == nil {
 		return nil, fmt.Errorf("controller not available for port %s", entry.config.Port)
 	}
 
 	if !configsEqual(entry.config, config) {
-		currentRefCount := atomic.LoadInt64(&entry.refCount)
+		currentRefCount := entry.refCount
 		configDiff := compareConfigs(entry.config, config)
 		return nil, fmt.Errorf("conflict: existing controller uses different config (refCount: %d): %s",
 			currentRefCount, configDiff)
@@ -74,47 +149,39 @@ func (r *ControllerRegistry) getExistingController(entry *ControllerEntry, confi
 			config.Logger.Info("Updating controller calibration")
 		}
 
-		if entry.controller != nil {
-			// Update calibration in each CalibratedServo using thread-safe method
+		if sess := entry.session.Load(); sess != nil {
+			// One place to write: the per-servo calibrations are the source of truth.
 			for id := 1; id <= 6; id++ {
-				motorCal := calibration.GetMotorCalibrationByID(id)
-				appCal := &MotorCalibration{
-					ID:           motorCal.ID,
-					DriveMode:    motorCal.DriveMode,
-					HomingOffset: motorCal.HomingOffset,
-					RangeMin:     motorCal.RangeMin,
-					RangeMax:     motorCal.RangeMax,
-					NormMode:     motorCal.NormMode,
-				}
-				entry.controller.calibratedServos[id].UpdateCalibration(appCal)
+				sess.servos[id].UpdateCalibration(copyMotorCalibration(calibration.GetMotorCalibrationByID(id)))
 			}
 		}
 		entry.calibration = calibration
 	}
 
-	atomic.AddInt64(&entry.refCount, 1)
-	r.trackCaller(entry.config.Port)
+	entry.refCount++
 
-	return &SafeSoArmController{
-		bus:              entry.controller.bus,
-		group:            entry.controller.group,
-		calibratedServos: entry.controller.calibratedServos,
-		logger:           config.Logger,
-		calibration:      entry.calibration,
-	}, nil
+	return &ControllerHandle{entry: entry, logger: config.Logger}, nil
 }
 
-func (r *ControllerRegistry) createNewController(portPath string, config *SoArm101Config, calibration SO101FullCalibration, fromFile bool) (*SafeSoArmController, error) {
+func (r *ControllerRegistry) createNewController(portPath string, config *SoArm101Config, calibration SO101FullCalibration, fromFile bool) (*ControllerHandle, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	if entry, exists := r.entries[portPath]; exists {
-		return r.getExistingController(entry, config, calibration, fromFile)
+		h, err := r.getExistingController(entry, config, calibration, fromFile)
+		if !errors.Is(err, errEntryTornDown) {
+			return h, err
+		}
+		// Torn down under us: fall through and build a fresh entry below.
+		delete(r.entries, portPath)
 	}
 
 	entry := &ControllerEntry{
 		config:      config,
 		calibration: calibration,
+		port:        portPath,
+		registry:    r,
+		logger:      config.Logger,
 	}
 
 	feetechCalibrations := calibration.ToFeetechCalibrationMap()
@@ -137,42 +204,16 @@ func (r *ControllerRegistry) createNewController(portPath string, config *SoArm1
 		busConfig.BaudRate = 1000000
 	}
 
-	bus, err := feetech.NewBus(busConfig)
+	bus, err := r.busFactory(busConfig)
 	if err != nil {
-		entry.lastError = err
-		r.entries[portPath] = entry
+		// Deliberately no entry: caching the failure here made the port permanently
+		// unusable, which discarded viam-server's own 5s resource retry
+		// (rdk robot/impl/local_robot.go:427).
 		return nil, fmt.Errorf("failed to create feetech servo bus: %w", err)
 	}
 
-	// Create raw servo instances
-	rawServos := make(map[int]*feetech.Servo)
-	for id := 1; id <= 6; id++ {
-		rawServos[id] = feetech.NewServo(bus, id, &feetech.ModelSTS3215)
-	}
-
-	// Create ServoGroups
-	group := feetech.NewServoGroup(bus,
-		rawServos[1], rawServos[2], rawServos[3], rawServos[4], rawServos[5], rawServos[6])
-
-	// Wrap servos with calibration
-	calibratedServos := make(map[int]*CalibratedServo)
-	for id := 1; id <= 6; id++ {
-		motorCal := calibration.GetMotorCalibrationByID(id)
-
-		// Convert SO101 MotorCalibration to our MotorCalibration type
-		appCal := &MotorCalibration{
-			ID:           motorCal.ID,
-			DriveMode:    motorCal.DriveMode,
-			HomingOffset: motorCal.HomingOffset,
-			RangeMin:     motorCal.RangeMin,
-			RangeMax:     motorCal.RangeMax,
-			NormMode:     motorCal.NormMode,
-		}
-
-		calibratedServos[id] = NewCalibratedServo(rawServos[id], appCal)
-	}
-
-	// If using default calibration (not from file), try reading from servos
+	// If using default calibration (not from file), try reading from servos. The session is
+	// built afterwards so its servos carry whatever calibration was just read.
 	finalCalibration := calibration
 	if !fromFile {
 		if config.Logger != nil {
@@ -181,51 +222,24 @@ func (r *ControllerRegistry) createNewController(portPath string, config *SoArm1
 		// Use background context for servo reading during controller creation
 		ctx := context.Background()
 		finalCalibration = ReadCalibrationFromServos(ctx, bus, config.ServoIDs, config.Logger)
-
-		// Update calibrated servos with new calibration
-		for id := 1; id <= 6; id++ {
-			motorCal := finalCalibration.GetMotorCalibrationByID(id)
-			appCal := &MotorCalibration{
-				ID:           motorCal.ID,
-				DriveMode:    motorCal.DriveMode,
-				HomingOffset: motorCal.HomingOffset,
-				RangeMin:     motorCal.RangeMin,
-				RangeMax:     motorCal.RangeMax,
-				NormMode:     motorCal.NormMode,
-			}
-			calibratedServos[id] = NewCalibratedServo(rawServos[id], appCal)
-		}
 	}
 
-	entry.controller = &SafeSoArmController{
-		bus:              bus,
-		group:            group,
-		calibratedServos: calibratedServos,
-		logger:           config.Logger,
-		calibration:      finalCalibration,
-	}
-	// Update entry calibration after controller creation for consistency
 	entry.calibration = finalCalibration
-	entry.lastError = nil
-	atomic.StoreInt64(&entry.refCount, 1)
+	entry.session.Store(newBusSession(bus, finalCalibration))
+	entry.refCount = 1
 
 	r.entries[portPath] = entry
 
-	r.trackCaller(portPath)
-
 	if config.Logger != nil {
-		config.Logger.Debugf("Created new feetech servo bus with %d servos for port %s", len(calibratedServos), portPath)
+		config.Logger.Debugf("Created new feetech servo bus for port %s", portPath)
 	}
 
-	return &SafeSoArmController{
-		bus:              bus,
-		group:            group,
-		calibratedServos: calibratedServos,
-		logger:           config.Logger,
-		calibration:      finalCalibration,
-	}, nil
+	return &ControllerHandle{entry: entry, logger: config.Logger}, nil
 }
 
+// ReleaseController drops one reference by port path. Delegates the close to
+// teardownIfLast rather than doing it here, which is also what keeps the lock order
+// consistent -- its old body took entry.mu before r.mu.
 func (r *ControllerRegistry) ReleaseController(portPath string) {
 	r.mu.RLock()
 	entry, exists := r.entries[portPath]
@@ -236,26 +250,10 @@ func (r *ControllerRegistry) ReleaseController(portPath string) {
 	}
 
 	entry.mu.Lock()
-	defer entry.mu.Unlock()
+	entry.refCount--
+	entry.mu.Unlock()
 
-	currentRefCount := atomic.AddInt64(&entry.refCount, -1)
-	if currentRefCount <= 0 {
-		if entry.controller != nil && entry.controller.bus != nil {
-			if err := entry.controller.bus.Close(); err != nil && entry.config != nil && entry.config.Logger != nil {
-				entry.config.Logger.Warnf("error closing shared controller for port %s: %v", portPath, err)
-			}
-		}
-
-		r.mu.Lock()
-		delete(r.entries, portPath)
-		r.mu.Unlock()
-
-		entry.controller = nil
-		entry.config = nil
-		entry.calibration = SO101FullCalibration{}
-		atomic.StoreInt64(&entry.refCount, 0)
-		entry.lastError = nil
-	}
+	entry.teardownIfLast()
 }
 
 func (r *ControllerRegistry) ForceCloseController(portPath string) error {
@@ -271,16 +269,16 @@ func (r *ControllerRegistry) ForceCloseController(portPath string) error {
 	}
 
 	entry.mu.Lock()
-	defer entry.mu.Unlock()
+	entry.torndown = true // so a later teardownIfLast cannot close the bus twice
+	sess := entry.session.Swap(nil)
+	entry.config = nil
+	entry.calibration = SO101FullCalibration{}
+	entry.refCount = 0
+	entry.mu.Unlock()
 
 	var err error
-	if entry.controller != nil {
-		err = entry.controller.bus.Close()
-		entry.controller = nil
-		entry.config = nil
-		entry.calibration = SO101FullCalibration{}
-		atomic.StoreInt64(&entry.refCount, 0)
-		entry.lastError = nil
+	if sess != nil && sess.bus != nil {
+		err = sess.bus.Close()
 	}
 
 	return err
@@ -298,8 +296,8 @@ func (r *ControllerRegistry) GetControllerStatus(portPath string) (int64, bool, 
 	entry.mu.RLock()
 	defer entry.mu.RUnlock()
 
-	currentRefCount := atomic.LoadInt64(&entry.refCount)
-	hasController := entry.controller != nil
+	currentRefCount := entry.refCount
+	hasController := entry.session.Load() != nil
 	configSummary := ""
 
 	if entry.config != nil {
@@ -312,7 +310,7 @@ func (r *ControllerRegistry) GetControllerStatus(portPath string) (int64, bool, 
 			entry.config.Port, entry.config.Baudrate, calibrationInfo)
 	}
 
-	return currentRefCount, hasController, configSummary
+	return int64(currentRefCount), hasController, configSummary
 }
 
 func (r *ControllerRegistry) GetCurrentCalibration(portPath string) SO101FullCalibration {
@@ -327,36 +325,6 @@ func (r *ControllerRegistry) GetCurrentCalibration(portPath string) SO101FullCal
 	entry.mu.RLock()
 	defer entry.mu.RUnlock()
 	return entry.calibration
-}
-
-func (r *ControllerRegistry) trackCaller(portPath string) {
-	pc, _, _, ok := runtime.Caller(3) // 3 levels up to get the actual caller
-	if !ok {
-		return
-	}
-
-	r.callerMu.Lock()
-	r.callerPorts[pc] = portPath
-	r.callerMu.Unlock()
-}
-
-func (r *ControllerRegistry) releaseFromCaller() {
-	pc, _, _, ok := runtime.Caller(2) // 2 levels up to get the actual caller
-	if !ok {
-		return
-	}
-
-	r.callerMu.RLock()
-	portPath, exists := r.callerPorts[pc]
-	r.callerMu.RUnlock()
-
-	if exists {
-		r.ReleaseController(portPath)
-
-		r.callerMu.Lock()
-		delete(r.callerPorts, pc)
-		r.callerMu.Unlock()
-	}
 }
 
 // compareConfigs returns a string describing the differences between two configs

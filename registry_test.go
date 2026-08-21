@@ -1,12 +1,15 @@
 package so_arm
 
 import (
-	"fmt"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/hipsterbrown/feetech-servo/feetech"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.viam.com/rdk/logging"
 )
 
@@ -36,10 +39,6 @@ func TestRegistryCreation(t *testing.T) {
 
 	if registry.entries == nil {
 		t.Fatal("Registry entries map not initialized")
-	}
-
-	if registry.callerPorts == nil {
-		t.Fatal("Registry callerPorts map not initialized")
 	}
 
 	if len(registry.entries) != 0 {
@@ -77,7 +76,7 @@ func TestSingleControllerAccess(t *testing.T) {
 		t.Fatal("Registry entry not found for port")
 	}
 
-	refCount := atomic.LoadInt64(&entry.refCount)
+	refCount := entry.refCount
 	if refCount != 1 {
 		t.Fatalf("Expected refCount 1, got %d", refCount)
 	}
@@ -179,31 +178,33 @@ func TestReferenceCountingLogic(t *testing.T) {
 	entry := &ControllerEntry{
 		config:      config,
 		calibration: DefaultSO101FullCalibration,
+		port:        port,
+		registry:    registry,
 		refCount:    3, // Start with 3 references
 	}
 	registry.entries[port] = entry
 
 	// Test decrement
-	initialCount := atomic.LoadInt64(&entry.refCount)
+	initialCount := entry.refCount
 	if initialCount != 3 {
 		t.Fatalf("Expected initial refCount 3, got %d", initialCount)
 	}
 
 	// Simulate releases
-	atomic.AddInt64(&entry.refCount, -1)
-	count1 := atomic.LoadInt64(&entry.refCount)
+	entry.refCount--
+	count1 := entry.refCount
 	if count1 != 2 {
 		t.Fatalf("Expected refCount 2 after first release, got %d", count1)
 	}
 
-	atomic.AddInt64(&entry.refCount, -1)
-	count2 := atomic.LoadInt64(&entry.refCount)
+	entry.refCount--
+	count2 := entry.refCount
 	if count2 != 1 {
 		t.Fatalf("Expected refCount 1 after second release, got %d", count2)
 	}
 
-	atomic.AddInt64(&entry.refCount, -1)
-	count3 := atomic.LoadInt64(&entry.refCount)
+	entry.refCount--
+	count3 := entry.refCount
 	if count3 != 0 {
 		t.Fatalf("Expected refCount 0 after third release, got %d", count3)
 	}
@@ -219,9 +220,9 @@ func TestCleanupOnZeroRefs(t *testing.T) {
 	entry := &ControllerEntry{
 		config:      config,
 		calibration: DefaultSO101FullCalibration,
+		port:        port,
+		registry:    registry,
 		refCount:    1,
-		controller:  nil,
-		lastError:   fmt.Errorf("mock hardware error"), // Add error to make nil controller valid
 	}
 	registry.entries[port] = entry
 
@@ -254,8 +255,9 @@ func TestForceCloseController(t *testing.T) {
 		entry := &ControllerEntry{
 			config:      config,
 			calibration: DefaultSO101FullCalibration,
-			refCount:    2,   // Multiple references
-			controller:  nil, // No actual controller
+			port:        port,
+			registry:    registry,
+			refCount:    2, // Multiple references
 		}
 		registry.entries[port] = entry
 	}
@@ -357,8 +359,9 @@ func TestGetControllerStatus(t *testing.T) {
 	entry := &ControllerEntry{
 		config:      config,
 		calibration: DefaultSO101FullCalibration,
+		port:        port,
+		registry:    registry,
 		refCount:    2,
-		controller:  nil,
 	}
 	registry.entries[port] = entry
 
@@ -416,4 +419,105 @@ func TestControllerUsesServoCalibrationWhenNoFile(t *testing.T) {
 	// The key is ensuring the code path is correct
 
 	t.Skip("Integration test - requires hardware or mock bus setup")
+}
+
+// shortTimeoutConfig narrows testConfig's one-second timeout so a test that expects a
+// failed read does not wait a full second per servo.
+func shortTimeoutConfig(port string) *SoArm101Config {
+	cfg := testConfig(port)
+	cfg.Timeout = 50 * time.Millisecond
+	return cfg
+}
+
+func TestRegistryUsesInjectedBusFactory(t *testing.T) {
+	r := NewControllerRegistry()
+	var calls int
+	r.busFactory = func(cfg feetech.BusConfig) (*feetech.Bus, error) {
+		calls++
+		cfg.Transport = newFakeTransport()
+		return feetech.NewBus(cfg)
+	}
+
+	_, err := r.GetController("/dev/fake0", shortTimeoutConfig("/dev/fake0"),
+		DefaultSO101FullCalibration, true)
+	require.NoError(t, err)
+	assert.Equal(t, 1, calls, "the registry must open buses through the factory")
+}
+
+func TestFailedOpenLeavesNoPoisonedEntry(t *testing.T) {
+	r := NewControllerRegistry()
+	var attempts int
+	r.busFactory = func(cfg feetech.BusConfig) (*feetech.Bus, error) {
+		attempts++
+		if attempts == 1 {
+			return nil, errors.New("no such device")
+		}
+		cfg.Transport = newFakeTransport()
+		return feetech.NewBus(cfg)
+	}
+	cfg := shortTimeoutConfig("/dev/fake0")
+
+	_, err := r.GetController("/dev/fake0", cfg, DefaultSO101FullCalibration, true)
+	require.Error(t, err)
+
+	r.mu.RLock()
+	_, cached := r.entries["/dev/fake0"]
+	r.mu.RUnlock()
+	assert.False(t, cached, "a failed open must leave no entry for the retry to trip over")
+
+	_, err = r.GetController("/dev/fake0", cfg, DefaultSO101FullCalibration, true)
+	require.NoError(t, err, "the second attempt must reopen, not replay a cached error")
+	assert.Equal(t, 2, attempts)
+}
+
+func TestReleaseClosesTheBusOnlyAfterTheLastHolder(t *testing.T) {
+	ft := newFakeTransport()
+	r, h1 := testRegistryAndHandle(t, ft)
+	h2 := acquireTestHandle(t, r)
+	entry := h1.entry
+
+	h1.Release()
+	assert.NotNil(t, entry.session.Load(), "one holder left; the bus must stay open")
+	assert.Equal(t, 0, ft.closeCount())
+
+	h2.Release()
+	r.mu.RLock()
+	_, present := r.entries["/dev/fake0"]
+	r.mu.RUnlock()
+	assert.False(t, present, "the last release must evict the entry")
+	assert.Equal(t, 1, ft.closeCount())
+}
+
+func TestReleaseIsIdempotent(t *testing.T) {
+	ft := newFakeTransport()
+	r, h := testRegistryAndHandle(t, ft)
+	h.Release()
+	h.Release() // a double Close must not double-decrement into a negative refCount
+	assert.Equal(t, 1, ft.closeCount())
+
+	h2 := acquireTestHandle(t, r)
+	assert.NotNil(t, h2.entry.session.Load(), "a fresh acquire must open a fresh entry")
+}
+
+func TestTeardownRunsExactlyOnce(t *testing.T) {
+	ft := newFakeTransport()
+	_, h := testRegistryAndHandle(t, ft)
+	entry := h.entry
+
+	h.Release()
+	entry.teardownIfLast() // a redundant call must be inert
+	entry.teardownIfLast()
+	assert.Equal(t, 1, ft.closeCount())
+}
+
+func TestAcquireNeverJoinsATornDownEntry(t *testing.T) {
+	ft := newFakeTransport()
+	r, h := testRegistryAndHandle(t, ft)
+	torn := h.entry
+
+	h.Release()
+	h2 := acquireTestHandle(t, r)
+	assert.NotSame(t, torn, h2.entry,
+		"joining a torn-down entry would hand back a permanently dead handle")
+	assert.NotNil(t, h2.entry.session.Load())
 }

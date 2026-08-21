@@ -179,7 +179,11 @@ While manual mode is active, it also reports live per-joint telemetry (`actual_d
 
 ### Communication
 
-The SO-101 uses serial communication over USB with Feetech STS3215 servos. All 6 servos share one bus, and the arm component owns that connection: it drives servos 1-5 itself and exposes the remaining servo to a gripper component through its [`servo_*` commands](#servo-commands). The gripper therefore configures an `arm` rather than a `port`, and only one component ever holds the serial connection.
+The SO-101 uses serial communication over USB with Feetech STS3215 servos. All 6 servos share one bus, and the arm component owns that connection: it drives servos 1-5 itself and exposes the remaining servo to a gripper component through its [`servo_*` commands](#servo-commands). The gripper therefore configures an `arm` rather than a `port`, and never opens the port itself.
+
+Components that do configure a `port` — an arm, and the [calibration sensor](#model-devrelso101calibration) — share one connection when they name the same port, rather than opening it twice. The port stays open until the last of them is removed.
+
+If the port is not present when the machine starts, the component keeps retrying and connects on its own once the device appears. No restart is needed.
 
 You can use the included [discovery service](#model-devrelso101discovery) or find the available serial port options from your machine's command line.
 

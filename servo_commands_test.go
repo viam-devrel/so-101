@@ -217,4 +217,4 @@ func TestIsServoCommand(t *testing.T) {
 // every test above exercises against fakes. This assertion is the seam between the tested
 // dispatch logic and the hardware path, which needs a serial port and so cannot be unit
 // tested directly.
-var _ servoOps = (*SafeSoArmController)(nil)
+var _ servoOps = (*ControllerHandle)(nil)
