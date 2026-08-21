@@ -744,7 +744,9 @@ func (s *so101) MoveToJointPositions(ctx context.Context, positions []referencef
 	if err != nil {
 		s.logger.Warnf("failed to read positions for coordinated move, falling back to "+
 			"uniform speed: %v", err)
-		return s.moveJointsUniform(ctx, clamped, speed, parseWaitExtra(extra))
+		// No arm.MoveOptions here, so caps is always nil -- kept for symmetry with
+		// MoveThroughJointPositions' fallback.
+		return s.moveJointsUniform(ctx, clamped, uniformSpeedUnderCaps(speed, nil), parseWaitExtra(extra))
 	}
 
 	return s.moveJoints(ctx, current, clamped, speed, accel, nil, parseWaitExtra(extra))
@@ -767,11 +769,19 @@ func (s *so101) MoveThroughJointPositions(ctx context.Context, positions [][]ref
 	s.mu.RUnlock()
 	accel := defaultAccel
 
-	maxVelRads := 0.0
-	if options != nil {
-		maxVelRads = options.MaxVelRads // MaxAccRads is intentionally ignored (speed-only)
+	caps, err := jointLimitsFromMoveOptions(options, len(s.armServoIDs))
+	if err != nil {
+		return err
 	}
-	speed := resolveSpeedDegsPerSec(maxVelRads, defaultSpeed)
+
+	// MaxVelRads also becomes the reference speed, not just a per-joint cap. That is
+	// deliberate double application: as the reference it sets the pace, and as a cap it
+	// bypasses resolveSpeedDegsPerSec's 3 deg/s floor for very small values. Per arm.proto
+	// the scalar is ignored entirely when the per-joint slice is set.
+	speed := defaultSpeed
+	if options != nil && len(options.MaxVelRadsJoints) == 0 && options.MaxVelRads > 0 {
+		speed = resolveSpeedDegsPerSec(options.MaxVelRads, defaultSpeed)
+	}
 
 	// One read per CALL, not per waypoint. The first waypoint has no predecessor to
 	// difference against, and GoToInputs routinely emits single-waypoint streams which
@@ -790,10 +800,10 @@ func (s *so101) MoveThroughJointPositions(ctx context.Context, positions [][]ref
 		}
 		isLast := idx == len(positions)-1
 		if from == nil {
-			if err := s.moveJointsUniform(ctx, clamped, speed, isLast); err != nil {
+			if err := s.moveJointsUniform(ctx, clamped, uniformSpeedUnderCaps(speed, caps), isLast); err != nil {
 				return err
 			}
-		} else if err := s.moveJoints(ctx, from, clamped, speed, accel, nil, isLast); err != nil {
+		} else if err := s.moveJoints(ctx, from, clamped, speed, accel, caps, isLast); err != nil {
 			return err
 		}
 		if ctx.Err() != nil {

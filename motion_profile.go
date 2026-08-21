@@ -198,3 +198,17 @@ func jointLimitsFromMoveOptions(opts *arm.MoveOptions, dof int) ([]jointLimits, 
 
 	return limits, nil
 }
+
+// uniformSpeedUnderCaps returns the fastest uniform speed that violates no per-joint cap.
+//
+// Used only on the read-failure fallback path, where there is no travel reference and so no
+// way to scale per joint. Taking the minimum is conservative -- every joint ends at or below
+// its own cap -- and is far better than discarding caps the caller believes are in force.
+func uniformSpeedUnderCaps(speed float64, caps []jointLimits) float64 {
+	for _, c := range caps {
+		if c.maxSpeedDegsPerSec > 0 && c.maxSpeedDegsPerSec < speed {
+			speed = c.maxSpeedDegsPerSec
+		}
+	}
+	return speed
+}

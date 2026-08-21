@@ -462,3 +462,19 @@ func TestJointTravelsDeg(t *testing.T) {
 		}
 	})
 }
+
+func TestUniformSpeedUnderCaps(t *testing.T) {
+	caps := []jointLimits{{maxSpeedDegsPerSec: 30}, {maxSpeedDegsPerSec: 8}, {}}
+	if got := uniformSpeedUnderCaps(50, caps); got != 8 {
+		t.Errorf("got %v, want 8 (the tightest cap must bind)", got)
+	}
+	if got := uniformSpeedUnderCaps(5, caps); got != 5 {
+		t.Errorf("got %v, want 5 (a cap must never RAISE the speed)", got)
+	}
+	if got := uniformSpeedUnderCaps(50, nil); got != 50 {
+		t.Errorf("got %v, want 50 (no caps means no reduction)", got)
+	}
+	if got := uniformSpeedUnderCaps(50, []jointLimits{{maxSpeedDegsPerSec: -5}}); got != 50 {
+		t.Errorf("got %v, want 50 (a negative cap must not bind)", got)
+	}
+}
