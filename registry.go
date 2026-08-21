@@ -30,7 +30,6 @@ type ControllerEntry struct {
 	busMu    sync.RWMutex        // serializes bus work; the shared mutex problem 1 needed
 
 	session atomic.Pointer[busSession] // nil == disconnected
-	gen     atomic.Uint64              // monotonic session counter
 }
 
 // --- Entry lifecycle ---
@@ -271,7 +270,7 @@ func (r *ControllerRegistry) createNewController(portPath string, config *SoArm1
 	}
 
 	entry.calibration = finalCalibration
-	entry.session.Store(newBusSession(bus, finalCalibration, entry.gen.Add(1)))
+	entry.session.Store(newBusSession(bus, finalCalibration))
 	entry.refCount = 1
 
 	r.entries[portPath] = entry
