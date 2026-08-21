@@ -54,7 +54,7 @@ type config struct {
 func main() {
 	var cfg config
 	flag.StringVar(&cfg.port, "port", "", "serial port (e.g. /dev/tty.usbmodem1101)")
-	flag.StringVar(&cfg.test, "test", "writerate", "writerate|goaltime|accel|all")
+	flag.StringVar(&cfg.test, "test", "writerate", "writerate|goaltime|accel|readrate|all")
 	flag.IntVar(&cfg.servo, "servo", 1, "servo ID for single-joint tests")
 	flag.Float64Var(&cfg.travelDeg, "travel", 20, "degrees of travel per trial (accel only; goaltime uses its own 10/20/40 sweep)")
 	flag.BoolVar(&cfg.move, "move", false, "REQUIRED to allow any test that moves the arm")
@@ -103,6 +103,8 @@ func run(cfg config) error {
 			err = runGoalTime(cfg)
 		case "accel":
 			err = runAccel(cfg)
+		case "readrate":
+			err = runReadRate(cfg)
 		}
 		if err != nil {
 			return fmt.Errorf("%s: %w", t, err)
@@ -460,13 +462,14 @@ func selectTests(name string, move bool) (run, skipped []string, err error) {
 	var requested []string
 	switch name {
 	case "all":
-		// writerate LAST: it deliberately leaves the arm limp, and a motion test running
-		// after it would holdPose the collapsed pose and measure the sweep from there.
-		requested = []string{"goaltime", "accel", "writerate"}
-	case "writerate", "goaltime", "accel":
+		// readrate and writerate LAST: both deliberately leave the arm limp (torque
+		// disabled), and a motion test running after either would holdPose the collapsed
+		// pose and measure the sweep from there.
+		requested = []string{"goaltime", "accel", "readrate", "writerate"}
+	case "writerate", "goaltime", "accel", "readrate":
 		requested = []string{name}
 	default:
-		return nil, nil, fmt.Errorf("unknown -test %q (want writerate|goaltime|accel|all)", name)
+		return nil, nil, fmt.Errorf("unknown -test %q (want writerate|goaltime|accel|readrate|all)", name)
 	}
 
 	for _, t := range requested {
@@ -1844,8 +1847,8 @@ func init() {
 				wantErr      bool
 			}{
 				{"writerate", false, []string{"writerate"}, nil, false},
-				{"all", false, []string{"writerate"}, []string{"goaltime", "accel"}, false},
-				{"all", true, []string{"goaltime", "accel", "writerate"}, nil, false},
+				{"all", false, []string{"readrate", "writerate"}, []string{"goaltime", "accel"}, false},
+				{"all", true, []string{"goaltime", "accel", "readrate", "writerate"}, nil, false},
 				{"goaltime", false, nil, []string{"goaltime"}, false},
 				{"goaltime", true, []string{"goaltime"}, nil, false},
 				{"bogus", true, nil, nil, true},
@@ -2087,6 +2090,109 @@ func measureWriteRate(port string, gap time.Duration, fastFlush bool) (latencySt
 			start := time.Now()
 			if err := r.group.SetGoals(ctx, goals); err != nil {
 				return fmt.Errorf("SetGoals iteration %d: %w", i, err)
+			}
+			latencies = append(latencies, time.Since(start))
+		}
+		st = summarize(latencies)
+		return nil
+	})
+	return st, err
+}
+
+// --- test: readrate ---
+
+const readRateIterations = 500
+
+func runReadRate(cfg config) error {
+	// Probe the port BEFORE creating the CSV, same reasoning as runWriteRate: a mistyped
+	// -port must not leave a header-only file behind that then blocks a corrected retry.
+	if probe, err := openRig(cfg.port, noGap, armServoIDs, false); err != nil {
+		return err
+	} else if err := probe.close(); err != nil {
+		return err
+	}
+
+	out, err := newCSV(cfg.outDir, csvName("readrate", "", 0, false, "both"), []string{
+		"transport", "gap_label", "gap_sec", "n", "mean_sec", "p50_sec", "p95_sec", "p99_sec", "max_sec", "rate_hz",
+	})
+	if err != nil {
+		return err
+	}
+	defer out.close()
+
+	fmt.Printf("\n%-10s %-10s %8s %10s %10s %10s %10s %10s\n",
+		"transport", "gap", "rate_hz", "mean", "p50", "p95", "p99", "max")
+
+	type mode struct {
+		name      string
+		fastFlush bool
+	}
+	// Both transports, same reasoning as writerate: the stock transport's 10ms Flush
+	// floor applies to reads too, and the difference IS the finding.
+	for _, m := range []mode{{"stock", false}, {"fastflush", true}} {
+		for _, gap := range gapSweep {
+			st, err := measureReadRate(cfg.port, gap, m.fastFlush)
+			if err != nil {
+				return fmt.Errorf("%s transport, gap %v: %w", m.name, gap, err)
+			}
+			label := gap.String()
+			if gap == noGap {
+				label = "none"
+			}
+			fmt.Printf("%-10s %-10s %8.1f %10v %10v %10v %10v %10v\n",
+				m.name, label, st.rateHz, st.mean, st.p50, st.p95, st.p99, st.max)
+			out.write([]string{
+				m.name,
+				label,
+				strconv.FormatFloat(gap.Seconds(), 'g', -1, 64),
+				strconv.Itoa(st.n),
+				strconv.FormatFloat(st.mean.Seconds(), 'f', 9, 64),
+				strconv.FormatFloat(st.p50.Seconds(), 'f', 9, 64),
+				strconv.FormatFloat(st.p95.Seconds(), 'f', 9, 64),
+				strconv.FormatFloat(st.p99.Seconds(), 'f', 9, 64),
+				strconv.FormatFloat(st.max.Seconds(), 'f', 9, 64),
+				strconv.FormatFloat(st.rateHz, 'f', 2, 64),
+			})
+		}
+	}
+
+	fmt.Printf("\ninterpreting this table:\n")
+	fmt.Printf("  unlike writerate's SetGoals (a sync write with no response packet), this\n")
+	fmt.Printf("  SyncRead is a genuine round trip -- the response packet is where the extra\n")
+	fmt.Printf("  latency the spec assumed (~1ms on v0.6.1) would actually show up.\n")
+	fmt.Printf("  stock rows should be FLAT regardless of gap, swamped by feetech's own\n")
+	fmt.Printf("  10ms Flush-before-every-packet floor. fastflush rows should track the gap\n")
+	fmt.Printf("  much more closely, since ResetInputBuffer avoids that wait.\n")
+	fmt.Printf("  compare the fastflush p50 here against writerate's: the gap between them\n")
+	fmt.Printf("  is the round-trip cost the spec never measured.\n")
+	return out.close()
+}
+
+// measureReadRate opens a fresh bus at the given gap and times back-to-back SyncRead
+// calls of the same 4-byte position+velocity payload the sampler uses, with torque off.
+func measureReadRate(port string, gap time.Duration, fastFlush bool) (latencyStats, error) {
+	r, err := openRig(port, gap, armServoIDs, fastFlush)
+	if err != nil {
+		return latencyStats{}, err
+	}
+	defer r.close()
+
+	var st latencyStats
+	err = r.withSafeShutdown(func(ctx context.Context) error {
+		// Torque off for the whole test: this reads only, so nothing should move, but
+		// disabling torque keeps this consistent with writerate and leaves the arm limp.
+		fmt.Printf("torque is being RELEASED on servos %v for the readrate sweep -- "+
+			"support the arm; it will go limp now and stay limp\n", r.ids)
+		r.disableTorque(ctx)
+
+		latencies := make([]time.Duration, 0, readRateIterations)
+		for i := 0; i < readRateIterations; i++ {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			start := time.Now()
+			if _, err := r.bus.SyncRead(ctx, feetech.RegPresentPosition.Address, 4, r.ids); err != nil {
+				return fmt.Errorf("SyncRead iteration %d: %w", i, err)
 			}
 			latencies = append(latencies, time.Since(start))
 		}
