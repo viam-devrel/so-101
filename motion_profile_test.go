@@ -281,6 +281,32 @@ func TestJointLimitsFromMoveOptions(t *testing.T) {
 		}
 	})
 
+	t.Run("a per-joint ACCELERATION slice also ignores its scalar", func(t *testing.T) {
+		// The acceleration mirror of the velocity case above. Without it, merging the
+		// scalar into the slice on the acceleration path passes the whole suite.
+		opts := &arm.MoveOptions{
+			MaxAccRads:       utils.DegToRad(400),
+			MaxAccRadsJoints: []float64{utils.DegToRad(100), utils.DegToRad(200)},
+		}
+		got, err := jointLimitsFromMoveOptions(opts, 2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if math.Abs(got[0].maxAccelDegsPerSecSq-100) > 1e-9 {
+			t.Errorf("joint 0 = %v, want 100 (the scalar 400 must be ignored)", got[0].maxAccelDegsPerSecSq)
+		}
+		if math.Abs(got[1].maxAccelDegsPerSecSq-200) > 1e-9 {
+			t.Errorf("joint 1 = %v, want 200", got[1].maxAccelDegsPerSecSq)
+		}
+	})
+
+	t.Run("a wrong-length ACCELERATION slice is rejected", func(t *testing.T) {
+		opts := &arm.MoveOptions{MaxAccRadsJoints: []float64{1, 2, 3}}
+		if _, err := jointLimitsFromMoveOptions(opts, 5); err == nil {
+			t.Error("a 3-entry acceleration slice on a 5-DoF arm was accepted, want an error")
+		}
+	})
+
 	t.Run("velocity and acceleration are independent", func(t *testing.T) {
 		opts := &arm.MoveOptions{
 			MaxVelRadsJoints: []float64{utils.DegToRad(10), utils.DegToRad(20)},
