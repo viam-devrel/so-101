@@ -806,10 +806,15 @@ Expected: PASS.
 - [ ] **Step 3: Confirm `writePositions` is untouched**
 
 ```bash
-git diff manager.go | grep -c "^-" 
+git diff --numstat -- manager.go
 ```
 
-Expected: `0` — this task is a pure addition. If any line was removed, an existing path was changed; stop and report.
+Expected: `<additions>	0	manager.go` — the **deletions column must be 0**, because this task
+is a pure addition. If anything was removed, an existing path changed; stop and report.
+
+Do **not** use `git diff | grep -c "^-"`: that counts the `--- a/manager.go` diff header, so a
+pure addition scores 1, not 0. (And some shells rewrite `git diff` output, which makes the
+grep form silently environment-dependent.)
 
 - [ ] **Step 4: Commit**
 
@@ -853,7 +858,11 @@ func (s *so101) moveJoints(
 
 	profiles := coordinatedProfiles(travelsDeg, speedDegsPerSec, accelDegsPerSecSq, caps)
 	if profiles == nil {
-		return nil // already there; nothing to command
+		// Every joint is already at its target. Note this is a behavior change: the old
+		// path still issued a write, so a caller re-asserting its current pose used to
+		// reach the bus and now does not.
+		s.logger.Debug("moveJoints: all joints already at target, nothing to command")
+		return nil
 	}
 
 	servoProfiles := make([]ServoProfile, len(profiles))
@@ -868,10 +877,36 @@ func (s *so101) moveJoints(
 	if !wait {
 		return nil
 	}
+
+	// Count moving joints pinned at the acceleration floor. Acc 1 delivers ~43 deg/s^2, so
+	// a short-travel joint can need less than the register can express and will arrive
+	// early. This is the diagnostic for that documented limitation.
+	floored := 0
+	for i, d := range travelsDeg {
+		if d > 0 && profiles[i].accUnits == minAccUnits {
+			floored++
+		}
+	}
+
 	timeout := moveTimeoutMs(maxTravelDeg, speedDegsPerSec)
-	s.logger.Debugf("moveJoints: ref %.1f deg/s, %.0f deg/s^2, max travel %.1f deg, wait timeout %d ms",
-		speedDegsPerSec, accelDegsPerSecSq, maxTravelDeg, timeout)
+	s.logger.Debugf("moveJoints: ref %.1f deg/s, %.0f deg/s^2, max travel %.1f deg, "+
+		"%d joint(s) at the acceleration floor, wait timeout %d ms",
+		speedDegsPerSec, accelDegsPerSecSq, maxTravelDeg, floored, timeout)
 	return s.controller.WaitForServosToStop(ctx, s.armServoIDs, timeout)
+}
+
+// moveJointsUniform is the pre-coordination path, retained only as the fallback for when
+// the travel-reference read fails. It commands every joint at one shared speed, which is
+// why joints arrive at different times.
+func (s *so101) moveJointsUniform(ctx context.Context, to []float64, speedDegsPerSec float64, wait bool) error {
+	speedSteps := degPerSecToStepsPerSec(speedDegsPerSec)
+	if err := s.controller.MoveServosToPositions(ctx, s.armServoIDs, to, speedSteps, 0); err != nil {
+		return fmt.Errorf("failed to move SO-101 arm: %w", err)
+	}
+	if !wait {
+		return nil
+	}
+	return s.controller.WaitForServosToStop(ctx, s.armServoIDs, maxMoveTimeoutMs)
 }
 ```
 
@@ -889,21 +924,81 @@ Replace its body from the `s.mu.RLock()` block onward (`arm.go:679-684`):
 	// Coordination needs a travel reference, and on v0.6.1 this read costs about 1ms
 	// against roughly 12ms on v0.6.0 -- which is why the version bump is a correctness
 	// dependency, not just a performance one.
+	//
+	// A read failure degrades to the old uniform-speed path rather than failing the move.
+	// Before this change the read happened only when waiting and a failure was a warning;
+	// making it fatal would mean a transient bus error aborts a teleop setpoint that used
+	// to go through, at 30-50 Hz on the wait:false path.
 	current, err := s.controller.GetJointPositionsForServos(ctx, s.armServoIDs)
 	if err != nil {
-		return fmt.Errorf("failed to read positions for coordinated move: %w", err)
+		s.logger.Warnf("failed to read positions for coordinated move, falling back to "+
+			"uniform speed: %v", err)
+		return s.moveJointsUniform(ctx, clamped, speed, parseWaitExtra(extra))
 	}
 
 	return s.moveJoints(ctx, current, clamped, speed, accel, nil, parseWaitExtra(extra))
 ```
 
-- [ ] **Step 3: Verify it builds**
+- [ ] **Step 3: Update `MoveThroughJointPositions`'s call site — required for this task to compile**
+
+`moveJoints`' signature just changed, and `MoveThroughJointPositions` (`arm.go:715`) is its
+other caller. It **will not build** until this is done, so it belongs here rather than in
+Task 8. Task 8 then adds only the `MoveOptions` caps on top.
+
+Replace the loop and the lines just above it:
+
+```go
+	// One read per CALL, not per waypoint. The first waypoint has no predecessor to
+	// difference against, and GoToInputs routinely emits single-waypoint streams which
+	// would otherwise have no travel reference at all.
+	from, err := s.controller.GetJointPositionsForServos(ctx, s.armServoIDs)
+	if err != nil {
+		s.logger.Warnf("failed to read positions for coordinated move, falling back to "+
+			"uniform speed: %v", err)
+		from = nil
+	}
+
+	for idx, jointPositions := range positions {
+		clamped, err := s.clampPositions(jointPositions)
+		if err != nil {
+			return err
+		}
+		isLast := idx == len(positions)-1
+		if from == nil {
+			if err := s.moveJointsUniform(ctx, clamped, speed, isLast); err != nil {
+				return err
+			}
+		} else if err := s.moveJoints(ctx, from, clamped, speed, accel, nil, isLast); err != nil {
+			return err
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		// Later segments difference against the previous COMMANDED waypoint.
+		if from != nil {
+			from = clamped
+		}
+	}
+	return nil
+```
+
+Read `accel` alongside `speed` in the block above the loop:
+
+```go
+	s.mu.RLock()
+	defaultSpeed := float64(s.defaultSpeed)
+	defaultAccel := float64(s.defaultAcc)
+	s.mu.RUnlock()
+	accel := defaultAccel
+```
+
+- [ ] **Step 3b: Verify it builds**
 
 ```bash
 gofmt -s -w . && go vet ./cmd/module/ . && go build ./cmd/module/ .
 ```
 
-Expected: exit 0. `MoveThroughJointPositions` still calls the old signature and will fail to compile — fix it in Task 8, or add a temporary adapter if the build must stay green between tasks.
+Expected: exit 0. Both `moveJoints` callers now use the new signature.
 
 - [ ] **Step 4: Run the tests**
 
@@ -911,7 +1006,11 @@ Expected: exit 0. `MoveThroughJointPositions` still calls the old signature and 
 go test -count=1 ./cmd/module/ .
 ```
 
-Expected: PASS. `arm_move_to_position_test.go` and `arm_wait_test.go` exercise this path — if either fails, read the failure before changing anything: it may be pinning the old uncoordinated behavior deliberately.
+Expected: PASS. **No existing root-package test exercises `moveJoints` or pins the old
+uncoordinated behavior** — this was verified during plan review (`arm_move_to_position_test.go`
+is entirely `MoveToPosition`/goal-cloud; `arm_wait_test.go` covers only `parseWaitExtra`). So a
+failure here means this task broke something, not that a test encoded the old contract. Do not
+edit a test to make it pass without understanding why it failed.
 
 - [ ] **Step 5: Commit**
 
@@ -926,50 +1025,29 @@ git commit -m "feat(arm): coordinate MoveToJointPositions"
 
 **Files:** Modify `arm.go`
 
-- [ ] **Step 1: Replace the body from the options block (`arm.go:700`) through the waypoint loop**
+Task 7 already wired the call site. This task adds only the `MoveOptions` caps on top.
+
+- [ ] **Step 1: Derive caps and pass them through**
+
+Replace the `maxVelRads` block (`arm.go:701-705`) with:
 
 ```go
-	s.mu.RLock()
-	defaultSpeed := float64(s.defaultSpeed)
-	defaultAccel := float64(s.defaultAcc)
-	s.mu.RUnlock()
-
 	caps, err := jointLimitsFromMoveOptions(options, len(s.armServoIDs))
 	if err != nil {
 		return err
 	}
-	speed, accel := defaultSpeed, defaultAccel
+
+	// MaxVelRads also becomes the reference speed, not just a per-joint cap. That is
+	// deliberate double application: as the reference it sets the pace, and as a cap it
+	// bypasses resolveSpeedDegsPerSec's 3 deg/s floor for very small values. Per arm.proto
+	// the scalar is ignored entirely when the per-joint slice is set.
+	speed := defaultSpeed
 	if options != nil && len(options.MaxVelRadsJoints) == 0 && options.MaxVelRads > 0 {
 		speed = resolveSpeedDegsPerSec(options.MaxVelRads, defaultSpeed)
 	}
-
-	// The first waypoint has no predecessor to difference against, so its travel is
-	// measured from where the arm actually is. GoToInputs routinely emits single-waypoint
-	// streams, which would otherwise have no travel reference at all. Every later segment
-	// uses the planner's own deltas, so this is one read per CALL, not per waypoint.
-	from, err := s.controller.GetJointPositionsForServos(ctx, s.armServoIDs)
-	if err != nil {
-		return fmt.Errorf("failed to read positions for coordinated move: %w", err)
-	}
-
-	for idx, jointPositions := range positions {
-		clamped, err := s.clampPositions(jointPositions)
-		if err != nil {
-			return err
-		}
-		isLast := idx == len(positions)-1
-		if err := s.moveJoints(ctx, from, clamped, speed, accel, caps, isLast); err != nil {
-			return err
-		}
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		from = clamped
-	}
-	return nil
 ```
 
-Note `from = clamped` at the end of each iteration: subsequent segments difference against the previous *commanded* waypoint.
+Then change the `moveJoints` call in the loop to pass `caps` instead of `nil`.
 
 - [ ] **Step 2: Verify build, vet, format, tests**
 
@@ -1089,7 +1167,16 @@ Key differences from `writerate` to get right:
 - A read has a **response packet**, so unlike `SetGoals` this is a genuine round trip. That is exactly what makes it worth measuring separately.
 - Run with torque **disabled**, like `writerate` — this reads only, so nothing moves.
 - Reuse `summarize` and the existing CSV shape; name the file via `csvName("readrate", "", 0, false, "both")`.
-- Register it in `selectTests` as a **non-motion** test, alongside `writerate`.
+- **Add a dispatch case.** `run()`'s switch (`cmd/cli/profile_bench.go:98-106`) has **no
+  `default`**, so without `case "readrate": err = runReadRate(cfg)` the harness prints
+  `running: readrate` and **exits 0 having measured nothing**. Add the case, and add
+  `readrate` to the `-test` flag's help string (`:57`).
+- **Add it to `selectTests` as a non-motion test**, and to `"all"`. Place it immediately
+  before `writerate` in `"all"`'s `requested` list: both disable torque and leave the arm
+  limp, which is why `writerate` is already ordered last (see the comment at `:463`).
+- **This changes the `selectTests` selftest.** Its table (`:1846-1848`) asserts exact
+  `run`/`skipped` lists for `"all"`, so those three rows must be updated to include
+  `readrate`. Step 2's expectation below accounts for this.
 
 - [ ] **Step 2: Verify build, vet, format, selftests**
 
@@ -1100,7 +1187,9 @@ gofmt -s -w cmd/cli/profile_bench.go && \
   go run cmd/cli/profile_bench.go -selftest 2>&1 | tail -2
 ```
 
-Expected: exit 0; selftest count unchanged (this adds no pure functions).
+Expected: exit 0, and **37/37 passed** — the count is unchanged because this adds no new
+pure functions, but the `selectTests` case must have been updated for its existing assertions
+to still hold. If `selectTests` fails, the `"all"` list and the test table disagree.
 
 - [ ] **Step 3: Confirm the dispatch accepts it**
 
@@ -1108,7 +1197,9 @@ Expected: exit 0; selftest count unchanged (this adds no pure functions).
 go run cmd/cli/profile_bench.go -test=readrate -port=/dev/null 2>&1 | head -2
 ```
 
-Expected: a real serial-port error, not "unknown -test".
+Expected: a **real serial-port error** mentioning the port. Specifically **not** `unknown
+-test` (the flag validation is missing the case) and **not** a clean exit 0 printing
+`running: readrate` with no measurement (the dispatch case is missing).
 
 - [ ] **Step 4: Commit**
 
@@ -1123,11 +1214,24 @@ git commit -m "feat(bench): readrate test to measure SyncRead round-trip latency
 
 **Files:** Modify `README.md`, `CLAUDE.md`
 
-- [ ] **Step 1: `README.md`**
+- [ ] **Step 1: `README.md` — six places, not two**
 
-Replace the `acceleration_degs_per_sec_per_sec` row (`README.md:69`) and the paragraph at `README.md:104` that says it is "validated and stored but not yet enforced". It is now enforced. Document: default 500, range 50–500, that the register saturates so values above ~508 do nothing, and that lowering it trades speed for smoothness (a 20° move takes 25% longer at 500 than with an unlimited ramp).
+Plan review found four more beyond the obvious ones. Every one of these is now wrong:
 
-Update the speed paragraph at `README.md:94`, which currently states that joints move independently and finish at different times. They now arrive together.
+| Line | Currently says | Must become |
+|---|---|---|
+| `:68` | `speed_degs_per_sec`: "Each joint moves at this speed independently, so joints with longer travel finish later." | Joints are scaled by travel and arrive together; this is the reference speed for the longest-travel joint. |
+| `:69` | `acceleration_degs_per_sec_per_sec`: "Validated and stored but **not yet enforced**." | Enforced. Default 500, range 50–500. |
+| `:94` | Speed paragraph describing independent-joint arrival. | Coordinated arrival. |
+| `:96` | "`MaxAccRads` is accepted but intentionally ignored — acceleration is not yet enforced on hardware." | `MaxAccRads` honored; `MaxVelRadsJoints`/`MaxAccRadsJoints` honored; a wrong-length slice is rejected; per `arm.proto` the scalar is ignored when the slice is set. |
+| `:104` | The "not yet enforced" paragraph. | Remove; replace with the speed/smoothness trade-off. |
+| `:350` | Set Acceleration DoCommand: "Valid range: 10–500 … validated and stored but not yet enforced." | Range 50–500, enforced. **Both halves are currently wrong.** |
+| `:381` | Sample `get_motion_params` response showing `"current_acceleration_degs_per_sec_per_sec": 100.0`. | 500.0. |
+
+Also document, wherever the acceleration attribute is described: the register saturates, so
+values above ~508 °/s² do nothing; the minimum is 50 because `Acc: 1` delivers only ~43 °/s²;
+and lowering it trades speed for smoothness — a 20° move takes 25% longer at 500 °/s² than
+with the unlimited ramp the arm used before this change.
 
 - [ ] **Step 2: `CLAUDE.md`**
 
@@ -1212,7 +1316,7 @@ git commit -m "docs: hardware verification of per-joint coordination"
 - [ ] `gofmt -l .` prints nothing; `go vet ./cmd/module/ .` exits 0
 - [ ] `go test -count=1 ./cmd/module/ .` passes (modulo `TestEnumerateSerialPorts` without serial hardware)
 - [ ] `go run cmd/cli/profile_bench.go -selftest` still passes
-- [ ] `writePositions` is unchanged — `git diff <base> -- manager.go | grep "^-"` shows no removals from it
+- [ ] `writePositions` is unchanged — `git diff --numstat <base> -- manager.go` shows 0 in the deletions column
 - [ ] Read latency measured, and the unconditional read either confirmed or the documented fallback taken
 - [ ] Arrival spread measured through the driver and compared against the 10% target
 - [ ] `docs/superpowers/results/2026-08-20-coordination-verification.md` records the numbers and a go/no-go
