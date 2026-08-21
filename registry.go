@@ -28,12 +28,17 @@ type ControllerRegistry struct {
 	// For backward API compatibility - track which caller uses which port
 	callerPorts map[uintptr]string // caller pointer -> port path
 	callerMu    sync.RWMutex
+
+	// busFactory opens a bus. Injectable so tests can simulate an unplug and replug
+	// without serial hardware; production always uses feetech.NewBus.
+	busFactory func(feetech.BusConfig) (*feetech.Bus, error)
 }
 
 func NewControllerRegistry() *ControllerRegistry {
 	return &ControllerRegistry{
 		entries:     make(map[string]*ControllerEntry),
 		callerPorts: make(map[uintptr]string),
+		busFactory:  feetech.NewBus,
 	}
 }
 
@@ -137,7 +142,7 @@ func (r *ControllerRegistry) createNewController(portPath string, config *SoArm1
 		busConfig.BaudRate = 1000000
 	}
 
-	bus, err := feetech.NewBus(busConfig)
+	bus, err := r.busFactory(busConfig)
 	if err != nil {
 		entry.lastError = err
 		r.entries[portPath] = entry

@@ -7,6 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hipsterbrown/feetech-servo/feetech"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.viam.com/rdk/logging"
 )
 
@@ -416,4 +419,27 @@ func TestControllerUsesServoCalibrationWhenNoFile(t *testing.T) {
 	// The key is ensuring the code path is correct
 
 	t.Skip("Integration test - requires hardware or mock bus setup")
+}
+
+// shortTimeoutConfig narrows testConfig's one-second timeout so a test that expects a
+// failed read does not wait a full second per servo.
+func shortTimeoutConfig(port string) *SoArm101Config {
+	cfg := testConfig(port)
+	cfg.Timeout = 50 * time.Millisecond
+	return cfg
+}
+
+func TestRegistryUsesInjectedBusFactory(t *testing.T) {
+	r := NewControllerRegistry()
+	var calls int
+	r.busFactory = func(cfg feetech.BusConfig) (*feetech.Bus, error) {
+		calls++
+		cfg.Transport = newFakeTransport()
+		return feetech.NewBus(cfg)
+	}
+
+	_, err := r.GetController("/dev/fake0", shortTimeoutConfig("/dev/fake0"),
+		DefaultSO101FullCalibration, true)
+	require.NoError(t, err)
+	assert.Equal(t, 1, calls, "the registry must open buses through the factory")
 }
