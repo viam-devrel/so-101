@@ -55,6 +55,25 @@ type jointProfile struct {
 	accUnits   int // acceleration register. Never 0: that means UNLIMITED.
 }
 
+// jointTravelsDeg returns each joint's travel magnitude in degrees, and the largest of them.
+//
+// Extracted from moveJoints so it can be tested: moveJoints itself holds a concrete
+// controller and cannot be unit-tested without hardware, which would otherwise leave the
+// arm's only piece of pure wiring logic verified solely by a bench run.
+//
+// from and to must be the same length; the caller checks that.
+func jointTravelsDeg(from, to []float64) (travels []float64, maxTravel float64) {
+	travels = make([]float64, len(to))
+	for i := range to {
+		d := math.Abs(to[i]-from[i]) * 180.0 / math.Pi
+		travels[i] = d
+		if d > maxTravel {
+			maxTravel = d
+		}
+	}
+	return travels, maxTravel
+}
+
 // coordinatedProfiles computes a profile per joint so that every joint finishes its travel
 // at the same moment.
 //

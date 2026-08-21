@@ -413,3 +413,52 @@ func TestJointLimitsFromMoveOptions(t *testing.T) {
 		}
 	})
 }
+
+func TestJointTravelsDeg(t *testing.T) {
+	const halfPi = math.Pi / 2
+
+	t.Run("converts radians to degrees", func(t *testing.T) {
+		travels, max := jointTravelsDeg([]float64{0, 0}, []float64{halfPi, math.Pi})
+		if math.Abs(travels[0]-90) > 1e-9 {
+			t.Errorf("travels[0] = %v, want 90", travels[0])
+		}
+		if math.Abs(travels[1]-180) > 1e-9 {
+			t.Errorf("travels[1] = %v, want 180", travels[1])
+		}
+		if math.Abs(max-180) > 1e-9 {
+			t.Errorf("max = %v, want 180", max)
+		}
+	})
+
+	t.Run("magnitude only, direction ignored", func(t *testing.T) {
+		fwd, fMax := jointTravelsDeg([]float64{0}, []float64{halfPi})
+		rev, rMax := jointTravelsDeg([]float64{halfPi}, []float64{0})
+		if math.Abs(fwd[0]-rev[0]) > 1e-9 || math.Abs(fMax-rMax) > 1e-9 {
+			t.Errorf("forward %v/%v != reverse %v/%v", fwd[0], fMax, rev[0], rMax)
+		}
+	})
+
+	t.Run("the largest travel need not be first", func(t *testing.T) {
+		// Same blind spot a mutation test found in coordinatedProfiles' own max scan:
+		// every naive fixture puts the biggest value at index 0.
+		_, max := jointTravelsDeg([]float64{0, 0, 0}, []float64{0.1, 0.2, halfPi})
+		if math.Abs(max-90) > 1e-9 {
+			t.Errorf("max = %v, want 90 (the largest travel is last)", max)
+		}
+	})
+
+	t.Run("no movement gives zero travel and zero max", func(t *testing.T) {
+		travels, max := jointTravelsDeg([]float64{1, 2}, []float64{1, 2})
+		if max != 0 || travels[0] != 0 || travels[1] != 0 {
+			t.Errorf("travels %v, max %v; want all zero", travels, max)
+		}
+	})
+
+	t.Run("travel is measured from `from`, not from zero", func(t *testing.T) {
+		// Differencing against 0 instead of `from` would report 180 here, not 90.
+		travels, _ := jointTravelsDeg([]float64{halfPi}, []float64{math.Pi})
+		if math.Abs(travels[0]-90) > 1e-9 {
+			t.Errorf("travels[0] = %v, want 90", travels[0])
+		}
+	})
+}

@@ -899,15 +899,14 @@ func (s *so101) moveJoints(
 	// internally. The duplication is deliberate -- moveJoints needs maxTravelDeg for the
 	// timeout distance -- but the two must agree, and a mutation test showed this exact
 	// scan is easy to get wrong in a way no ordering-naive test catches.
-	travelsDeg := make([]float64, len(to))
-	maxTravelDeg := 0.0
-	for i := range to {
-		d := math.Abs(to[i]-from[i]) * 180.0 / math.Pi
-		travelsDeg[i] = d
-		if d > maxTravelDeg {
-			maxTravelDeg = d
-		}
+	if len(from) != len(to) {
+		return fmt.Errorf("coordinated move needs matching position counts, got %d current and %d target",
+			len(from), len(to))
 	}
+	// jointTravelsDeg lives in motion_profile.go so it can be unit-tested: moveJoints holds
+	// a concrete controller and cannot be tested without hardware, which would otherwise
+	// leave the arm's only pure wiring logic verified solely by the Task 12 bench run.
+	travelsDeg, maxTravelDeg := jointTravelsDeg(from, to)
 
 	profiles := coordinatedProfiles(travelsDeg, speedDegsPerSec, accelDegsPerSecSq, caps)
 	if profiles == nil {
