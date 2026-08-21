@@ -126,6 +126,10 @@ type so101CalibrationSensor struct {
 	recordingActive bool
 	recordingCtx    context.Context
 	recordingCancel context.CancelFunc
+	// recordingDone is closed by recordPositions on its way out, so Close can wait for it.
+	// Joining matters because Close is followed by controller.Release(), which closes the
+	// shared bus -- without the join that lands under a live SyncReadPositions.
+	recordingDone   chan struct{}
 	positionHistory []map[int]int // History of all servo positions during recording
 
 	// Motor setup state (separate from calibration workflow)
@@ -514,8 +518,21 @@ func (cs *so101CalibrationSensor) startRangeRecording(_ context.Context) (map[st
 
 	cs.logger.Info("Starting range of motion recording...")
 
+	// A previous goroutine must be gone before starting another: this is the only place
+	// that could leave two of them writing cs.joints, and joining here is impossible
+	// because the caller holds cs.mu, which the goroutine needs every tick.
+	if cs.recordingDone != nil {
+		select {
+		case <-cs.recordingDone:
+		default:
+			return map[string]any{"success": false},
+				fmt.Errorf("a previous recording is still stopping; retry in a moment")
+		}
+	}
+
 	// Create a dedicated context for recording that won't be cancelled when DoCommand returns
 	cs.recordingCtx, cs.recordingCancel = context.WithCancel(context.Background())
+	cs.recordingDone = make(chan struct{})
 	cs.recordingActive = true
 	cs.recordingStarted = time.Now()
 	cs.positionHistory = []map[int]int{}
@@ -524,7 +541,7 @@ func (cs *so101CalibrationSensor) startRangeRecording(_ context.Context) (map[st
 		"Recording range of motion. Move all joints through their full ranges. Use 'stop_range_recording' when complete.")
 
 	// Start background recording goroutine with dedicated context
-	go cs.recordPositions(cs.recordingCtx)
+	go cs.recordPositions(cs.recordingCtx, cs.recordingDone)
 
 	return map[string]any{
 		"success": true,
@@ -534,7 +551,11 @@ func (cs *so101CalibrationSensor) startRangeRecording(_ context.Context) (map[st
 }
 
 // recordPositions continuously records servo positions in the background
-func (cs *so101CalibrationSensor) recordPositions(recordingCtx context.Context) {
+// done is passed in rather than read off the struct: a later startRangeRecording replaces
+// the field, and this goroutine must close the channel its own caller is waiting on.
+func (cs *so101CalibrationSensor) recordPositions(recordingCtx context.Context, done chan struct{}) {
+	defer close(done)
+
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
 
@@ -627,7 +648,9 @@ func (cs *so101CalibrationSensor) stopRangeRecording(_ context.Context) (map[str
 			fmt.Errorf("range recording not active (current state: %s)", cs.state.String())
 	}
 
-	// Stop the recording goroutine
+	// Stop the recording goroutine. Deliberately no join: the port stays open, so there is
+	// no use-after-close to guard, and joining here would need DoCommand's whole lock scope
+	// restructured. cs.recordingDone is left in place so a later Close still observes it.
 	if cs.recordingCancel != nil {
 		cs.recordingCancel()
 		cs.recordingCancel = nil
@@ -1209,18 +1232,37 @@ func (cs *so101CalibrationSensor) assignMotorIDAndBaudrate(currentID, targetID, 
 
 // Close cleans up the sensor
 func (cs *so101CalibrationSensor) Close(ctx context.Context) error {
+	// Take cs.mu only long enough to snapshot the recording state. The join below MUST
+	// happen with the lock released: recordPositions takes cs.mu every 10ms tick, so
+	// waiting on its done channel while holding the lock deadlocks whenever the goroutine
+	// is mid-cycle -- and cancelling does not help, it is already past its select.
 	cs.mu.Lock()
-	defer cs.mu.Unlock()
-
-	// Stop any active recording
-	if cs.recordingCancel != nil {
-		cs.recordingCancel()
-		cs.recordingCancel = nil
-	}
+	cancel := cs.recordingCancel
+	done := cs.recordingDone
+	controller := cs.controller
+	cs.recordingCancel = nil
+	cs.recordingDone = nil
 	cs.recordingActive = false
+	cs.mu.Unlock()
 
-	if cs.controller != nil {
-		cs.controller.Release()
+	if cancel != nil {
+		cancel()
+	}
+	if done != nil {
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			// Bounded: a hung read must not hang a reconfigure forever. Releasing anyway
+			// is the lesser evil, and the bus close below is what the goroutine would
+			// then fail against.
+			cs.logger.Warn("recording goroutine did not exit; releasing the bus anyway")
+		}
+	}
+
+	// Only now, with no reader left on the bus, is it safe to release -- Release closes
+	// the shared bus once this is the last holder.
+	if controller != nil {
+		controller.Release()
 	}
 
 	return nil
