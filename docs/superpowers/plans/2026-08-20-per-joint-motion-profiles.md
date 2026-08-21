@@ -1390,6 +1390,9 @@ go run cmd/cli/profile_bench.go -port=<PORT> -test=readrate -out=./bench-out-v2
 **This validates or refutes a load-bearing assumption.** The spec makes the position read unconditional on the strength of it costing ~1 ms on v0.6.1, extrapolated from write timings.
 
 - If the `fastflush` rows read **≲2 ms**, the assumption holds and the unconditional read is fine on the teleop path.
+- Note `readrate` times a **5-servo, 4-byte** read, while the driver's `GetJointPositionsForServos`
+  goes through `group.Positions`, a **6-servo, 2-byte** read. Representative, but do not
+  over-claim the number as exactly the driver's read.
 - If they read **≫2 ms**, the spec's documented fallback applies: skip coordination when `wait` is false and retain uniform-speed behavior there. Record the number and take that branch rather than shipping a teleop regression.
 - The `stock` rows should be flat at ~80 Hz, confirming this arm's baseline matches the earlier run.
 
@@ -1402,6 +1405,11 @@ go run cmd/cli/profile_bench.go -port=<PORT> -test=writerate -out=./bench-out-v2
 Compare against the 2026-08-19 table. The `fastflush` rows should be unchanged; the `stock` rows should now **match** them, because v0.6.1 fixed the flush that made them differ. If the stock rows are still ~80 Hz, the module did not pick up v0.6.1 — stop and check `go.mod`.
 
 - [ ] **Step 3: Clear the workspace and measure arrival spread**
+
+**Confirm all six servos respond before starting** — `go run cmd/cli/servo_info.go -port=<PORT>`
+should list ids 1-6. If the gripper (servo 6) is unplugged, `SyncRead` waits the full 1 s bus
+timeout and errors, so *every* move silently falls back to uniform speed after a 1 s stall and
+the coordination measurement reads as "no improvement" for entirely the wrong reason.
 
 Position the arm with ≥40° of positive headroom on **every** joint, then:
 
@@ -1422,6 +1430,25 @@ The harness cannot exercise `coordinatedProfiles`. Drive the arm through the mod
 **Success criterion:** arrival spread falls from the measured 260–520 ms to **roughly 10% of move duration** — the residual predicted by using a single global acceleration constant instead of a per-joint table.
 
 If the spread does not improve, the `k`-scaling assumption is wrong somewhere and this is the point to find out, before more is built on it.
+
+- [ ] **Step 4b: Exercise the MULTI-WAYPOINT path — the one that was actually broken**
+
+Step 4 measures `MoveToJointPositions`, which reads a fresh reference and was correct all
+along. The risky surface is `MoveThroughJointPositions` / `GoToInputs` with a real trajectory,
+which is what `motion.Move` uses — and where the final quality review found the arm could end
+in the wrong configuration while reporting success.
+
+Issue a **planned** move (`motion.Move`, or `MoveThroughJointPositions` with ≥10 waypoints
+where one joint's travel is concentrated in the first half of the trajectory), then:
+
+1. **Read back the final joint positions** and compare against the commanded final waypoint.
+2. Confirm the call does **not** return before the arm stops moving.
+
+**Success criterion:** every joint within its normal settling tolerance (~0.3°, given the
+measured ±3-step dither) of the commanded target, and no early return.
+
+This is the step that would have caught the stale-reference bug. Without it the session
+validates only the path that never had the problem.
 
 - [ ] **Step 5: Record the results**
 
