@@ -429,10 +429,12 @@ func NewSO101(ctx context.Context, deps resource.Dependencies, name resource.Nam
 
 	accelerationDegsPerSec := conf.AccelerationDegsPerSec
 	if accelerationDegsPerSec == 0 {
-		accelerationDegsPerSec = 100 // Default acceleration in degrees per second^2
+		accelerationDegsPerSec = defaultAccelDegsPerSecSq
 	}
-	if accelerationDegsPerSec < 10 || accelerationDegsPerSec > 500 {
-		return nil, fmt.Errorf("acceleration_degs_per_sec_per_sec must be between 10 and 500 degrees/second^2, got %.1f", accelerationDegsPerSec)
+	if accelerationDegsPerSec < minAccelDegsPerSecSq || accelerationDegsPerSec > maxAccelDegsPerSecSq {
+		return nil, fmt.Errorf(
+			"acceleration_degs_per_sec_per_sec must be between %.0f and %.0f degrees/second^2, got %.1f",
+			minAccelDegsPerSecSq, maxAccelDegsPerSecSq, accelerationDegsPerSec)
 	}
 
 	if conf.Baudrate == 0 {
@@ -607,23 +609,39 @@ func (s *so101) clampPositions(positions []referenceframe.Input) ([]float64, err
 	return clamped, nil
 }
 
-// moveJoints commands the arm joints at speedDegsPerSec (independent-joint speed mode) and,
-// when wait is true, blocks until the arm servos stop (bounded by a safety timeout).
+// moveJoints commands a coordinated move from `from` to `to` (both radians, per arm servo),
+// scaling every joint's speed and acceleration by its share of the longest travel so all
+// joints arrive together. When wait is true it blocks until the arm stops.
+//
 // The caller must hold s.moveLock and manage s.isMoving.
-func (s *so101) moveJoints(ctx context.Context, clampedPositions []float64, speedDegsPerSec float64, wait bool) error {
-	// Read current positions BEFORE commanding so the travel/timeout estimate is accurate.
-	var currentPositions []float64
-	if wait {
-		cp, err := s.controller.GetJointPositionsForServos(ctx, s.armServoIDs)
-		if err != nil {
-			s.logger.Warnf("Failed to read positions for timeout calculation: %v", err)
-		} else {
-			currentPositions = cp
-		}
+func (s *so101) moveJoints(
+	ctx context.Context,
+	from, to []float64,
+	speedDegsPerSec, accelDegsPerSecSq float64,
+	caps []jointLimits,
+	wait bool,
+) error {
+	if len(from) != len(to) {
+		return fmt.Errorf("coordinated move needs matching position counts, got %d current and %d target",
+			len(from), len(to))
+	}
+	travelsDeg, maxTravelDeg := jointTravelsDeg(from, to)
+
+	profiles := coordinatedProfiles(travelsDeg, speedDegsPerSec, accelDegsPerSecSq, caps)
+	if profiles == nil {
+		// Every joint is already at its target. Note this is a behavior change: the old
+		// path still issued a write, so a caller re-asserting its current pose used to
+		// reach the bus and now does not.
+		s.logger.Debug("moveJoints: all joints already at target, nothing to command")
+		return nil
 	}
 
-	speedSteps := degPerSecToStepsPerSec(speedDegsPerSec)
-	if err := s.controller.MoveServosToPositions(ctx, s.armServoIDs, clampedPositions, speedSteps, 0); err != nil {
+	servoProfiles := make([]ServoProfile, len(profiles))
+	for i, p := range profiles {
+		servoProfiles[i] = ServoProfile{SpeedSteps: p.speedSteps, AccUnits: p.accUnits}
+	}
+
+	if err := s.controller.MoveServosWithProfiles(ctx, s.armServoIDs, to, servoProfiles); err != nil {
 		return fmt.Errorf("failed to move SO-101 arm: %w", err)
 	}
 
@@ -631,21 +649,67 @@ func (s *so101) moveJoints(ctx context.Context, clampedPositions []float64, spee
 		return nil
 	}
 
-	timeout := maxMoveTimeoutMs
-	if currentPositions != nil {
-		maxTravelDeg := 0.0
-		for i, target := range clampedPositions {
-			if i < len(currentPositions) {
-				d := math.Abs(target-currentPositions[i]) * 180.0 / math.Pi
-				if d > maxTravelDeg {
-					maxTravelDeg = d
-				}
-			}
+	// Count moving joints pinned at the acceleration floor. Acc 1 delivers ~43 deg/s^2, so
+	// a short-travel joint can need less than the register can express and will arrive
+	// early. This is the diagnostic for that documented limitation.
+	floored := 0
+	for i, d := range travelsDeg {
+		if d > 0 && profiles[i].accUnits == minAccUnits {
+			floored++
 		}
-		timeout = moveTimeoutMs(maxTravelDeg, speedDegsPerSec)
 	}
-	s.logger.Debugf("moveJoints: %.1f deg/s -> %d steps/s, wait timeout %d ms", speedDegsPerSec, speedSteps, timeout)
+
+	// Time against the speed ACTUALLY COMMANDED, not the reference the caller requested.
+	// A MoveOptions cap can reduce the shared reference well below the request -- the cap
+	// tests in motion_profile_test.go reduce 50 deg/s to 20, a 2.5x slowdown against
+	// moveTimeoutFactor = 2.0 -- so timing against the request would abort a move that is
+	// proceeding perfectly correctly.
+	effectiveSpeed := speedDegsPerSec
+	maxSteps := 0
+	for _, p := range profiles {
+		if p.speedSteps > maxSteps {
+			maxSteps = p.speedSteps
+		}
+	}
+	if maxSteps > 0 {
+		effectiveSpeed = float64(maxSteps) / stepsPerDegree
+	}
+
+	// Use the acceleration actually achievable: the Acc register floors at ~43 deg/s^2, so
+	// a cap-reduced reference below that is silently raised by the hardware and timing
+	// against the lower value would over-estimate the duration.
+	effectiveAccel := math.Max(accelDegsPerSecSq, accFloorDegsPerSecSq)
+	timeout := moveTimeoutMs(maxTravelDeg, effectiveSpeed, effectiveAccel)
+	s.logger.Debugf("moveJoints: ref %.1f deg/s (effective %.1f), %.0f deg/s^2, max travel "+
+		"%.1f deg, %d joint(s) at the acceleration floor, wait timeout %d ms",
+		speedDegsPerSec, effectiveSpeed, accelDegsPerSecSq, maxTravelDeg, floored, timeout)
 	return s.controller.WaitForServosToStop(ctx, s.armServoIDs, timeout)
+}
+
+// moveJointsUniform is the pre-coordination path, retained only as the fallback for when
+// the travel-reference read fails. It commands every joint at one shared speed, which is
+// why joints arrive at different times.
+func (s *so101) moveJointsUniform(ctx context.Context, to []float64, speedDegsPerSec, accelDegsPerSecSq float64, wait bool) error {
+	// Writes an explicit UNIFORM profile rather than a bare position write. A coordinated
+	// move leaves each servo's Speed and Acc registers at its own scaled value -- as low as
+	// 1 step/s and Acc 1 -- and a position-only write does not touch either. So without
+	// this the "uniform" fallback would inherit whatever the previous coordinated move left
+	// behind, and would be uniform in neither speed nor acceleration.
+	profile := ServoProfile{
+		SpeedSteps: degPerSecToStepsPerSec(speedDegsPerSec),
+		AccUnits:   degPerSecSqToAccUnits(accelDegsPerSecSq),
+	}
+	profiles := make([]ServoProfile, len(s.armServoIDs))
+	for i := range profiles {
+		profiles[i] = profile
+	}
+	if err := s.controller.MoveServosWithProfiles(ctx, s.armServoIDs, to, profiles); err != nil {
+		return fmt.Errorf("failed to move SO-101 arm: %w", err)
+	}
+	if !wait {
+		return nil
+	}
+	return s.controller.WaitForServosToStop(ctx, s.armServoIDs, maxMoveTimeoutMs)
 }
 
 // parseWaitExtra reads the optional "wait" bool from a DoCommand/extra map.
@@ -678,9 +742,28 @@ func (s *so101) MoveToJointPositions(ctx context.Context, positions []referencef
 
 	s.mu.RLock()
 	speed := float64(s.defaultSpeed)
+	accel := float64(s.defaultAcc)
 	s.mu.RUnlock()
 
-	return s.moveJoints(ctx, clamped, speed, parseWaitExtra(extra))
+	// The position read is now unconditional, where it used to happen only when waiting.
+	// Coordination needs a travel reference, and on v0.6.1 this read costs about 1ms
+	// against roughly 12ms on v0.6.0 -- which is why the version bump is a correctness
+	// dependency, not just a performance one.
+	//
+	// A read failure degrades to the old uniform-speed path rather than failing the move.
+	// Before this change the read happened only when waiting and a failure was a warning;
+	// making it fatal would mean a transient bus error aborts a teleop setpoint that used
+	// to go through, at 30-50 Hz on the wait:false path.
+	current, err := s.controller.GetJointPositionsForServos(ctx, s.armServoIDs)
+	if err != nil {
+		s.logger.Warnf("failed to read positions for coordinated move, falling back to "+
+			"uniform speed: %v", err)
+		// No arm.MoveOptions here, so caps is always nil -- kept for symmetry with
+		// MoveThroughJointPositions' fallback.
+		return s.moveJointsUniform(ctx, clamped, uniformSpeedUnderCaps(speed, nil), accel, parseWaitExtra(extra))
+	}
+
+	return s.moveJoints(ctx, current, clamped, speed, accel, nil, parseWaitExtra(extra))
 }
 
 func (s *so101) MoveThroughJointPositions(ctx context.Context, positions [][]referenceframe.Input, options *arm.MoveOptions, extra map[string]interface{}) error {
@@ -696,27 +779,71 @@ func (s *so101) MoveThroughJointPositions(ctx context.Context, positions [][]ref
 
 	s.mu.RLock()
 	defaultSpeed := float64(s.defaultSpeed)
+	defaultAccel := float64(s.defaultAcc)
 	s.mu.RUnlock()
+	accel := defaultAccel
 
-	maxVelRads := 0.0
-	if options != nil {
-		maxVelRads = options.MaxVelRads // MaxAccRads is intentionally ignored (speed-only)
+	caps, err := jointLimitsFromMoveOptions(options, len(s.armServoIDs))
+	if err != nil {
+		return err
 	}
-	speed := resolveSpeedDegsPerSec(maxVelRads, defaultSpeed)
 
-	// Stream waypoints back-to-back; only wait for the arm to settle after the last one so
-	// intermediate waypoints don't stutter.
+	// MaxVelRads also becomes the reference speed, not just a per-joint cap. That is
+	// deliberate double application: as the reference it sets the pace, and as a cap it
+	// bypasses resolveSpeedDegsPerSec's 3 deg/s floor for very small values. Per arm.proto
+	// the scalar is ignored entirely when the per-joint slice is set.
+	speed := defaultSpeed
+	if options != nil && len(options.MaxVelRadsJoints) == 0 && options.MaxVelRads > 0 {
+		speed = resolveSpeedDegsPerSec(options.MaxVelRads, defaultSpeed)
+	}
+
+	// One read per CALL, not per waypoint. The first waypoint has no predecessor to
+	// difference against, and GoToInputs routinely emits single-waypoint streams which
+	// would otherwise have no travel reference at all.
+	from, err := s.controller.GetJointPositionsForServos(ctx, s.armServoIDs)
+	if err != nil {
+		s.logger.Warnf("failed to read positions for coordinated move, falling back to "+
+			"uniform speed: %v", err)
+		from = nil
+	}
+
 	for idx, jointPositions := range positions {
 		clamped, err := s.clampPositions(jointPositions)
 		if err != nil {
 			return err
 		}
 		isLast := idx == len(positions)-1
-		if err := s.moveJoints(ctx, clamped, speed, isLast); err != nil {
+
+		// The hardware executes ONLY the final write. Each SetGoals overwrites the previous
+		// goal, and the whole stream is issued in a few tens of milliseconds, so every
+		// intermediate waypoint is superseded before the arm can act on it. The last
+		// waypoint's profile therefore has to be computed against where the arm ACTUALLY
+		// is, not against the previous commanded waypoint: a joint whose travel is
+		// concentrated earlier in the path has a near-zero delta in the final segment,
+		// which floors it to 1 step/s while its goal is still far away, and collapses the
+		// completion timeout to the 1s floor so the call returns mid-motion.
+		if isLast && from != nil {
+			if cur, rerr := s.controller.GetJointPositionsForServos(ctx, s.armServoIDs); rerr == nil {
+				from = cur
+			} else {
+				s.logger.Warnf("failed to re-read positions before the final waypoint; "+
+					"coordination and timeout will use the commanded predecessor: %v", rerr)
+			}
+		}
+
+		if from == nil {
+			if err := s.moveJointsUniform(ctx, clamped, uniformSpeedUnderCaps(speed, caps), accel, isLast); err != nil {
+				return err
+			}
+		} else if err := s.moveJoints(ctx, from, clamped, speed, accel, caps, isLast); err != nil {
 			return err
 		}
 		if ctx.Err() != nil {
 			return ctx.Err()
+		}
+		// Later segments difference against the previous COMMANDED waypoint.
+		if from != nil {
+			from = clamped
 		}
 	}
 	return nil
@@ -1024,8 +1151,10 @@ func (s *so101) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[
 
 		if accVal, ok := cmd["set_acceleration"]; ok {
 			if acc, ok := accVal.(float64); ok {
-				if acc < 10 || acc > 500 {
-					return nil, fmt.Errorf("acceleration must be between 10 and 500 degrees/second^2, got %.1f", acc)
+				if acc < minAccelDegsPerSecSq || acc > maxAccelDegsPerSecSq {
+					return nil, fmt.Errorf(
+						"acceleration must be between %.0f and %.0f degrees/second^2, got %.1f",
+						minAccelDegsPerSecSq, maxAccelDegsPerSecSq, acc)
 				}
 				s.mu.Lock()
 				s.defaultAcc = float32(acc)

@@ -65,8 +65,8 @@ The following attributes are available for the arm component:
 | `servo_ids`        | []int    | Optional     | List of servo IDs for the arm joints. Default is `[1, 2, 3, 4, 5]`.                                                                                                    |
 | `timeout`          | duration | Optional     | Communication timeout. Default is system default.                                                                                                                      |
 | `visualize_ee_frame` | bool   | Optional     | When `true`, serves a colored XYZ coordinate-frame marker at the end-effector for the 3D viewer. Default is `false`.                                                    |
-| `speed_degs_per_sec` | float  | Optional     | Real per-joint speed cap enforced on the servos, in degrees per second. Each joint moves at this speed independently, so joints with longer travel finish later (planned motion stays smooth because the planner sends fine-grained waypoints). Default `50`, valid range 3–180. |
-| `acceleration_degs_per_sec_per_sec` | float | Optional | Validated and stored but **not yet enforced** on hardware (planned follow-up). Default `100`, valid range 10–500. |
+| `speed_degs_per_sec` | float  | Optional     | Real per-joint speed cap enforced on the servos, in degrees per second. Applies to the longest-travel joint in a move; other joints are scaled down so all joints arrive together. Default `50`, valid range 3–180. |
+| `acceleration_degs_per_sec_per_sec` | float | Optional | Real per-joint acceleration cap enforced on the servos, in degrees per second². Scaled alongside speed so joints arrive together. Lower values give smoother but slower motion. Default `500`, valid range 50–500 (the servo register cannot deliver acceleration outside this range). |
 | `use_urdf`         | bool     | Optional     | When `true`, sources kinematics and collision geometry from the bundled `arm/so101.urdf` instead of the embedded `so101.json`. Requires the `VIAM_MODULE_ROOT` environment variable to be set (viam-server sets this automatically). This is a drop-in swap: the bundled URDF uses `so101.json`'s frame names and TCP exactly, so the frame names, TCP pose, and kinematics are identical — only the collision geometry upgrades from primitive shapes to per-link meshes. Default `false`. |
 | `mesh_decimation_ratios` | []float | Optional | Per-collision-mesh simplification ratios, one per arm link in document order (base, shoulder, upper_arm, lower_arm, wrist), each in `[0, 1]`. Only used when `use_urdf` is `true`. Only values strictly in `(0, 1)` decimate (lower = more aggressive). Defaults to `0.9` for each of the 5 meshes when empty. |
 | `manual_mode`      | object   | Optional     | Tuning for hand-guided [manual mode](#manual-mode) (see below). Omit for the built-in defaults. |
@@ -101,9 +101,9 @@ So when servo 6's range is too wide to be real, the module substitutes a conserv
 
 ### Motion and speed
 
-The hardware arm enforces a real per-joint speed cap on the Feetech servos: each joint moves at the configured `speed_degs_per_sec` (or the per-move override, see below). Because joints move independently rather than coordinating arrival times, a joint with a larger travel angle will take longer to reach its target than one with smaller travel. For RDK motion-planned paths this remains smooth in practice because the planner generates many fine-grained waypoints, keeping per-waypoint joint displacements small.
+The hardware arm scales each joint's speed and acceleration by its share of the move's travel, so all joints arrive together. `speed_degs_per_sec` and `acceleration_degs_per_sec_per_sec` (or their per-move overrides, below) apply to the longest-travel joint; the rest are scaled down to match it.
 
-`MoveThroughJointPositions` accepts an optional `MoveOptions.MaxVelRads` (in radians/second) that overrides the configured default for that move. `MaxAccRads` is accepted but intentionally ignored — acceleration is not yet enforced on hardware. `GoToInputs` routes through this same path.
+`MoveThroughJointPositions` accepts `MoveOptions.MaxVelRads` and `MaxAccRads` to override the configured defaults for one move, and the per-joint forms `MaxVelRadsJoints` and `MaxAccRadsJoints`. Setting a per-joint slice makes the matching scalar ignored, per `arm.proto`; a slice whose length doesn't match the arm's joint count is rejected. A per-joint limit slows the whole move rather than just that joint, so the joints stay coordinated. `GoToInputs` routes through this same path.
 
 `MoveThroughJointPositions` streams waypoints back-to-back: intermediate waypoints are commanded without waiting for the arm to settle (flythrough), and the arm waits to stop only after the **final** waypoint. As a result, intermediate waypoints are not guaranteed stop-points. `GoToInputs` shares this same streaming path.
 
@@ -111,7 +111,7 @@ The hardware arm enforces a real per-joint speed cap on the Feetech servos: each
 
 `Stop()` does not currently interrupt an in-progress joint move: a move blocks until the servos settle (or the internal safety timeout elapses), so a `Stop()` issued mid-move takes effect only once that move returns. Interrupting in-flight motion is a planned follow-up.
 
-`acceleration_degs_per_sec_per_sec` is validated and stored when set via config or `set_acceleration` DoCommand, but is not yet written to the servo hardware. Acceleration enforcement is a planned follow-up.
+Enforcing acceleration costs some speed, because the servos now ramp instead of jumping straight to full velocity. At the default of 500 °/s² a 20° move takes about 25% longer than before. Lowering the value costs more: at 100 °/s² the same move takes roughly twice as long again.
 
 ### Approach-axis orientation planning
 
@@ -357,7 +357,7 @@ Response:
 
 #### Set Acceleration
 
-Update the acceleration parameter at runtime. `set_acceleration` is a key in the request map (not a `"command"` value). Valid range: 10–500 degrees/second². **Note:** acceleration is validated and stored but not yet enforced on hardware.
+Update the acceleration parameter at runtime. `set_acceleration` is a key in the request map (not a `"command"` value). Valid range: 50–500 degrees/second², enforced on hardware.
 
 ```json
 {
@@ -388,7 +388,7 @@ Response:
 ```json
 {
   "current_speed_degs_per_sec": 50.0,
-  "current_acceleration_degs_per_sec_per_sec": 100.0
+  "current_acceleration_degs_per_sec_per_sec": 500.0
 }
 ```
 

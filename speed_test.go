@@ -54,17 +54,25 @@ func TestMoveTimeoutMs(t *testing.T) {
 		name   string
 		travel float64
 		speed  float64
+		accel  float64
 		want   int
 	}{
-		{"normal move", 90, 45, 4000}, // 90/45=2s * 2.0 factor = 4000ms
-		{"clamps to floor", 1, 180, 1000},
-		{"clamps to ceiling", 1000, 1, 15000},
-		{"zero speed -> ceiling", 90, 0, 15000},
+		// Trapezoidal: (d/v + v/a) * 2.0 factor.
+		{"normal move", 90, 45, 500, 4180},
+		// Triangular, and the case that motivated modelling the ramp at all: with the old
+		// d/v formula this computed 1200ms against a true duration of 1549ms, so
+		// WaitForServosToStop returned while the arm was still moving.
+		{"triangular regime aborts early under d/v", 30, 50, 50, 3098},
+		{"clamps to floor", 1, 180, 500, 1000},
+		{"clamps to ceiling", 1000, 1, 500, 15000},
+		{"zero speed -> ceiling", 90, 0, 500, 15000},
+		{"zero acceleration -> ceiling", 90, 45, 0, 15000},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := moveTimeoutMs(tt.travel, tt.speed); got != tt.want {
-				t.Errorf("moveTimeoutMs(%v, %v) = %d, want %d", tt.travel, tt.speed, got, tt.want)
+			if got := moveTimeoutMs(tt.travel, tt.speed, tt.accel); got != tt.want {
+				t.Errorf("moveTimeoutMs(%v, %v, %v) = %d, want %d",
+					tt.travel, tt.speed, tt.accel, got, tt.want)
 			}
 		})
 	}
