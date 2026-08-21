@@ -57,11 +57,11 @@ The prior spec warns that Change B's design went through four review rounds **wi
 | File | Status | Responsibility |
 |---|---|---|
 | `hotplug_fake_test.go` | create | Concurrency-safe fake `feetech.Transport` answering real protocol packets. Test keystone for this plan *and* hotplug. |
-| `bus_session.go` | create | `busSession`, `newBusSession`, `ErrPortDisconnected`, `withSession`/`withSessionValue`. No policy, no goroutines. |
+| `bus_session.go` | create | `busSession`, `newBusSession`, `ErrPortDisconnected`, the four `withSession*` accessors, and `report` as a pass-through. No policy, no goroutines. |
 | `bus_session_test.go` | create | Session presence, shared helpers used by every later task. |
 | `registry.go` | modify | Entry owns the session, the calibration, `refCount`, `pins`, and teardown. `busFactory` seam. Poisoning fix. `AcquireController`. The PC-keyed machinery is deleted. |
 | `registry_test.go` | modify | Poisoning regression; refCount/pins/teardown tests. |
-| `manager.go` | modify | `SafeSoArmController` → `ControllerHandle`; all 20 methods route through `withSession`; calibration collapse; five new methods for the sensor. |
+| `manager.go` | modify | `SafeSoArmController` → `ControllerHandle`; all 20 methods route through `withSession*`; calibration collapse; seven new methods for the sensor. |
 | `manager_test.go` | create | Handle sharing, calibration collapse, the new sensor-facing methods. |
 | `arm.go` | modify | Field type and acquire/release call sites. |
 | `calibration.go` | modify | Eight bypass sites onto handle methods; `recordPositions` done channel. |
@@ -128,7 +128,39 @@ func acquireTestHandle(t *testing.T, r *ControllerRegistry) *ControllerHandle {
 }
 ```
 
-Plus the test this task is about:
+Plus the session tests — the nil-session path is the seam hotplug is built on, so it needs
+coverage here even though nothing can reach it yet:
+
+```go
+func TestWithSessionRunsAgainstTheLiveSession(t *testing.T) {
+	h := testHandle(t, newFakeTransport())
+
+	var seen *busSession
+	require.NoError(t, h.withSession(func(s *busSession) error {
+		seen = s
+		return nil
+	}))
+	require.NotNil(t, seen)
+	assert.NotNil(t, seen.bus)
+	assert.Len(t, seen.servos, 6)
+}
+
+func TestWithSessionFailsFastWhenDisconnected(t *testing.T) {
+	h := testHandle(t, newFakeTransport())
+	h.entry.session.Store(nil)
+
+	start := time.Now()
+	err := h.withSession(func(*busSession) error {
+		t.Fatal("the operation must not run without a session")
+		return nil
+	})
+	assert.ErrorIs(t, err, ErrPortDisconnected)
+	assert.Less(t, time.Since(start), 10*time.Millisecond,
+		"a disconnected call must not pay a serial timeout")
+}
+```
+
+Plus the test this task is really about:
 
 ```go
 func TestAllHoldersShareOneControllerState(t *testing.T) {
@@ -192,8 +224,10 @@ Add `withSessionValue`/`withSessionValueRead` generic variants for the methods t
 
 ```go
 // report is where a bus error will become a connection verdict once serial hotplug lands.
-// Until then it is the identity function. It must NOT take entry.mu -- withSession's
-// callers already hold busMu, and hotplug's version takes entry.mu internally.
+// Until then it is the identity function.
+//
+// It is called with busMu held, so it must never take busMu. Taking entry.mu IS legal and
+// hotplug's version does -- that is the declared busMu -> entry.mu order, not a violation.
 func (e *ControllerEntry) report(gen uint64, err error) error { return err }
 ```
 
@@ -211,6 +245,8 @@ func (e *ControllerEntry) report(gen uint64, err error) error { return err }
 ```
 
 The registry back-pointer is what lets `teardownIfLast` evict the entry from `r.entries`. It also means the entry reads `e.registry.busFactory` rather than caching a copy — supersede the serial-hotplug plan's note about the entry "needing no registry back-pointer", which predates this teardown design.
+
+`createNewController` builds the session via `newBusSession` and `entry.session.Store(...)` instead of assembling `bus`/`group`/`calibratedServos` inline, and **must populate the new entry fields**: `port`, `registry` (itself), and `logger` (from `config.Logger`, which is where `entry.config.Logger` was read from). The `!fromFile` register-read path stays where it is, but must rebuild the session afterwards so the servos carry the calibration just read.
 
 **`ControllerEntry.controller` is deleted.** A `*ControllerHandle` holding only `{entry, logger}` would be circular and meaningless. Three live reads must be converted to `entry.session.Load() != nil`:
 
@@ -237,7 +273,7 @@ Rename sites beyond the three component fields — all compile errors, listed so
 
 - [ ] **Step 5: Convert all 20 methods**
 
-Each method that touched `s.bus`, `s.group`, or `s.calibratedServos` becomes a `withSession*` call. **Preserve today's read/write split exactly:** the five methods that took `s.mu.Lock()` (`MoveToJointPositions`, `MoveServosToPositions` and the single-servo movers, `SetTorqueEnable`, `Stop`, `WriteServoRegister`, `SetCalibration`) use `withSession`; the `RLock` methods use `withSessionRead`. Read each method's current lock before converting it rather than guessing from the name.
+Each method that touched `s.bus`, `s.group`, or `s.calibratedServos` becomes a `withSession*` call. **Preserve today's read/write split exactly:** the methods that took `s.mu.Lock()` use `withSession`, the `RLock` methods use `withSessionRead`. **Read each method's current lock before converting it** — do not infer from the name, and do not trust a list. (`Close` is among the `Lock` methods and is deleted rather than converted; see rule 2.)
 
 Three rules:
 
@@ -323,17 +359,23 @@ The prior spec offers a fallback (route the acquire-time update through `SetCali
 
 So `SetCalibration` updates **both** under `entry.mu`: the per-servo calibrations (the read/write source of truth) and `entry.calibration` (the session-rebuild seed). `GetControllerStatus`'s custom-vs-default label also reads `entry.calibration`, so it stays meaningful.
 
-Add the accessor the converted method bodies need:
+**Read calibration off the session, not off the entry.** Every converted method body already
+holds `sess`, so `manager.go:63`'s `s.calibration.GetMotorCalibrationByID(servoID)` becomes:
 
 ```go
-// calibrationFor replaces manager.go:63's s.calibration.GetMotorCalibrationByID(servoID).
-// It reads entry.calibration, so it must not be called while holding entry.mu.
-func (e *ControllerEntry) calibrationFor(servoID int) *MotorCalibration {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-	return e.calibration.GetMotorCalibrationByID(servoID)
-}
+	cal := sess.servos[servoID].Calibration()
 ```
+
+Do **not** add an `entry.calibrationFor(...)` accessor. Routing writes through `entry.calibration`
+while reads go through the per-servo copy is problem 2's exact structure — writes against one
+copy, reads against another — surviving only on the discipline that every writer updates both.
+Reading from the session makes the single source of truth structural rather than a convention,
+and it removes the `busMu → entry.mu` nesting from all 20 method bodies, which is a strictly
+simpler lock model than the alternative.
+
+`entry.calibration` is then **purely the session-rebuild seed**: written by `SetCalibration` and
+the acquire-time update, read by `newBusSession` and `GetControllerStatus`, and by nothing on a
+hot path.
 
 - [ ] **Step 4: Check `calculateJointLimits`**
 
@@ -548,7 +590,12 @@ Write it against the sensor's real construction path. If the sensor cannot be bu
 2. call cancel;
 3. wait on `done` (bounded — log and continue on timeout rather than hanging a reconfigure forever).
 
-For `stopRangeRecording` that means restructuring `DoCommand`'s lock scope so the join happens outside it. This is the same audit manual mode already passes (`manual_mode.go:111` — `stop()` is synchronous).
+**`Close` is the only path that must join.** It is the one that precedes a bus close; `stopRangeRecording` just ends a recording while the port stays open. Since `DoCommand`'s single deferred unlock covers every handler, making `stopRangeRecording` join would mean restructuring that lock scope for no safety gain. Prefer one of:
+
+- join in `Close` only, and have `startRangeRecording` refuse (or join) when a prior goroutine has not exited; or
+- have `stopRangeRecording` return a closure that `DoCommand` runs after unlocking.
+
+Take the first unless a test shows the second is needed. This is the same audit manual mode already passes (`manual_mode.go:111` — `stop()` is synchronous).
 
 - [ ] **Step 3: Run and commit**
 
@@ -731,11 +778,15 @@ func (h *ControllerHandle) Release() {
 
 Calling `teardownIfLast` unconditionally, rather than precomputing a `last` flag, is deliberate: it re-reads both counters under the lock, so a concurrent `unpin` and `Release` in either order reach a correct decision exactly once.
 
-**Belt-and-braces for the acquire path:** have `getExistingController` treat a `torndown` entry as absent and return a sentinel that makes `GetController` fall through to `createNewController`. The eviction above already closes the window; this makes a future refactor that reopens it fail loudly instead of silently.
+**Belt-and-braces for the acquire path:** have `getExistingController` treat a `torndown` entry as absent and return a sentinel that makes the caller fall through to creating a fresh entry. The eviction above already closes the window; this makes a future refactor that reopens it fail loudly instead of silently.
+
+Handle the sentinel in **both** callers — `GetController` (`registry.go:46`) and `createNewController` (`registry.go:112`). Missing the second surfaces the sentinel as an error to the caller instead of falling through.
 
 - [ ] **Step 5: Retire the old teardown**
 
-`ControllerRegistry.ReleaseController` (`registry.go:229-259`) is the *previous* teardown: it decrements `refCount` atomically, closes the bus, and deletes the entry, entirely outside the new `torndown` guard. Left in place there are two teardown paths — double `bus.Close()`, negative `refCount`. Either delete it or reduce it to `entry.mu` decrement + `teardownIfLast()`. Two existing tests drive it (`registry_test.go:87`, `:236`) and must be rewritten against `Release`.
+`ControllerRegistry.ReleaseController` (`registry.go:229-259`) is the *previous* teardown: it decrements `refCount` atomically, closes the bus, and deletes the entry, entirely outside the new `torndown` guard. Left in place there are two teardown paths — double `bus.Close()`, negative `refCount`.
+
+**It also holds the only reversed lock order in the codebase**: `entry.mu` (`:238`) then `r.mu` (`:249`), against the `r.mu → entry.mu` that both acquire paths and the new teardown use. So retiring it is required for the lock order to be consistent at all, not merely to avoid a double teardown — keeping it as a compatibility shim would reintroduce an ABBA deadlock. Either delete it or reduce it to `entry.mu` decrement + `teardownIfLast()`. Two existing tests drive it (`registry_test.go:87`, `:236`) and must be rewritten against `Release`.
 
 - [ ] **Step 6: Leave the acquire seam**
 
@@ -836,7 +887,8 @@ git commit -m "docs: point the hotplug plan at the built bus-ownership work"
 - [ ] `go test ./cmd/module/ . -race -count=5` passes — repeats catch a flaky teardown assertion
 - [ ] `grep -rn "controller\.bus\|controller\.calibratedServos" *.go` returns nothing — the handle is the only path to the bus
 - [ ] `grep -rn "runtime.Caller\|callerPorts" *.go` returns nothing
-- [ ] `grep -rn "\.calibration\b" manager.go` returns nothing — every read goes through `Calibration()`
+- [ ] Every per-servo calibration read goes through `Calibration()` on a session servo. `entry.calibration` appears only in `SetCalibration`, the acquire-time update, `newBusSession`, and `GetControllerStatus` — never on a bus hot path
+- [ ] `grep -rn "calibrationFor" *.go` returns nothing
 - [ ] `grep -rn "atomic.*refCount" *.go` returns nothing — one lock, not a mixed field
 - [ ] `grep -rn "controller\.controller\|entry.controller" *.go` returns nothing
 - [ ] The five lifecycle contracts at the top of this plan are each satisfied, checked by reading the code, not by a test
@@ -858,3 +910,8 @@ Restate this in the PR body so nobody reads step 1 as the whole of B:
 - The arm and the calibration sensor still **can** drive the bus concurrently. One shared mutex serializes each transaction, but nothing prevents an arm move mid-calibration — that is the hard lease and the soft motion hold, both step 2.
 - Teardown rules 1 and 3 of the prior spec (dropping a lease on release; the `released`-flag check at hook-invocation time) are unbuilt, because leases and hooks are unbuilt. `released` is set here but only read by step 2.
 - Problem 5 (config triplication between arm and sensor) is untouched.
+
+Also name these two accepted consequences of the shared `busMu`, alongside the 10 ms `recordPositions` note:
+
+- **`Discover` holds `busMu.RLock` for the whole sweep** — seconds on a sparse bus, by `calibration.go:1101`'s own admission — so arm motion blocks during `motor_setup_*`. Correct (they must not share the bus) but newly visible.
+- **"A serial timeout cannot block a Release" is approximate, not absolute.** `getExistingController` holds `entry.mu` while `UpdateCalibration` waits on `CalibratedServo.mu`, which `cs.Position` holds across a serial read (`calibrated_servo.go:180-194`). Bounded and cycle-free, so it is a stall rather than a deadlock — but it is a stall.
