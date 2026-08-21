@@ -1,7 +1,7 @@
 package so_arm
 
 import (
-	"fmt"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -224,7 +224,6 @@ func TestCleanupOnZeroRefs(t *testing.T) {
 		calibration: DefaultSO101FullCalibration,
 		refCount:    1,
 		controller:  nil,
-		lastError:   fmt.Errorf("mock hardware error"), // Add error to make nil controller valid
 	}
 	registry.entries[port] = entry
 
@@ -442,4 +441,30 @@ func TestRegistryUsesInjectedBusFactory(t *testing.T) {
 		DefaultSO101FullCalibration, true)
 	require.NoError(t, err)
 	assert.Equal(t, 1, calls, "the registry must open buses through the factory")
+}
+
+func TestFailedOpenLeavesNoPoisonedEntry(t *testing.T) {
+	r := NewControllerRegistry()
+	var attempts int
+	r.busFactory = func(cfg feetech.BusConfig) (*feetech.Bus, error) {
+		attempts++
+		if attempts == 1 {
+			return nil, errors.New("no such device")
+		}
+		cfg.Transport = newFakeTransport()
+		return feetech.NewBus(cfg)
+	}
+	cfg := shortTimeoutConfig("/dev/fake0")
+
+	_, err := r.GetController("/dev/fake0", cfg, DefaultSO101FullCalibration, true)
+	require.Error(t, err)
+
+	r.mu.RLock()
+	_, cached := r.entries["/dev/fake0"]
+	r.mu.RUnlock()
+	assert.False(t, cached, "a failed open must leave no entry for the retry to trip over")
+
+	_, err = r.GetController("/dev/fake0", cfg, DefaultSO101FullCalibration, true)
+	require.NoError(t, err, "the second attempt must reopen, not replay a cached error")
+	assert.Equal(t, 2, attempts)
 }

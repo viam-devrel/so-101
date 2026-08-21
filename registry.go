@@ -17,7 +17,6 @@ type ControllerEntry struct {
 	config      *SoArm101Config
 	calibration SO101FullCalibration
 	refCount    int64 // Atomic reference counter
-	lastError   error
 	mu          sync.RWMutex
 }
 
@@ -59,9 +58,6 @@ func (r *ControllerRegistry) getExistingController(entry *ControllerEntry, confi
 	defer entry.mu.Unlock()
 
 	if entry.controller == nil {
-		if entry.lastError != nil {
-			return nil, fmt.Errorf("cached controller creation error: %w", entry.lastError)
-		}
 		return nil, fmt.Errorf("controller not available for port %s", entry.config.Port)
 	}
 
@@ -144,8 +140,9 @@ func (r *ControllerRegistry) createNewController(portPath string, config *SoArm1
 
 	bus, err := r.busFactory(busConfig)
 	if err != nil {
-		entry.lastError = err
-		r.entries[portPath] = entry
+		// Deliberately no entry: caching the failure here made the port permanently
+		// unusable, which discarded viam-server's own 5s resource retry
+		// (rdk robot/impl/local_robot.go:427).
 		return nil, fmt.Errorf("failed to create feetech servo bus: %w", err)
 	}
 
@@ -211,7 +208,6 @@ func (r *ControllerRegistry) createNewController(portPath string, config *SoArm1
 	}
 	// Update entry calibration after controller creation for consistency
 	entry.calibration = finalCalibration
-	entry.lastError = nil
 	atomic.StoreInt64(&entry.refCount, 1)
 
 	r.entries[portPath] = entry
@@ -259,7 +255,6 @@ func (r *ControllerRegistry) ReleaseController(portPath string) {
 		entry.config = nil
 		entry.calibration = SO101FullCalibration{}
 		atomic.StoreInt64(&entry.refCount, 0)
-		entry.lastError = nil
 	}
 }
 
@@ -285,7 +280,6 @@ func (r *ControllerRegistry) ForceCloseController(portPath string) error {
 		entry.config = nil
 		entry.calibration = SO101FullCalibration{}
 		atomic.StoreInt64(&entry.refCount, 0)
-		entry.lastError = nil
 	}
 
 	return err
