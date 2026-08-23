@@ -1,4 +1,4 @@
-package so_arm
+package geometry
 
 import (
 	"testing"
@@ -7,7 +7,6 @@ import (
 	"go.viam.com/rdk/referenceframe"
 	"go.viam.com/rdk/spatialmath"
 
-	"so_arm/internal/geometry"
 	"so_arm/internal/testfake"
 )
 
@@ -32,10 +31,10 @@ func TestURDFModelSurvivesSerialization(t *testing.T) {
 		return out
 	}
 
-	jsonModel, err := geometry.ArmModelJSON("follower-sim")
+	jsonModel, err := ArmModelJSON("follower-sim")
 	require.NoError(t, err)
 
-	urdfModel, err := geometry.ArmModel(true, nil, false, "follower-sim")
+	urdfModel, err := ArmModel(true, nil, false, "follower-sim")
 	require.NoError(t, err)
 	transmitted := roundTrip(t, urdfModel)
 
@@ -69,7 +68,7 @@ func TestURDFModelSurvivesSerialization(t *testing.T) {
 	require.Equal(t, 5, len(g.Geometries()), "transmitted model lost its per-link collision meshes")
 
 	// visualize_ee_frame's placeholder box must also survive (it was lost the same way): 6 geoms.
-	urdfEE, err := geometry.ArmModel(true, nil, true, "follower-sim")
+	urdfEE, err := ArmModel(true, nil, true, "follower-sim")
 	require.NoError(t, err)
 	tEE := roundTrip(t, urdfEE)
 	gEE, err := tEE.Geometries(make([]referenceframe.Input, len(tEE.DoF())))

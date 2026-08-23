@@ -16,6 +16,9 @@ import (
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/resource"
 	"go.viam.com/rdk/services/discovery"
+
+	so101arm "so_arm/components/arm"
+	so101gripper "so_arm/components/gripper"
 )
 
 var SO101DiscoveryModel = resource.NewModel("devrel", "so101", "discovery")
@@ -183,7 +186,7 @@ func (dis *so101Discovery) generateConfigs(
 		configs = append(configs, resource.Config{
 			Name:       "so101-arm-" + portSuffix,
 			API:        arm.API,
-			Model:      SO101Model,
+			Model:      so101arm.SO101Model,
 			Attributes: attrs,
 		})
 	}
@@ -195,7 +198,7 @@ func (dis *so101Discovery) generateConfigs(
 		configs = append(configs, resource.Config{
 			Name:  "so101-gripper-" + portSuffix,
 			API:   gripper.API,
-			Model: SO101GripperModel,
+			Model: so101gripper.SO101GripperModel,
 			Attributes: map[string]interface{}{
 				"arm": "so101-arm-" + portSuffix,
 			},

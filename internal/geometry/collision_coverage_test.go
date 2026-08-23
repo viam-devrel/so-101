@@ -1,4 +1,4 @@
-package so_arm
+package geometry
 
 import (
 	"math"
@@ -9,7 +9,6 @@ import (
 	"go.viam.com/rdk/referenceframe"
 	"go.viam.com/rdk/spatialmath"
 
-	"so_arm/internal/geometry"
 	"so_arm/internal/testfake"
 )
 
@@ -50,9 +49,9 @@ func aabbExtents(g spatialmath.Geometry) r3.Vector {
 func TestURDFCollisionCoversWholeLink(t *testing.T) {
 	t.Setenv("VIAM_MODULE_ROOT", testfake.RepoRoot())
 
-	jsonModel, err := geometry.ArmModelJSON("so101")
+	jsonModel, err := ArmModelJSON("so101")
 	require.NoError(t, err)
-	urdfModel, err := geometry.ArmModel(true, nil, false, "so101")
+	urdfModel, err := ArmModel(true, nil, false, "so101")
 	require.NoError(t, err)
 
 	zero := make([]referenceframe.Input, 5)
@@ -120,9 +119,9 @@ func keysOf(m map[string]r3.Vector) []string {
 // only its reported pose is aligned to so101.json's.
 func TestURDFGeometryPoseMatchesJSON(t *testing.T) {
 	t.Setenv("VIAM_MODULE_ROOT", testfake.RepoRoot())
-	jsonModel, err := geometry.ArmModelJSON("so101")
+	jsonModel, err := ArmModelJSON("so101")
 	require.NoError(t, err)
-	urdfModel, err := geometry.ArmModel(true, nil, false, "so101")
+	urdfModel, err := ArmModel(true, nil, false, "so101")
 	require.NoError(t, err)
 
 	zero := make([]referenceframe.Input, 5)

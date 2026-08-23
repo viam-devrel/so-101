@@ -1,4 +1,4 @@
-package so_arm
+package geometry
 
 import (
 	"testing"
@@ -7,7 +7,6 @@ import (
 	"go.viam.com/rdk/referenceframe"
 	"go.viam.com/rdk/spatialmath"
 
-	"so_arm/internal/geometry"
 	"so_arm/internal/testfake"
 )
 
@@ -107,9 +106,9 @@ func toInputs(values []float64) []referenceframe.Input {
 func TestURDFExposesJSONFrameNames(t *testing.T) {
 	t.Setenv("VIAM_MODULE_ROOT", testfake.RepoRoot())
 
-	jsonModel, err := geometry.ArmModelJSON("so101")
+	jsonModel, err := ArmModelJSON("so101")
 	require.NoError(t, err)
-	urdfModel, err := geometry.ArmModel(true, nil, false, "so101")
+	urdfModel, err := ArmModel(true, nil, false, "so101")
 	require.NoError(t, err)
 
 	jSM := jsonModel.(*referenceframe.SimpleModel)
@@ -141,9 +140,9 @@ func TestURDFExposesJSONFrameNames(t *testing.T) {
 func TestURDFvsJSONFrameAlignment(t *testing.T) {
 	t.Setenv("VIAM_MODULE_ROOT", testfake.RepoRoot())
 
-	jsonModel, err := geometry.ArmModelJSON("so101")
+	jsonModel, err := ArmModelJSON("so101")
 	require.NoError(t, err)
-	urdfModel, err := geometry.ArmModel(true, nil, false, "so101")
+	urdfModel, err := ArmModel(true, nil, false, "so101")
 	require.NoError(t, err)
 
 	// Both models are 5-DOF (servos 1-5). Retains the URDF geometry-count sanity check: one mesh

@@ -1,4 +1,4 @@
-package so_arm
+package arm
 
 import "testing"
 
