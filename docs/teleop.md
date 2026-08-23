@@ -26,7 +26,7 @@ Leader and follower must be separate SO-101 arm components, typically on separat
 | `leader_gripper`         | string | Optional     | Name of the leader gripper component. When both `leader_gripper` and `follower_gripper` are set, gripper opening is mirrored in addition to joint positions.                         |
 | `follower_gripper`       | string | Optional     | Name of the follower gripper component.                                                                                                                                              |
 | `rate_hz`                | number | Optional     | Mirror loop frequency in Hz. Default `20`. Must be > 0 and ≤ 1000.                                                                                                                  |
-| `manage_leader_torque`   | bool   | Optional     | When `true` (default), disables leader arm torque on start so the arm can be back-driven by hand, and restores torque on stop. The torque command covers every servo on the leader's bus, so this also frees the leader gripper servo. |
+| `manage_leader_torque`   | bool   | Optional     | When `true`, disables the leader arm's servo torque on start and restores it on stop, so the leader can be moved by hand. Default `true`. |
 | `auto_start`             | bool   | Optional     | When `true`, starts the mirror loop immediately when the service is configured. Default `false`.                                                                                     |
 | `max_consecutive_errors` | int    | Optional     | Number of consecutive read/write failures after which the loop stops automatically and reports the error via `status`. Default `10`.                                                 |
 
