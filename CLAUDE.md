@@ -100,12 +100,10 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
 
 ## Tests & conventions
 
-- Build/test with `go test ./cmd/module/ .` — **not** `./...`: `cmd/cli/` is a folder of
-  standalone debug scripts (multiple `func main()` in one package) and won't compile as a
-  package.
+- Build/test with `go test ./...` (the Makefile `test` target).
 - Lint/format with `gofmt -s -w .` (the Makefile `lint` target); also run `go vet`.
-- `TestEnumerateSerialPorts` (in `discovery_test.go`) fails on machines with no serial
-  hardware — environment-dependent, not a regression.
+- `enumerateSerialPorts` returns a non-nil empty slice when no ports are present, so
+  `TestEnumerateSerialPorts` passes on machines with no serial hardware.
 
 ## Gotchas
 

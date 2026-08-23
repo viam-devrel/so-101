@@ -297,7 +297,9 @@ func enumerateSerialPorts() []string {
 		return []string{}
 	}
 
-	var portPaths []string
+	// Non-nil even when empty, matching the error path above: callers range over the
+	// result and the test asserts a slice, not nil.
+	portPaths := make([]string, 0, len(ports))
 	for _, port := range ports {
 		portPaths = append(portPaths, port.Name)
 	}
