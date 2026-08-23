@@ -1,4 +1,4 @@
-package so_arm
+package simulated
 
 import (
 	"context"
@@ -14,6 +14,27 @@ import (
 
 	"so_arm/internal/geometry"
 )
+
+// TestSimulatedGripperKinematics covers the constructor wiring: on viam-server >= 1.0.0 a gripper
+// whose Kinematics() errors is dropped from the frame system entirely, so returning a model is
+// what puts the gripper back on the robot at all.
+func TestSimulatedGripperKinematics(t *testing.T) {
+	ctx := context.Background()
+	g, err := newSimulatedSO101Gripper(ctx, nil,
+		resource.Config{Name: "sim-gripper", ConvertedAttributes: &SO101SimulatedGripperConfig{}},
+		logging.NewTestLogger(t))
+	require.NoError(t, err)
+	defer func() { require.NoError(t, g.Close(ctx)) }()
+
+	model, err := g.Kinematics(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, model)
+
+	pose, err := model.Transform(nil)
+	require.NoError(t, err)
+	assert.Lessf(t, pose.Point().Sub(geometry.GripperTCPPose.Point()).Norm(), 1e-6,
+		"simulated gripper frame at %v, want TCP %v", pose.Point(), geometry.GripperTCPPose.Point())
+}
 
 func newTestSimGripper(t *testing.T, gripperType, meshDetail string) gripper.Gripper {
 	t.Helper()

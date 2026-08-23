@@ -1,5 +1,5 @@
 // discovery.go
-package so_arm
+package discovery
 
 import (
 	"context"
@@ -18,6 +18,7 @@ import (
 	"go.viam.com/rdk/services/discovery"
 
 	so101arm "so_arm/components/arm"
+	so101calibration "so_arm/components/calibration"
 	so101gripper "so_arm/components/gripper"
 )
 
@@ -215,7 +216,7 @@ func (dis *so101Discovery) generateConfigs(
 		configs = append(configs, resource.Config{
 			Name:  "so101-calibration-" + portSuffix,
 			API:   sensor.API,
-			Model: SO101CalibrationSensorModel,
+			Model: so101calibration.SO101CalibrationSensorModel,
 			Attributes: map[string]interface{}{
 				"port": portPath,
 			},

@@ -1,5 +1,5 @@
 // discovery_test.go
-package so_arm
+package discovery
 
 import (
 	"os"
