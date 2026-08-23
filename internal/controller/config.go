@@ -1,4 +1,4 @@
-package so_arm
+package controller
 
 import (
 	"context"
@@ -11,6 +11,8 @@ import (
 
 	"github.com/hipsterbrown/feetech-servo/feetech"
 	"go.viam.com/rdk/logging"
+
+	"so_arm/internal/servo"
 )
 
 type SoArm101Config struct {
@@ -31,45 +33,45 @@ type SoArm101Config struct {
 }
 
 type SO101FullCalibration struct {
-	ShoulderPan  *MotorCalibration `json:"shoulder_pan"`
-	ShoulderLift *MotorCalibration `json:"shoulder_lift"`
-	ElbowFlex    *MotorCalibration `json:"elbow_flex"`
-	WristFlex    *MotorCalibration `json:"wrist_flex"`
-	WristRoll    *MotorCalibration `json:"wrist_roll"`
-	Gripper      *MotorCalibration `json:"gripper"`
+	ShoulderPan  *servo.MotorCalibration `json:"shoulder_pan"`
+	ShoulderLift *servo.MotorCalibration `json:"shoulder_lift"`
+	ElbowFlex    *servo.MotorCalibration `json:"elbow_flex"`
+	WristFlex    *servo.MotorCalibration `json:"wrist_flex"`
+	WristRoll    *servo.MotorCalibration `json:"wrist_roll"`
+	Gripper      *servo.MotorCalibration `json:"gripper"`
 }
 
 var DefaultSO101FullCalibration = SO101FullCalibration{
-	ShoulderPan: &MotorCalibration{
+	ShoulderPan: &servo.MotorCalibration{
 		ID: 1, DriveMode: 0, HomingOffset: 0,
 		RangeMin: 500, RangeMax: 3500,
-		NormMode: NormModeDegrees,
+		NormMode: servo.NormModeDegrees,
 	},
-	ShoulderLift: &MotorCalibration{
+	ShoulderLift: &servo.MotorCalibration{
 		ID: 2, DriveMode: 0, HomingOffset: 0,
 		RangeMin: 500, RangeMax: 3500,
-		NormMode: NormModeDegrees,
+		NormMode: servo.NormModeDegrees,
 	},
-	ElbowFlex: &MotorCalibration{
+	ElbowFlex: &servo.MotorCalibration{
 		ID: 3, DriveMode: 0, HomingOffset: 0,
 		RangeMin: 500, RangeMax: 3500,
-		NormMode: NormModeDegrees,
+		NormMode: servo.NormModeDegrees,
 	},
-	WristFlex: &MotorCalibration{
+	WristFlex: &servo.MotorCalibration{
 		ID: 4, DriveMode: 0, HomingOffset: 0,
 		RangeMin: 500, RangeMax: 3500,
-		NormMode: NormModeDegrees,
+		NormMode: servo.NormModeDegrees,
 	},
-	WristRoll: &MotorCalibration{
+	WristRoll: &servo.MotorCalibration{
 		ID: 5, DriveMode: 0, HomingOffset: 0,
 		RangeMin: 500, RangeMax: 3500,
-		NormMode: NormModeDegrees,
+		NormMode: servo.NormModeDegrees,
 	},
-	Gripper: &MotorCalibration{
+	Gripper: &servo.MotorCalibration{
 		ID: 6, DriveMode: 0, HomingOffset: 0,
 		// The conservative window from gripper_range.go, not the arm joints' 500/3500.
 		RangeMin: gripperSafeRangeMin, RangeMax: gripperSafeRangeMax,
-		NormMode: NormModeRange100, // 0-100% for gripper
+		NormMode: servo.NormModeRange100, // 0-100% for gripper
 	},
 }
 
@@ -151,17 +153,17 @@ type CalibrationEntry struct {
 }
 
 // ToMotorCalibration converts CalibrationEntry to MotorCalibration
-func (ce *CalibrationEntry) ToMotorCalibration() *MotorCalibration {
+func (ce *CalibrationEntry) ToMotorCalibration() *servo.MotorCalibration {
 	normMode := ce.NormMode
 	if normMode == 0 {
 		if ce.ID == 6 {
-			normMode = NormModeRange100
+			normMode = servo.NormModeRange100
 		} else {
-			normMode = NormModeDegrees
+			normMode = servo.NormModeDegrees
 		}
 	}
 
-	return &MotorCalibration{
+	return &servo.MotorCalibration{
 		ID:           ce.ID,
 		DriveMode:    ce.DriveMode,
 		HomingOffset: ce.HomingOffset,
@@ -172,7 +174,7 @@ func (ce *CalibrationEntry) ToMotorCalibration() *MotorCalibration {
 }
 
 // FromMotorCalibration converts MotorCalibration to CalibrationEntry
-func FromMotorCalibration(mc *MotorCalibration) *CalibrationEntry {
+func FromMotorCalibration(mc *servo.MotorCalibration) *CalibrationEntry {
 	return &CalibrationEntry{
 		ID:           mc.ID,
 		DriveMode:    mc.DriveMode,
@@ -195,7 +197,7 @@ func LoadFullCalibrationFromFile(filePath string, logger logging.Logger) (SO101F
 		return SO101FullCalibration{}, fmt.Errorf("failed to parse calibration JSON: %w", err)
 	}
 
-	convertOrDefault := func(entry *CalibrationEntry, defaultCal *MotorCalibration) *MotorCalibration {
+	convertOrDefault := func(entry *CalibrationEntry, defaultCal *servo.MotorCalibration) *servo.MotorCalibration {
 		if entry != nil {
 			return entry.ToMotorCalibration()
 		}
@@ -226,7 +228,7 @@ func LoadFullCalibrationFromFile(filePath string, logger logging.Logger) (SO101F
 
 // SaveFullCalibrationToFile saves calibration to a JSON file
 func SaveFullCalibrationToFile(filePath string, calibration SO101FullCalibration) error {
-	convertOrNil := func(mc *MotorCalibration) *CalibrationEntry {
+	convertOrNil := func(mc *servo.MotorCalibration) *CalibrationEntry {
 		if mc != nil {
 			return FromMotorCalibration(mc)
 		}
@@ -258,7 +260,7 @@ func SaveFullCalibrationToFile(filePath string, calibration SO101FullCalibration
 func ValidateFullCalibration(cal SO101FullCalibration, logger logging.Logger) error {
 	joints := []struct {
 		name   string
-		config *MotorCalibration
+		config *servo.MotorCalibration
 	}{
 		{"shoulder_pan", cal.ShoulderPan},
 		{"shoulder_lift", cal.ShoulderLift},
@@ -285,7 +287,7 @@ func ValidateFullCalibration(cal SO101FullCalibration, logger logging.Logger) er
 }
 
 // GetMotorCalibrationByID returns the motor calibration for a specific servo ID
-func (cal SO101FullCalibration) GetMotorCalibrationByID(servoID int) *MotorCalibration {
+func (cal SO101FullCalibration) GetMotorCalibrationByID(servoID int) *servo.MotorCalibration {
 	switch servoID {
 	case 1:
 		return cal.ShoulderPan
@@ -305,8 +307,8 @@ func (cal SO101FullCalibration) GetMotorCalibrationByID(servoID int) *MotorCalib
 }
 
 // ToFeetechCalibrationMap converts SO101FullCalibration to a map for feetech-servo
-func (cal SO101FullCalibration) ToFeetechCalibrationMap() map[int]*MotorCalibration {
-	return map[int]*MotorCalibration{
+func (cal SO101FullCalibration) ToFeetechCalibrationMap() map[int]*servo.MotorCalibration {
+	return map[int]*servo.MotorCalibration{
 		1: cal.ShoulderPan,
 		2: cal.ShoulderLift,
 		3: cal.ElbowFlex,
@@ -317,8 +319,8 @@ func (cal SO101FullCalibration) ToFeetechCalibrationMap() map[int]*MotorCalibrat
 }
 
 // FromFeetechCalibrationMap creates SO101FullCalibration from a feetech calibration map
-func FromFeetechCalibrationMap(calibrations map[int]*MotorCalibration) SO101FullCalibration {
-	getOrDefault := func(id int, defaultCal *MotorCalibration) *MotorCalibration {
+func FromFeetechCalibrationMap(calibrations map[int]*servo.MotorCalibration) SO101FullCalibration {
+	getOrDefault := func(id int, defaultCal *servo.MotorCalibration) *servo.MotorCalibration {
 		if mc, exists := calibrations[id]; exists && mc != nil {
 			return mc
 		}
@@ -344,7 +346,7 @@ func (cal SO101FullCalibration) Equal(other SO101FullCalibration) bool {
 		calibrationsEqual(cal.Gripper, other.Gripper)
 }
 
-func calibrationsEqual(a, b *MotorCalibration) bool {
+func calibrationsEqual(a, b *servo.MotorCalibration) bool {
 	if a == nil && b == nil {
 		return true
 	}
@@ -363,9 +365,9 @@ func calibrationsEqual(a, b *MotorCalibration) bool {
 // Servo 6 (gripper) uses 0-100 range, servos 1-5 (arm) use degrees
 func getNormModeForServo(servoID int) int {
 	if servoID == 6 {
-		return NormModeRange100 // Gripper uses 0-100%
+		return servo.NormModeRange100 // Gripper uses 0-100%
 	}
-	return NormModeDegrees // Arm servos use degrees
+	return servo.NormModeDegrees // Arm servos use degrees
 }
 
 // readUint16Register reads a 2-byte register from servo and decodes as uint16
@@ -423,22 +425,22 @@ func ReadCalibrationFromServos(
 	}
 
 	successCount := 0
-	calibrations := make(map[int]*MotorCalibration)
+	calibrations := make(map[int]*servo.MotorCalibration)
 
 	for _, servoID := range servoIDs {
 		// Create servo instance for reading
-		servo := feetech.NewServo(bus, servoID, &feetech.ModelSTS3215)
+		dev := feetech.NewServo(bus, servoID, &feetech.ModelSTS3215)
 
 		// Try reading registers - updated method names
-		homingOffset, offsetErr := readInt16Register(ctx, servo, "position_offset")
-		minLimit, minErr := readUint16Register(ctx, servo, "min_angle_limit")
-		maxLimit, maxErr := readUint16Register(ctx, servo, "max_angle_limit")
+		homingOffset, offsetErr := readInt16Register(ctx, dev, "position_offset")
+		minLimit, minErr := readUint16Register(ctx, dev, "min_angle_limit")
+		maxLimit, maxErr := readUint16Register(ctx, dev, "max_angle_limit")
 
 		// Check if we got valid data
 		if offsetErr == nil && minErr == nil && maxErr == nil {
 			// Validate range limits are within servo resolution
 			if minLimit < maxLimit && maxLimit <= 4095 {
-				calibrations[servoID] = &MotorCalibration{
+				calibrations[servoID] = &servo.MotorCalibration{
 					ID:           servoID,
 					DriveMode:    0,
 					HomingOffset: homingOffset,

@@ -13,6 +13,9 @@ import (
 	"go.viam.com/rdk/components/sensor"
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/resource"
+
+	"so_arm/internal/controller"
+	"so_arm/internal/servo"
 )
 
 var (
@@ -111,7 +114,7 @@ type so101CalibrationSensor struct {
 	name       resource.Name
 	logger     logging.Logger
 	cfg        *SO101CalibrationSensorConfig
-	controller *ControllerHandle
+	controller *controller.ControllerHandle
 
 	// Calibration state
 	mu               sync.RWMutex
@@ -159,7 +162,7 @@ func NewSO101CalibrationSensor(
 	}
 
 	// Create controller configuration
-	controllerConfig := &SoArm101Config{
+	controllerConfig := &controller.SoArm101Config{
 		Port:            conf.Port,
 		Baudrate:        conf.Baudrate,
 		ServoIDs:        []int{1, 2, 3, 4, 5, 6}, // Controller handles all 6
@@ -173,7 +176,7 @@ func NewSO101CalibrationSensor(
 	// Load existing calibration for baseline
 	calibration, fromFile := controllerConfig.LoadCalibration(logger)
 
-	controller, err := AcquireController(rawConf.ResourceName(), controllerConfig, calibration, fromFile)
+	ctrl, err := controller.AcquireController(rawConf.ResourceName(), controllerConfig, calibration, fromFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get shared SO-ARM controller: %w", err)
 	}
@@ -208,7 +211,7 @@ func NewSO101CalibrationSensor(
 		name:            rawConf.ResourceName(),
 		logger:          logger,
 		cfg:             conf,
-		controller:      controller,
+		controller:      ctrl,
 		state:           StateIdle,
 		joints:          joints,
 		servoNames:      servoNames,
@@ -652,21 +655,21 @@ func (cs *so101CalibrationSensor) saveCalibration(ctx context.Context) (map[stri
 	cs.logger.Info("Saving calibration to servos and file...")
 
 	// Create calibration structure
-	fullCalibration := SO101FullCalibration{}
+	fullCalibration := controller.SO101FullCalibration{}
 
 	for servoID, joint := range cs.joints {
-		motorCal := &MotorCalibration{
+		motorCal := &servo.MotorCalibration{
 			ID:           servoID,
 			DriveMode:    0, // Normal direction
 			HomingOffset: joint.HomingOffset,
 			RangeMin:     joint.RangeMin,
 			RangeMax:     joint.RangeMax,
-			NormMode:     NormModeDegrees, // Default to degrees
+			NormMode:     servo.NormModeDegrees, // Default to degrees
 		}
 
 		// Special case for gripper - use percentage mode
 		if servoID == 6 {
-			motorCal.NormMode = NormModeRange100
+			motorCal.NormMode = servo.NormModeRange100
 		}
 
 		// Assign to appropriate field in full calibration
@@ -687,7 +690,7 @@ func (cs *so101CalibrationSensor) saveCalibration(ctx context.Context) (map[stri
 	}
 
 	// Save calibration to file
-	if err := SaveFullCalibrationToFile(cs.cfg.CalibrationFile, fullCalibration); err != nil {
+	if err := controller.SaveFullCalibrationToFile(cs.cfg.CalibrationFile, fullCalibration); err != nil {
 		cs.setState(StateError, fmt.Sprintf("Failed to save calibration file: %v", err))
 		return map[string]any{"success": false}, err
 	}
@@ -1175,7 +1178,7 @@ func (cs *so101CalibrationSensor) Close(ctx context.Context) error {
 	cs.mu.Lock()
 	cancel := cs.recordingCancel
 	done := cs.recordingDone
-	controller := cs.controller
+	ctrl := cs.controller
 	cs.recordingCancel = nil
 	cs.recordingDone = nil
 	cs.recordingActive = false
@@ -1197,8 +1200,8 @@ func (cs *so101CalibrationSensor) Close(ctx context.Context) error {
 
 	// Only now, with no reader left on the bus, is it safe to release -- Release closes
 	// the shared bus once this is the last holder.
-	if controller != nil {
-		controller.Release()
+	if ctrl != nil {
+		ctrl.Release()
 	}
 
 	return nil

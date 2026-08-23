@@ -1,4 +1,4 @@
-package so_arm
+package controller
 
 import (
 	"fmt"
@@ -8,6 +8,7 @@ import (
 	"go.viam.com/rdk/logging"
 
 	"so_arm/internal/geometry"
+	"so_arm/internal/servo"
 )
 
 // Servos with a homing offset but untouched position limits read as calibrated (the factory
@@ -20,7 +21,7 @@ const (
 	gripperServoID = 6
 
 	// A half-turn homing offset puts the jaw's closed stop at the encoder centre. 0% is grab.
-	gripperClosedStopTick = 2048
+	GripperClosedStopTick = 2048
 
 	// Open travel from the closed stop, measured across kits and held under the observed
 	// ~1450 so a kit with less travel under-opens rather than stalling. Deliberately not
@@ -31,8 +32,8 @@ const (
 	// Jaw travel from a recorded calibration (2030..3481). The safe window stays under it.
 	gripperObservedTravelTicks = 1451
 
-	gripperSafeRangeMin = gripperClosedStopTick
-	gripperSafeRangeMax = gripperClosedStopTick + gripperSafeTravelTicks
+	gripperSafeRangeMin = GripperClosedStopTick
+	gripperSafeRangeMax = GripperClosedStopTick + gripperSafeTravelTicks
 
 	// How much wider than the model a recorded range may be before we stop believing it.
 	// Real calibrations overshoot slightly; 0/4095 and the 500/3500 default do not.
@@ -88,7 +89,7 @@ func warnGripperUsingSafeRange(cause string, logger logging.Logger) {
 		"gripper servo %d: %s. Using the conservative range %d-%d (closed at tick %d, "+
 			"opening %d ticks). The jaw will not open fully; run the calibration workflow "+
 			"to record its real range.",
-		gripperServoID, cause, gripperSafeRangeMin, gripperSafeRangeMax, gripperClosedStopTick,
+		gripperServoID, cause, gripperSafeRangeMin, gripperSafeRangeMax, GripperClosedStopTick,
 		gripperSafeTravelTicks)
 }
 
@@ -100,7 +101,7 @@ func warnGripperUsingSafeRange(cause string, logger logging.Logger) {
 // FromFeetechCalibrationMap checks it, so the two cannot silently disagree about what counts
 // as "read".
 func finalizeCalibrationFromServos(
-	calibrations map[int]*MotorCalibration,
+	calibrations map[int]*servo.MotorCalibration,
 	servoIDs []int,
 	missingCause string,
 	logger logging.Logger,

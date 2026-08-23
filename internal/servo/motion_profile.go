@@ -1,4 +1,4 @@
-package so_arm
+package servo
 
 import (
 	"fmt"
@@ -21,9 +21,9 @@ const (
 	accStepsPerUnit = 108.0 // mean measured slope, steps/s^2 per Acc unit
 	accOffsetSteps  = 386.0 // mean measured offset, steps/s^2
 
-	// minAccUnits is 1, NOT 0. Acc 0 means an UNLIMITED ramp -- the jerkiest possible
+	// MinAccUnits is 1, NOT 0. Acc 0 means an UNLIMITED ramp -- the jerkiest possible
 	// command, the exact opposite of what a caller asking for gentle acceleration wants.
-	minAccUnits = 1
+	MinAccUnits = 1
 
 	// maxAccUnits is a conservative round-down below the LOWEST measured knee. Measured
 	// knees were 52, 55 and 63 across three joints; 50 sits under all of them. Above the
@@ -31,13 +31,13 @@ const (
 	maxAccUnits = 50
 )
 
-// degPerSecSqToAccUnits converts an angular acceleration into the servo's Acc register
+// DegPerSecSqToAccUnits converts an angular acceleration into the servo's Acc register
 // value, clamped to the range where the register actually does something.
-func degPerSecSqToAccUnits(degsPerSecSq float64) int {
-	steps := degsPerSecSq * stepsPerDegree
+func DegPerSecSqToAccUnits(degsPerSecSq float64) int {
+	steps := degsPerSecSq * StepsPerDegree
 	units := int(math.Round((steps - accOffsetSteps) / accStepsPerUnit))
-	if units < minAccUnits {
-		units = minAccUnits
+	if units < MinAccUnits {
+		units = MinAccUnits
 	}
 	if units > maxAccUnits {
 		units = maxAccUnits
@@ -45,38 +45,38 @@ func degPerSecSqToAccUnits(degsPerSecSq float64) int {
 	return units
 }
 
-// defaultAccelDegsPerSecSq is the shipped default, deliberately chosen so it maps to an Acc
+// DefaultAccelDegsPerSecSq is the shipped default, deliberately chosen so it maps to an Acc
 // value BELOW maxAccUnits. 600 deg/s^2 maps to 59.6 and would clamp -- clamping the
 // reference joint (k=1) while lower-k joints keep their exact scaled value breaks the
 // coordination this whole mechanism exists to provide.
-const defaultAccelDegsPerSecSq = 500.0
+const DefaultAccelDegsPerSecSq = 500.0
 
-// accFloorDegsPerSecSq is what Acc 1 actually delivers. Any lower request is silently raised
+// AccFloorDegsPerSecSq is what Acc 1 actually delivers. Any lower request is silently raised
 // to this by the register floor, so timing calculations must not assume the lower value.
-const accFloorDegsPerSecSq = 43.0
+const AccFloorDegsPerSecSq = 43.0
 
 // Configured-acceleration bounds, in deg/s^2. Both ends are set by what the register can
 // actually express: Acc 1 delivers about 43 deg/s^2, so the old minimum of 10 was
 // unreachable by more than 4x; Acc 50 delivers about 508, so values above that do nothing.
 const (
-	minAccelDegsPerSecSq = 50.0
-	maxAccelDegsPerSecSq = 500.0
+	MinAccelDegsPerSecSq = 50.0
+	MaxAccelDegsPerSecSq = 500.0
 )
 
-// jointProfile is one servo's commanded motion profile, in register units.
-type jointProfile struct {
-	speedSteps int // goal velocity, steps/sec. Never 0: that means MAX SPEED.
-	accUnits   int // acceleration register. Never 0: that means UNLIMITED.
+// JointProfile is one servo's commanded motion profile, in register units.
+type JointProfile struct {
+	SpeedSteps int // goal velocity, steps/sec. Never 0: that means MAX SPEED.
+	AccUnits   int // acceleration register. Never 0: that means UNLIMITED.
 }
 
-// jointTravelsDeg returns each joint's travel magnitude in degrees, and the largest of them.
+// JointTravelsDeg returns each joint's travel magnitude in degrees, and the largest of them.
 //
 // Extracted from moveJoints so it can be tested: moveJoints itself holds a concrete
 // controller and cannot be unit-tested without hardware, which would otherwise leave the
 // arm's only piece of pure wiring logic verified solely by a bench run.
 //
 // from and to must be the same length; the caller checks that.
-func jointTravelsDeg(from, to []float64) (travels []float64, maxTravel float64) {
+func JointTravelsDeg(from, to []float64) (travels []float64, maxTravel float64) {
 	travels = make([]float64, len(to))
 	for i := range to {
 		d := math.Abs(to[i]-from[i]) * 180.0 / math.Pi
@@ -88,7 +88,7 @@ func jointTravelsDeg(from, to []float64) (travels []float64, maxTravel float64) 
 	return travels, maxTravel
 }
 
-// coordinatedProfiles computes a profile per joint so that every joint finishes its travel
+// CoordinatedProfiles computes a profile per joint so that every joint finishes its travel
 // at the same moment.
 //
 // Each joint is scaled by its share of the longest travel, k = d/d_max, applied to BOTH
@@ -101,7 +101,7 @@ func jointTravelsDeg(from, to []float64) (travels []float64, maxTravel float64) 
 //
 // travelsDeg may hold negative values; only magnitude matters. caps may be nil.
 // Returns nil when no joint moves, in which case the caller should command nothing.
-func coordinatedProfiles(travelsDeg []float64, refSpeedDegsPerSec, refAccelDegsPerSecSq float64, caps []jointLimits) []jointProfile {
+func CoordinatedProfiles(travelsDeg []float64, refSpeedDegsPerSec, refAccelDegsPerSecSq float64, caps []JointLimits) []JointProfile {
 	maxTravel := 0.0
 	for _, d := range travelsDeg {
 		if a := math.Abs(d); a > maxTravel {
@@ -114,24 +114,24 @@ func coordinatedProfiles(travelsDeg []float64, refSpeedDegsPerSec, refAccelDegsP
 
 	speed, accel := reduceReference(travelsDeg, maxTravel, refSpeedDegsPerSec, refAccelDegsPerSecSq, caps)
 
-	out := make([]jointProfile, len(travelsDeg))
+	out := make([]JointProfile, len(travelsDeg))
 	for i, d := range travelsDeg {
 		k := math.Abs(d) / maxTravel
-		out[i] = jointProfile{
-			// degPerSecToStepsPerSec, NOT resolveSpeedDegsPerSec: the latter floors at
+		out[i] = JointProfile{
+			// DegPerSecToStepsPerSec, NOT ResolveSpeedDegsPerSec: the latter floors at
 			// 3 deg/s, which would destroy scaling for any joint below k ~ 0.06.
-			speedSteps: degPerSecToStepsPerSec(speed * k),
-			accUnits:   degPerSecSqToAccUnits(accel * k),
+			SpeedSteps: DegPerSecToStepsPerSec(speed * k),
+			AccUnits:   DegPerSecSqToAccUnits(accel * k),
 		}
 	}
 	return out
 }
 
-// jointLimits is an optional per-joint cap derived from arm.MoveOptions. A zero field means
+// JointLimits is an optional per-joint cap derived from arm.MoveOptions. A zero field means
 // "no cap" -- never "stop", which is why every check below tests for > 0.
-type jointLimits struct {
-	maxSpeedDegsPerSec   float64
-	maxAccelDegsPerSecSq float64
+type JointLimits struct {
+	MaxSpeedDegsPerSec   float64
+	MaxAccelDegsPerSecSq float64
 }
 
 // reduceReference lowers the shared speed and acceleration reference until no per-joint cap
@@ -146,7 +146,7 @@ type jointLimits struct {
 // +Inf for c/0 with c > 0, and +Inf < speed is already false, so a stationary joint could
 // never bind even without the guard. It stays because the intent should be explicit -- but do
 // not assume removing it would fault.
-func reduceReference(travelsDeg []float64, maxTravel, speed, accel float64, caps []jointLimits) (float64, float64) {
+func reduceReference(travelsDeg []float64, maxTravel, speed, accel float64, caps []JointLimits) (float64, float64) {
 	for i, d := range travelsDeg {
 		if i >= len(caps) {
 			break
@@ -155,17 +155,17 @@ func reduceReference(travelsDeg []float64, maxTravel, speed, accel float64, caps
 		if k == 0 {
 			continue
 		}
-		if c := caps[i].maxSpeedDegsPerSec; c > 0 && c/k < speed {
+		if c := caps[i].MaxSpeedDegsPerSec; c > 0 && c/k < speed {
 			speed = c / k
 		}
-		if c := caps[i].maxAccelDegsPerSecSq; c > 0 && c/k < accel {
+		if c := caps[i].MaxAccelDegsPerSecSq; c > 0 && c/k < accel {
 			accel = c / k
 		}
 	}
 	return speed, accel
 }
 
-// jointLimitsFromMoveOptions converts arm.MoveOptions into per-joint caps.
+// JointLimitsFromMoveOptions converts arm.MoveOptions into per-joint caps.
 //
 // Per arm.proto the scalar limit is IGNORED when the corresponding per-joint slice is set,
 // rather than merged with it. RDK's own conversion explicitly leaves that to the
@@ -174,11 +174,11 @@ func reduceReference(travelsDeg []float64, maxTravel, speed, accel float64, caps
 // Returns an error for a per-joint slice whose length does not match the arm's DoF: RDK
 // sizes the slice from whatever the client sent without checking, and silently ignoring or
 // truncating it would produce motion that violates a cap the caller believes is in force.
-func jointLimitsFromMoveOptions(opts *arm.MoveOptions, dof int) ([]jointLimits, error) {
+func JointLimitsFromMoveOptions(opts *arm.MoveOptions, dof int) ([]JointLimits, error) {
 	if opts == nil {
 		return nil, nil
 	}
-	limits := make([]jointLimits, dof)
+	limits := make([]JointLimits, dof)
 
 	if n := len(opts.MaxVelRadsJoints); n > 0 {
 		if n != dof {
@@ -186,12 +186,12 @@ func jointLimitsFromMoveOptions(opts *arm.MoveOptions, dof int) ([]jointLimits, 
 				"max_vel_degs_per_sec_joints has %d entries but the arm has %d joints", n, dof)
 		}
 		for i, v := range opts.MaxVelRadsJoints {
-			limits[i].maxSpeedDegsPerSec = utils.RadToDeg(v)
+			limits[i].MaxSpeedDegsPerSec = utils.RadToDeg(v)
 		}
 	} else if opts.MaxVelRads > 0 {
 		d := utils.RadToDeg(opts.MaxVelRads)
 		for i := range limits {
-			limits[i].maxSpeedDegsPerSec = d
+			limits[i].MaxSpeedDegsPerSec = d
 		}
 	}
 
@@ -201,27 +201,27 @@ func jointLimitsFromMoveOptions(opts *arm.MoveOptions, dof int) ([]jointLimits, 
 				"max_acc_degs_per_sec2_joints has %d entries but the arm has %d joints", n, dof)
 		}
 		for i, a := range opts.MaxAccRadsJoints {
-			limits[i].maxAccelDegsPerSecSq = utils.RadToDeg(a)
+			limits[i].MaxAccelDegsPerSecSq = utils.RadToDeg(a)
 		}
 	} else if opts.MaxAccRads > 0 {
 		d := utils.RadToDeg(opts.MaxAccRads)
 		for i := range limits {
-			limits[i].maxAccelDegsPerSecSq = d
+			limits[i].MaxAccelDegsPerSecSq = d
 		}
 	}
 
 	return limits, nil
 }
 
-// uniformSpeedUnderCaps returns the fastest uniform speed that violates no per-joint cap.
+// UniformSpeedUnderCaps returns the fastest uniform speed that violates no per-joint cap.
 //
 // Used only on the read-failure fallback path, where there is no travel reference and so no
 // way to scale per joint. Taking the minimum is conservative -- every joint ends at or below
 // its own cap -- and is far better than discarding caps the caller believes are in force.
-func uniformSpeedUnderCaps(speed float64, caps []jointLimits) float64 {
+func UniformSpeedUnderCaps(speed float64, caps []JointLimits) float64 {
 	for _, c := range caps {
-		if c.maxSpeedDegsPerSec > 0 && c.maxSpeedDegsPerSec < speed {
-			speed = c.maxSpeedDegsPerSec
+		if c.MaxSpeedDegsPerSec > 0 && c.MaxSpeedDegsPerSec < speed {
+			speed = c.MaxSpeedDegsPerSec
 		}
 	}
 	return speed

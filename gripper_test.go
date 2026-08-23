@@ -14,8 +14,10 @@ import (
 	"go.viam.com/rdk/resource"
 	"go.viam.com/rdk/spatialmath"
 
+	"so_arm/internal/controller"
 	"so_arm/internal/geometry"
 	"so_arm/internal/servocmd"
+	"so_arm/internal/testfake"
 )
 
 func TestSO101GripperConfigValidate(t *testing.T) {
@@ -270,7 +272,7 @@ func TestGripperGeometriesFallsBackWhenArmErrors(t *testing.T) {
 type dispatchingArm struct {
 	arm.Arm
 	name resource.Name
-	ops  *fakeServoOps
+	ops  *testfake.FakeServoOps
 }
 
 func (d *dispatchingArm) Name() resource.Name { return d.name }
@@ -280,7 +282,7 @@ func (d *dispatchingArm) DoCommand(ctx context.Context, cmd map[string]any) (map
 }
 
 func TestGripperDrivesRealDispatcherEndToEnd(t *testing.T) {
-	ops := &fakeServoOps{percent: 12.5, raw: 900}
+	ops := &testfake.FakeServoOps{Percent: 12.5, Raw: 900}
 	da := &dispatchingArm{name: arm.Named("real-dispatch"), ops: ops}
 
 	deps := resource.Dependencies{da.name: da}
@@ -295,9 +297,9 @@ func TestGripperDrivesRealDispatcherEndToEnd(t *testing.T) {
 	g := res.(*so101Gripper)
 
 	require.NoError(t, g.Open(context.Background(), nil))
-	assert.Equal(t, 6, ops.movedID)
-	assert.Equal(t, 95.0, ops.movedPercent)
-	assert.Equal(t, []int{6}, ops.waitedIDs)
+	assert.Equal(t, 6, ops.MovedID)
+	assert.Equal(t, 95.0, ops.MovedPercent)
+	assert.Equal(t, []int{6}, ops.WaitedIDs)
 
 	got, err := g.DoCommand(context.Background(), map[string]any{"command": "get_position"})
 	require.NoError(t, err)
@@ -308,7 +310,7 @@ func TestGripperDrivesRealDispatcherEndToEnd(t *testing.T) {
 // resting at its closed stop normalized to 51.6%, clearing the 15% threshold, so Grab
 // returned true whether or not it held anything.
 func TestGrabReportsNothingHeldWhenTheJawReachesItsClosedStop(t *testing.T) {
-	restingPercent, err := DefaultSO101FullCalibration.Gripper.Normalize(gripperClosedStopTick)
+	restingPercent, err := controller.DefaultSO101FullCalibration.Gripper.Normalize(controller.GripperClosedStopTick)
 	require.NoError(t, err)
 
 	fake := newFakeServoArm()

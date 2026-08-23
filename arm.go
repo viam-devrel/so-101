@@ -18,8 +18,10 @@ import (
 	"go.viam.com/rdk/spatialmath"
 	"go.viam.com/utils/rpc"
 
+	"so_arm/internal/controller"
 	"so_arm/internal/geometry"
 	"so_arm/internal/planning"
+	"so_arm/internal/servo"
 	"so_arm/internal/servocmd"
 )
 
@@ -172,7 +174,7 @@ type so101 struct {
 	logger     logging.Logger
 	cfg        *SO101ArmConfig
 	opMgr      *operation.SingleOperationManager
-	controller *ControllerHandle
+	controller *controller.ControllerHandle
 	manual     *manualSession
 
 	// goalCloud is the resolved approach-axis tolerance pair. Set once in NewSO101 and
@@ -213,7 +215,7 @@ func (s *so101) calculateJointLimits() [][2]float64 {
 	calibration := s.controller.GetCalibration()
 
 	// Map servo IDs to calibration data
-	jointCals := []*MotorCalibration{
+	jointCals := []*servo.MotorCalibration{
 		calibration.ShoulderPan,
 		calibration.ShoulderLift,
 		calibration.ElbowFlex,
@@ -266,12 +268,12 @@ func NewSO101(ctx context.Context, deps resource.Dependencies, name resource.Nam
 
 	accelerationDegsPerSec := conf.AccelerationDegsPerSec
 	if accelerationDegsPerSec == 0 {
-		accelerationDegsPerSec = defaultAccelDegsPerSecSq
+		accelerationDegsPerSec = servo.DefaultAccelDegsPerSecSq
 	}
-	if accelerationDegsPerSec < minAccelDegsPerSecSq || accelerationDegsPerSec > maxAccelDegsPerSecSq {
+	if accelerationDegsPerSec < servo.MinAccelDegsPerSecSq || accelerationDegsPerSec > servo.MaxAccelDegsPerSecSq {
 		return nil, fmt.Errorf(
 			"acceleration_degs_per_sec_per_sec must be between %.0f and %.0f degrees/second^2, got %.1f",
-			minAccelDegsPerSecSq, maxAccelDegsPerSecSq, accelerationDegsPerSec)
+			servo.MinAccelDegsPerSecSq, servo.MaxAccelDegsPerSecSq, accelerationDegsPerSec)
 	}
 
 	if conf.Baudrate == 0 {
@@ -283,7 +285,7 @@ func NewSO101(ctx context.Context, deps resource.Dependencies, name resource.Nam
 	}
 
 	// Create controller configuration
-	controllerConfig := &SoArm101Config{
+	controllerConfig := &controller.SoArm101Config{
 		Port:            conf.Port,
 		Baudrate:        conf.Baudrate,
 		ServoIDs:        []int{1, 2, 3, 4, 5, 6}, // Controller handles all 6, but arm only uses 1-5
@@ -302,14 +304,14 @@ func NewSO101(ctx context.Context, deps resource.Dependencies, name resource.Nam
 		logger.Debug("Using default calibration for SO-101")
 	}
 
-	controller, err := AcquireController(name, controllerConfig, calibration, fromFile)
+	ctrl, err := controller.AcquireController(name, controllerConfig, calibration, fromFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get shared SO-ARM controller: %w", err)
 	}
 
 	model, err := makeModelFrame(conf, name.Name)
 	if err != nil {
-		controller.Release() // Clean up on error
+		ctrl.Release() // Clean up on error
 		return nil, fmt.Errorf("failed to create kinematic model: %w", err)
 	}
 
@@ -336,7 +338,7 @@ func NewSO101(ctx context.Context, deps resource.Dependencies, name resource.Nam
 		cfg:          conf,
 		opMgr:        operation.NewSingleOperationManager(),
 		logger:       logger,
-		controller:   controller,
+		controller:   ctrl,
 		model:        model,
 		armServoIDs:  conf.ServoIDs, // Store which servos this arm controls
 		defaultSpeed: speedDegsPerSec,
@@ -354,7 +356,7 @@ func NewSO101(ctx context.Context, deps resource.Dependencies, name resource.Nam
 
 	// Initialize and verify servo connections
 	if err := arm.initializeServos(); err != nil {
-		controller.Release() // Clean up on error
+		ctrl.Release() // Clean up on error
 		return nil, fmt.Errorf("failed to initialize servos: %w", err)
 	}
 
@@ -455,16 +457,16 @@ func (s *so101) moveJoints(
 	ctx context.Context,
 	from, to []float64,
 	speedDegsPerSec, accelDegsPerSecSq float64,
-	caps []jointLimits,
+	caps []servo.JointLimits,
 	wait bool,
 ) error {
 	if len(from) != len(to) {
 		return fmt.Errorf("coordinated move needs matching position counts, got %d current and %d target",
 			len(from), len(to))
 	}
-	travelsDeg, maxTravelDeg := jointTravelsDeg(from, to)
+	travelsDeg, maxTravelDeg := servo.JointTravelsDeg(from, to)
 
-	profiles := coordinatedProfiles(travelsDeg, speedDegsPerSec, accelDegsPerSecSq, caps)
+	profiles := servo.CoordinatedProfiles(travelsDeg, speedDegsPerSec, accelDegsPerSecSq, caps)
 	if profiles == nil {
 		// Every joint is already at its target. Note this is a behavior change: the old
 		// path still issued a write, so a caller re-asserting its current pose used to
@@ -473,9 +475,9 @@ func (s *so101) moveJoints(
 		return nil
 	}
 
-	servoProfiles := make([]ServoProfile, len(profiles))
+	servoProfiles := make([]controller.ServoProfile, len(profiles))
 	for i, p := range profiles {
-		servoProfiles[i] = ServoProfile{SpeedSteps: p.speedSteps, AccUnits: p.accUnits}
+		servoProfiles[i] = controller.ServoProfile{SpeedSteps: p.SpeedSteps, AccUnits: p.AccUnits}
 	}
 
 	if err := s.controller.MoveServosWithProfiles(ctx, s.armServoIDs, to, servoProfiles); err != nil {
@@ -491,7 +493,7 @@ func (s *so101) moveJoints(
 	// early. This is the diagnostic for that documented limitation.
 	floored := 0
 	for i, d := range travelsDeg {
-		if d > 0 && profiles[i].accUnits == minAccUnits {
+		if d > 0 && profiles[i].AccUnits == servo.MinAccUnits {
 			floored++
 		}
 	}
@@ -504,19 +506,19 @@ func (s *so101) moveJoints(
 	effectiveSpeed := speedDegsPerSec
 	maxSteps := 0
 	for _, p := range profiles {
-		if p.speedSteps > maxSteps {
-			maxSteps = p.speedSteps
+		if p.SpeedSteps > maxSteps {
+			maxSteps = p.SpeedSteps
 		}
 	}
 	if maxSteps > 0 {
-		effectiveSpeed = float64(maxSteps) / stepsPerDegree
+		effectiveSpeed = float64(maxSteps) / servo.StepsPerDegree
 	}
 
 	// Use the acceleration actually achievable: the Acc register floors at ~43 deg/s^2, so
 	// a cap-reduced reference below that is silently raised by the hardware and timing
 	// against the lower value would over-estimate the duration.
-	effectiveAccel := math.Max(accelDegsPerSecSq, accFloorDegsPerSecSq)
-	timeout := moveTimeoutMs(maxTravelDeg, effectiveSpeed, effectiveAccel)
+	effectiveAccel := math.Max(accelDegsPerSecSq, servo.AccFloorDegsPerSecSq)
+	timeout := servo.MoveTimeoutMs(maxTravelDeg, effectiveSpeed, effectiveAccel)
 	s.logger.Debugf("moveJoints: ref %.1f deg/s (effective %.1f), %.0f deg/s^2, max travel "+
 		"%.1f deg, %d joint(s) at the acceleration floor, wait timeout %d ms",
 		speedDegsPerSec, effectiveSpeed, accelDegsPerSecSq, maxTravelDeg, floored, timeout)
@@ -532,11 +534,11 @@ func (s *so101) moveJointsUniform(ctx context.Context, to []float64, speedDegsPe
 	// 1 step/s and Acc 1 -- and a position-only write does not touch either. So without
 	// this the "uniform" fallback would inherit whatever the previous coordinated move left
 	// behind, and would be uniform in neither speed nor acceleration.
-	profile := ServoProfile{
-		SpeedSteps: degPerSecToStepsPerSec(speedDegsPerSec),
-		AccUnits:   degPerSecSqToAccUnits(accelDegsPerSecSq),
+	profile := controller.ServoProfile{
+		SpeedSteps: servo.DegPerSecToStepsPerSec(speedDegsPerSec),
+		AccUnits:   servo.DegPerSecSqToAccUnits(accelDegsPerSecSq),
 	}
-	profiles := make([]ServoProfile, len(s.armServoIDs))
+	profiles := make([]controller.ServoProfile, len(s.armServoIDs))
 	for i := range profiles {
 		profiles[i] = profile
 	}
@@ -546,7 +548,7 @@ func (s *so101) moveJointsUniform(ctx context.Context, to []float64, speedDegsPe
 	if !wait {
 		return nil
 	}
-	return s.controller.WaitForServosToStop(ctx, s.armServoIDs, maxMoveTimeoutMs)
+	return s.controller.WaitForServosToStop(ctx, s.armServoIDs, servo.MaxMoveTimeoutMs)
 }
 
 // parseWaitExtra reads the optional "wait" bool from a DoCommand/extra map.
@@ -597,7 +599,7 @@ func (s *so101) MoveToJointPositions(ctx context.Context, positions []referencef
 			"uniform speed: %v", err)
 		// No arm.MoveOptions here, so caps is always nil -- kept for symmetry with
 		// MoveThroughJointPositions' fallback.
-		return s.moveJointsUniform(ctx, clamped, uniformSpeedUnderCaps(speed, nil), accel, parseWaitExtra(extra))
+		return s.moveJointsUniform(ctx, clamped, servo.UniformSpeedUnderCaps(speed, nil), accel, parseWaitExtra(extra))
 	}
 
 	return s.moveJoints(ctx, current, clamped, speed, accel, nil, parseWaitExtra(extra))
@@ -620,18 +622,18 @@ func (s *so101) MoveThroughJointPositions(ctx context.Context, positions [][]ref
 	s.mu.RUnlock()
 	accel := defaultAccel
 
-	caps, err := jointLimitsFromMoveOptions(options, len(s.armServoIDs))
+	caps, err := servo.JointLimitsFromMoveOptions(options, len(s.armServoIDs))
 	if err != nil {
 		return err
 	}
 
 	// MaxVelRads also becomes the reference speed, not just a per-joint cap. That is
 	// deliberate double application: as the reference it sets the pace, and as a cap it
-	// bypasses resolveSpeedDegsPerSec's 3 deg/s floor for very small values. Per arm.proto
+	// bypasses servo.ResolveSpeedDegsPerSec's 3 deg/s floor for very small values. Per arm.proto
 	// the scalar is ignored entirely when the per-joint slice is set.
 	speed := defaultSpeed
 	if options != nil && len(options.MaxVelRadsJoints) == 0 && options.MaxVelRads > 0 {
-		speed = resolveSpeedDegsPerSec(options.MaxVelRads, defaultSpeed)
+		speed = servo.ResolveSpeedDegsPerSec(options.MaxVelRads, defaultSpeed)
 	}
 
 	// One read per CALL, not per waypoint. The first waypoint has no predecessor to
@@ -669,7 +671,7 @@ func (s *so101) MoveThroughJointPositions(ctx context.Context, positions [][]ref
 		}
 
 		if from == nil {
-			if err := s.moveJointsUniform(ctx, clamped, uniformSpeedUnderCaps(speed, caps), accel, isLast); err != nil {
+			if err := s.moveJointsUniform(ctx, clamped, servo.UniformSpeedUnderCaps(speed, caps), accel, isLast); err != nil {
 				return err
 			}
 		} else if err := s.moveJoints(ctx, from, clamped, speed, accel, caps, isLast); err != nil {
@@ -866,7 +868,7 @@ func (s *so101) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[
 		return map[string]interface{}{"success": err == nil}, err
 
 	case "controller_status":
-		refCount, hasController, configSummary := GetControllerStatus()
+		refCount, hasController, configSummary := controller.GetControllerStatus()
 		return map[string]interface{}{
 			"ref_count":      refCount,
 			"has_controller": hasController,
@@ -922,7 +924,7 @@ func (s *so101) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[
 		}
 
 		// Load the new calibration
-		newCalibration, err := LoadFullCalibrationFromFile(s.cfg.CalibrationFile, s.logger)
+		newCalibration, err := controller.LoadFullCalibrationFromFile(s.cfg.CalibrationFile, s.logger)
 		if err != nil {
 			return map[string]interface{}{
 				"success": false,
@@ -988,10 +990,10 @@ func (s *so101) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[
 
 		if accVal, ok := cmd["set_acceleration"]; ok {
 			if acc, ok := accVal.(float64); ok {
-				if acc < minAccelDegsPerSecSq || acc > maxAccelDegsPerSecSq {
+				if acc < servo.MinAccelDegsPerSecSq || acc > servo.MaxAccelDegsPerSecSq {
 					return nil, fmt.Errorf(
 						"acceleration must be between %.0f and %.0f degrees/second^2, got %.1f",
-						minAccelDegsPerSecSq, maxAccelDegsPerSecSq, acc)
+						servo.MinAccelDegsPerSecSq, servo.MaxAccelDegsPerSecSq, acc)
 				}
 				s.mu.Lock()
 				s.defaultAcc = float32(acc)

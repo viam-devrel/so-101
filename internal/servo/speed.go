@@ -1,4 +1,4 @@
-package so_arm
+package servo
 
 import (
 	"math"
@@ -10,8 +10,8 @@ import (
 const (
 	// stepsPerRevolution is the STS3215 encoder resolution (full turn).
 	stepsPerRevolution = 4096.0
-	// stepsPerDegree converts an angle in degrees to servo steps (~11.378).
-	stepsPerDegree = stepsPerRevolution / 360.0
+	// StepsPerDegree converts an angle in degrees to servo steps (~11.378).
+	StepsPerDegree = stepsPerRevolution / 360.0
 
 	// Goal-velocity (steps/sec) clamp. 180 deg/s ~= 2048 steps/sec, so 3000 is a safe
 	// ceiling above the configured range; 0 would mean "max speed" to the servo, so the
@@ -27,17 +27,18 @@ const (
 	// Wait-for-stop safety-timeout shaping.
 	moveTimeoutFactor = 2.0
 	minMoveTimeoutMs  = 1000
-	maxMoveTimeoutMs  = 15000
+	// MaxMoveTimeoutMs is the safety-timeout ceiling for waiting on a move to complete.
+	MaxMoveTimeoutMs = 15000
 )
 
-// degPerSecToStepsPerSec converts an angular speed in degrees/second to the servo
+// DegPerSecToStepsPerSec converts an angular speed in degrees/second to the servo
 // goal-velocity unit (steps/second), clamped to a safe range.
 //
 // NOTE: the steps/sec scale assumes the feetech goal-velocity register is in steps/sec
 // (the package's documented contract). If bench testing shows the commanded speed differs
-// materially from the measured speed, adjust stepsPerDegree by the measured factor.
-func degPerSecToStepsPerSec(degPerSec float64) int {
-	steps := int(math.Round(degPerSec * stepsPerDegree))
+// materially from the measured speed, adjust StepsPerDegree by the measured factor.
+func DegPerSecToStepsPerSec(degPerSec float64) int {
+	steps := int(math.Round(degPerSec * StepsPerDegree))
 	if steps < minSpeedSteps {
 		steps = minSpeedSteps
 	}
@@ -47,10 +48,10 @@ func degPerSecToStepsPerSec(degPerSec float64) int {
 	return steps
 }
 
-// resolveSpeedDegsPerSec picks the effective move speed in deg/s. A per-move
+// ResolveSpeedDegsPerSec picks the effective move speed in deg/s. A per-move
 // MoveOptions.MaxVelRads (radians/second) wins when positive; otherwise the configured
 // default is used. The result is clamped to the configured deg/s bounds.
-func resolveSpeedDegsPerSec(maxVelRads, defaultSpeedDegsPerSec float64) float64 {
+func ResolveSpeedDegsPerSec(maxVelRads, defaultSpeedDegsPerSec float64) float64 {
 	if maxVelRads <= 0 {
 		return defaultSpeedDegsPerSec
 	}
@@ -64,7 +65,7 @@ func resolveSpeedDegsPerSec(maxVelRads, defaultSpeedDegsPerSec float64) float64 
 	return degs
 }
 
-// moveTimeoutMs returns a safety timeout (ms) for waiting on a move to complete, based on
+// MoveTimeoutMs returns a safety timeout (ms) for waiting on a move to complete, based on
 // the worst-case joint travel and the commanded profile, clamped to a sane window.
 //
 // It models the ramp rather than assuming d/v. Acceleration is now enforced on hardware, and
@@ -73,9 +74,9 @@ func resolveSpeedDegsPerSec(maxVelRads, defaultSpeedDegsPerSec float64) float64 
 // validated config range: at 50 deg/s and the 50 deg/s^2 minimum, a 30 degree move really
 // takes 1.55s against a d/v-derived timeout of 1.2s, so WaitForServosToStop would warn and
 // return while the arm was still moving.
-func moveTimeoutMs(maxTravelDeg, speedDegsPerSec, accelDegsPerSecSq float64) int {
+func MoveTimeoutMs(maxTravelDeg, speedDegsPerSec, accelDegsPerSecSq float64) int {
 	if speedDegsPerSec <= 0 || accelDegsPerSecSq <= 0 {
-		return maxMoveTimeoutMs
+		return MaxMoveTimeoutMs
 	}
 	// Triangular when the move is too short to reach cruising speed, trapezoidal otherwise.
 	seconds := maxTravelDeg/speedDegsPerSec + speedDegsPerSec/accelDegsPerSecSq
@@ -86,8 +87,8 @@ func moveTimeoutMs(maxTravelDeg, speedDegsPerSec, accelDegsPerSecSq float64) int
 	if ms < minMoveTimeoutMs {
 		ms = minMoveTimeoutMs
 	}
-	if ms > maxMoveTimeoutMs {
-		ms = maxMoveTimeoutMs
+	if ms > MaxMoveTimeoutMs {
+		ms = MaxMoveTimeoutMs
 	}
 	return ms
 }

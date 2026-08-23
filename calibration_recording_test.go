@@ -6,19 +6,38 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hipsterbrown/feetech-servo/feetech"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.viam.com/rdk/components/arm"
 	"go.viam.com/rdk/components/sensor"
 	"go.viam.com/rdk/logging"
+
+	"so_arm/internal/controller"
+	"so_arm/internal/testfake"
 )
 
 // testRecordingSensor builds a sensor field-by-field around a fake-backed handle.
 // NewSO101CalibrationSensor acquires through the process-wide registry, which needs real
-// serial hardware.
-func testRecordingSensor(t *testing.T, ft *fakeTransport) *so101CalibrationSensor {
+// serial hardware. This builds its own registry instead -- explicitly, so the bypass is
+// visible at the call site -- letting a fake feetech.Transport stand in for the port.
+func testRecordingSensor(t *testing.T, ft *testfake.FakeTransport) *so101CalibrationSensor {
 	t.Helper()
-	h := testHandle(t, ft)
 	servoIDs := []int{1, 2, 3, 4, 5, 6}
+
+	reg := controller.NewControllerRegistry(
+		controller.WithBusFactory(func(cfg feetech.BusConfig) (*feetech.Bus, error) {
+			cfg.Transport = ft
+			return feetech.NewBus(cfg)
+		}),
+	)
+	h, err := reg.AcquireController(
+		arm.Named("test-arm-"+t.Name()),
+		&controller.SoArm101Config{Port: "/dev/fake0", Timeout: 50 * time.Millisecond},
+		controller.DefaultSO101FullCalibration, true,
+	)
+	require.NoError(t, err)
+	t.Cleanup(h.Release)
 
 	joints := make(map[int]*JointCalibrationData, len(servoIDs))
 	for _, id := range servoIDs {
@@ -40,7 +59,7 @@ func testRecordingSensor(t *testing.T, ft *fakeTransport) *so101CalibrationSenso
 }
 
 func TestClosingDuringRecordingJoinsTheGoroutine(t *testing.T) {
-	cs := testRecordingSensor(t, newFakeTransport())
+	cs := testRecordingSensor(t, testfake.NewFakeTransport())
 
 	cs.mu.Lock()
 	_, err := cs.startRangeRecording(context.Background())
@@ -75,7 +94,7 @@ func TestClosingDuringRecordingJoinsTheGoroutine(t *testing.T) {
 }
 
 func TestStopRangeRecordingLetsTheGoroutineExit(t *testing.T) {
-	cs := testRecordingSensor(t, newFakeTransport())
+	cs := testRecordingSensor(t, testfake.NewFakeTransport())
 
 	cs.mu.Lock()
 	_, err := cs.startRangeRecording(context.Background())

@@ -1,4 +1,4 @@
-package so_arm
+package controller
 
 import (
 	"context"
@@ -11,6 +11,8 @@ import (
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/resource"
 	"go.viam.com/rdk/utils"
+
+	"so_arm/internal/servo"
 )
 
 // isGripperServo checks if a servo ID is the gripper (servo 6)
@@ -258,16 +260,16 @@ func (h *ControllerHandle) StopServo(ctx context.Context, id int) error {
 // percentToNormalized converts a 0-100 percentage into whatever normalized unit the servo's
 // calibration expects: Range100 servos take the percentage directly, while degree-normalized
 // servos take a proportional position within their normalized range.
-func percentToNormalized(cal *MotorCalibration, percent float64) float64 {
-	if cal.NormMode == NormModeRange100 {
+func percentToNormalized(cal *servo.MotorCalibration, percent float64) float64 {
+	if cal.NormMode == servo.NormModeRange100 {
 		return percent
 	}
 	return degreeRangeMin + (percent/100.0)*(degreeRangeMax-degreeRangeMin)
 }
 
 // normalizedToPercent is the inverse of percentToNormalized.
-func normalizedToPercent(cal *MotorCalibration, normalized float64) float64 {
-	if cal.NormMode == NormModeRange100 {
+func normalizedToPercent(cal *servo.MotorCalibration, normalized float64) float64 {
+	if cal.NormMode == servo.NormModeRange100 {
 		return normalized
 	}
 	return (normalized - degreeRangeMin) / (degreeRangeMax - degreeRangeMin) * 100.0
@@ -398,7 +400,7 @@ func (h *ControllerHandle) WaitForServosToStop(ctx context.Context, servoIDs []i
 
 	h.entry.busMu.RLock()
 	ids := make([]int, 0, len(servoIDs))
-	servos := make([]*CalibratedServo, 0, len(servoIDs))
+	servos := make([]*servo.CalibratedServo, 0, len(servoIDs))
 	for _, id := range servoIDs {
 		if cs, ok := sess.servos[id]; ok {
 			ids = append(ids, id)

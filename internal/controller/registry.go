@@ -1,4 +1,9 @@
-package so_arm
+// Package controller is the ref-counted shared-serial-bus layer for the SO-101: one
+// ControllerRegistry owns at most one ControllerEntry per serial port, and every component
+// on that port (arm, gripper, calibration sensor) reaches the bus only through a
+// ControllerHandle. It depends on internal/servo and internal/geometry, but not on the root
+// module package, internal/planning, or internal/servocmd.
+package controller
 
 import (
 	"context"
@@ -81,11 +86,35 @@ type ControllerRegistry struct {
 	busFactory func(feetech.BusConfig) (*feetech.Bus, error)
 }
 
-func NewControllerRegistry() *ControllerRegistry {
-	return &ControllerRegistry{
+// Option configures a ControllerRegistry at construction. The field it touches
+// (ControllerRegistry.busFactory) is unexported, so Option is the injection seam for a
+// cross-package caller -- notably a test in another package that needs a fake-backed
+// handle, such as the calibration sensor's tests in the root package. It is a function
+// type rather than an exported struct field so the registry's internals stay private even
+// across that boundary.
+type Option func(*ControllerRegistry)
+
+// WithBusFactory overrides how a registry opens a bus, so a caller can substitute a fake
+// feetech.Transport (see feetech.BusConfig.Transport) for a real serial port. Production
+// never calls this: NewControllerRegistry defaults busFactory to feetech.NewBus, and the
+// process-wide registry behind the package-level AcquireController is built with no options.
+func WithBusFactory(f func(feetech.BusConfig) (*feetech.Bus, error)) Option {
+	return func(r *ControllerRegistry) { r.busFactory = f }
+}
+
+// NewControllerRegistry builds an independent registry. Prefer the package-level
+// AcquireController: a registry built here does not share the process-wide port
+// ownership the shared-bus design depends on, so two of them can open one serial
+// port and contend for it. Exported for callers that must inject a bus factory.
+func NewControllerRegistry(opts ...Option) *ControllerRegistry {
+	r := &ControllerRegistry{
 		entries:    make(map[string]*ControllerEntry),
 		busFactory: feetech.NewBus,
 	}
+	for _, opt := range opts {
+		opt(r)
+	}
+	return r
 }
 
 // AcquireController is the registry-scoped entry point. Tests use this one so they can

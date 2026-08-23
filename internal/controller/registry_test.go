@@ -1,4 +1,4 @@
-package so_arm
+package controller
 
 import (
 	"errors"
@@ -11,6 +11,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.viam.com/rdk/logging"
+
+	"so_arm/internal/testfake"
 )
 
 // Mock logger for testing
@@ -434,7 +436,7 @@ func TestRegistryUsesInjectedBusFactory(t *testing.T) {
 	var calls int
 	r.busFactory = func(cfg feetech.BusConfig) (*feetech.Bus, error) {
 		calls++
-		cfg.Transport = newFakeTransport()
+		cfg.Transport = testfake.NewFakeTransport()
 		return feetech.NewBus(cfg)
 	}
 
@@ -452,7 +454,7 @@ func TestFailedOpenLeavesNoPoisonedEntry(t *testing.T) {
 		if attempts == 1 {
 			return nil, errors.New("no such device")
 		}
-		cfg.Transport = newFakeTransport()
+		cfg.Transport = testfake.NewFakeTransport()
 		return feetech.NewBus(cfg)
 	}
 	cfg := shortTimeoutConfig("/dev/fake0")
@@ -471,47 +473,47 @@ func TestFailedOpenLeavesNoPoisonedEntry(t *testing.T) {
 }
 
 func TestReleaseClosesTheBusOnlyAfterTheLastHolder(t *testing.T) {
-	ft := newFakeTransport()
+	ft := testfake.NewFakeTransport()
 	r, h1 := testRegistryAndHandle(t, ft)
 	h2 := acquireTestHandle(t, r)
 	entry := h1.entry
 
 	h1.Release()
 	assert.NotNil(t, entry.session.Load(), "one holder left; the bus must stay open")
-	assert.Equal(t, 0, ft.closeCount())
+	assert.Equal(t, 0, ft.CloseCount())
 
 	h2.Release()
 	r.mu.RLock()
 	_, present := r.entries["/dev/fake0"]
 	r.mu.RUnlock()
 	assert.False(t, present, "the last release must evict the entry")
-	assert.Equal(t, 1, ft.closeCount())
+	assert.Equal(t, 1, ft.CloseCount())
 }
 
 func TestReleaseIsIdempotent(t *testing.T) {
-	ft := newFakeTransport()
+	ft := testfake.NewFakeTransport()
 	r, h := testRegistryAndHandle(t, ft)
 	h.Release()
 	h.Release() // a double Close must not double-decrement into a negative refCount
-	assert.Equal(t, 1, ft.closeCount())
+	assert.Equal(t, 1, ft.CloseCount())
 
 	h2 := acquireTestHandle(t, r)
 	assert.NotNil(t, h2.entry.session.Load(), "a fresh acquire must open a fresh entry")
 }
 
 func TestTeardownRunsExactlyOnce(t *testing.T) {
-	ft := newFakeTransport()
+	ft := testfake.NewFakeTransport()
 	_, h := testRegistryAndHandle(t, ft)
 	entry := h.entry
 
 	h.Release()
 	entry.teardownIfLast() // a redundant call must be inert
 	entry.teardownIfLast()
-	assert.Equal(t, 1, ft.closeCount())
+	assert.Equal(t, 1, ft.CloseCount())
 }
 
 func TestAcquireNeverJoinsATornDownEntry(t *testing.T) {
-	ft := newFakeTransport()
+	ft := testfake.NewFakeTransport()
 	r, h := testRegistryAndHandle(t, ft)
 	torn := h.entry
 

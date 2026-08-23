@@ -1,4 +1,4 @@
-package so_arm
+package controller
 
 import (
 	"context"
@@ -8,10 +8,12 @@ import (
 	"github.com/hipsterbrown/feetech-servo/feetech"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"so_arm/internal/testfake"
 )
 
 func TestCalibrationHasASingleSourceOfTruth(t *testing.T) {
-	ft := newFakeTransport()
+	ft := testfake.NewFakeTransport()
 	r, h1 := testRegistryAndHandle(t, ft)
 	h2 := acquireTestHandle(t, r)
 
@@ -31,7 +33,7 @@ func TestCalibrationHasASingleSourceOfTruth(t *testing.T) {
 func TestCalibrationUpdateDoesNotMutateTheDefault(t *testing.T) {
 	before := DefaultSO101FullCalibration.Gripper.RangeMin
 
-	h := testHandle(t, newFakeTransport())
+	h := testHandle(t, testfake.NewFakeTransport())
 	updated := cloneCalibration(DefaultSO101FullCalibration)
 	updated.Gripper.RangeMin = 999
 	require.NoError(t, h.SetCalibration(updated))
@@ -41,7 +43,7 @@ func TestCalibrationUpdateDoesNotMutateTheDefault(t *testing.T) {
 }
 
 func TestConcurrentCalibrationUpdateAndReadIsRaceFree(t *testing.T) {
-	h := testHandle(t, newFakeTransport())
+	h := testHandle(t, testfake.NewFakeTransport())
 	var wg sync.WaitGroup
 	for i := 0; i < 20; i++ {
 		wg.Add(1)
@@ -66,8 +68,8 @@ func TestConcurrentCalibrationUpdateAndReadIsRaceFree(t *testing.T) {
 }
 
 func TestSyncReadPositionsDecodesInsideTheHandle(t *testing.T) {
-	ft := newFakeTransport()
-	ft.setRegister(1, feetech.RegPresentPosition.Address, encodeWordLE(2048))
+	ft := testfake.NewFakeTransport()
+	ft.SetRegister(1, feetech.RegPresentPosition.Address, testfake.EncodeWordLE(2048))
 	h := testHandle(t, ft)
 
 	positions, err := h.SyncReadPositions(context.Background(), []int{1})
@@ -77,20 +79,20 @@ func TestSyncReadPositionsDecodesInsideTheHandle(t *testing.T) {
 }
 
 func TestPingServoReachesOneServo(t *testing.T) {
-	h := testHandle(t, newFakeTransport())
+	h := testHandle(t, testfake.NewFakeTransport())
 	model, err := h.PingServo(context.Background(), 3)
 	require.NoError(t, err)
-	assert.Equal(t, fakeModelNumber, model)
+	assert.Equal(t, testfake.FakeModelNumber, model)
 }
 
 func TestServoPresentReportsConfiguredServos(t *testing.T) {
-	h := testHandle(t, newFakeTransport())
+	h := testHandle(t, testfake.NewFakeTransport())
 	assert.True(t, h.ServoPresent(6))
 	assert.False(t, h.ServoPresent(9), "motorSetupVerify needs absent-vs-unresponsive")
 }
 
 func TestHandleOperationsFailFastWhileDisconnected(t *testing.T) {
-	h := testHandle(t, newFakeTransport())
+	h := testHandle(t, testfake.NewFakeTransport())
 	h.entry.session.Store(nil)
 
 	_, err := h.SyncReadPositions(context.Background(), []int{1})

@@ -1,4 +1,4 @@
-package so_arm
+package controller
 
 import (
 	"syscall"
@@ -9,6 +9,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.viam.com/rdk/components/arm"
+
+	"so_arm/internal/testfake"
 )
 
 // testRegistry returns a registry whose bus factory opens every bus over the caller's fake,
@@ -18,11 +20,11 @@ import (
 // against a transport it never touched, and feetech.NewBus with a non-nil Transport never
 // fails on its own, so without the unplugged check a test could open a working bus over a
 // port that is supposed to be gone.
-func testRegistry(ft *fakeTransport) *ControllerRegistry {
+func testRegistry(ft *testfake.FakeTransport) *ControllerRegistry {
 	r := NewControllerRegistry()
 	r.busFactory = func(cfg feetech.BusConfig) (*feetech.Bus, error) {
-		ft.noteOpen()
-		if ft.isUnplugged() {
+		ft.NoteOpen()
+		if ft.IsUnplugged() {
 			return nil, syscall.ENXIO
 		}
 		cfg.Transport = ft
@@ -42,13 +44,13 @@ func acquireTestHandle(t *testing.T, r *ControllerRegistry) *ControllerHandle {
 	return h
 }
 
-func testRegistryAndHandle(t *testing.T, ft *fakeTransport) (*ControllerRegistry, *ControllerHandle) {
+func testRegistryAndHandle(t *testing.T, ft *testfake.FakeTransport) (*ControllerRegistry, *ControllerHandle) {
 	t.Helper()
 	r := testRegistry(ft)
 	return r, acquireTestHandle(t, r)
 }
 
-func testHandle(t *testing.T, ft *fakeTransport) *ControllerHandle {
+func testHandle(t *testing.T, ft *testfake.FakeTransport) *ControllerHandle {
 	t.Helper()
 	_, h := testRegistryAndHandle(t, ft)
 	return h
@@ -69,7 +71,7 @@ func cloneCalibration(src SO101FullCalibration) SO101FullCalibration {
 }
 
 func TestWithSessionRunsAgainstTheLiveSession(t *testing.T) {
-	h := testHandle(t, newFakeTransport())
+	h := testHandle(t, testfake.NewFakeTransport())
 
 	var seen *busSession
 	require.NoError(t, h.withSession(func(s *busSession) error {
@@ -82,7 +84,7 @@ func TestWithSessionRunsAgainstTheLiveSession(t *testing.T) {
 }
 
 func TestWithSessionFailsFastWhenDisconnected(t *testing.T) {
-	h := testHandle(t, newFakeTransport())
+	h := testHandle(t, testfake.NewFakeTransport())
 	h.entry.session.Store(nil)
 
 	start := time.Now()
@@ -96,7 +98,7 @@ func TestWithSessionFailsFastWhenDisconnected(t *testing.T) {
 }
 
 func TestAllHoldersShareOneControllerState(t *testing.T) {
-	ft := newFakeTransport()
+	ft := testfake.NewFakeTransport()
 	r, h1 := testRegistryAndHandle(t, ft)
 	h2 := acquireTestHandle(t, r)
 

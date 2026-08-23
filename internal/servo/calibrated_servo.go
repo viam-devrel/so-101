@@ -1,4 +1,9 @@
-package so_arm
+// Package servo holds the servo-primitives layer shared by the arm and controller layers:
+// per-servo calibration (MotorCalibration's Normalize/Denormalize/Validate), the calibrated
+// servo wrapper (CalibratedServo), degree<->tick and degree/sec<->step conversion, and the
+// coordinated-arrival joint-motion profiles used to make every joint of a move finish
+// together. It has no dependency on the root module package or on internal/controller.
+package servo
 
 import (
 	"context"

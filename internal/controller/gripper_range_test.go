@@ -1,4 +1,4 @@
-package so_arm
+package controller
 
 import (
 	"context"
@@ -10,6 +10,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.viam.com/rdk/logging"
+
+	"so_arm/internal/servo"
 )
 
 // The plausibility yardstick. The safe window is measured, not derived — see
@@ -45,7 +47,7 @@ func TestGripperRangeIsPlausible(t *testing.T) {
 // arithmetic about the window; this one asserts what the window means.
 func TestGripperClosesAtTheClosedStop(t *testing.T) {
 	min, max := gripperSafeRangeMin, gripperSafeRangeMax
-	cal := &MotorCalibration{ID: 6, RangeMin: min, RangeMax: max, NormMode: NormModeRange100}
+	cal := &servo.MotorCalibration{ID: 6, RangeMin: min, RangeMax: max, NormMode: servo.NormModeRange100}
 
 	closedTick, err := cal.Denormalize(0)
 	require.NoError(t, err)
@@ -69,7 +71,7 @@ func TestGripperSafeWindowStaysInsideTheStops(t *testing.T) {
 func TestGuardGripperTravelReplacesAnImplausibleRange(t *testing.T) {
 	logger, logs := logging.NewObservedTestLogger(t)
 	cal := DefaultSO101FullCalibration
-	cal.Gripper = &MotorCalibration{ID: 6, RangeMin: 0, RangeMax: 4095, NormMode: NormModeRange100}
+	cal.Gripper = &servo.MotorCalibration{ID: 6, RangeMin: 0, RangeMax: 4095, NormMode: servo.NormModeRange100}
 
 	guarded, replaced := guardGripperTravel(cal, logger)
 	require.True(t, replaced)
@@ -78,7 +80,7 @@ func TestGuardGripperTravelReplacesAnImplausibleRange(t *testing.T) {
 	assert.Equal(t, gripperSafeRangeMax, guarded.Gripper.RangeMax)
 	assert.Equal(t, 1, logs.FilterMessageSnippet("wider than the jaw").Len(),
 		"the degraded mode must be warned about, and named specifically enough to act on")
-	assert.Equal(t, NormModeRange100, guarded.Gripper.NormMode,
+	assert.Equal(t, servo.NormModeRange100, guarded.Gripper.NormMode,
 		"the copy must carry the mode, not just the range")
 	assert.Equal(t, 6, guarded.Gripper.ID)
 }
@@ -86,7 +88,7 @@ func TestGuardGripperTravelReplacesAnImplausibleRange(t *testing.T) {
 // Never override an operator who actually ran calibration.
 func TestGuardGripperTravelLeavesACredibleRangeAlone(t *testing.T) {
 	cal := DefaultSO101FullCalibration
-	cal.Gripper = &MotorCalibration{ID: 6, RangeMin: 2030, RangeMax: 3481, NormMode: NormModeRange100}
+	cal.Gripper = &servo.MotorCalibration{ID: 6, RangeMin: 2030, RangeMax: 3481, NormMode: servo.NormModeRange100}
 
 	guarded, replaced := guardGripperTravel(cal, nil)
 	assert.False(t, replaced)
@@ -97,7 +99,7 @@ func TestGuardGripperTravelLeavesACredibleRangeAlone(t *testing.T) {
 // Degrees mode only takes a center point from the range, so arm servos are out of scope.
 func TestGuardGripperTravelDoesNotTouchArmServos(t *testing.T) {
 	cal := DefaultSO101FullCalibration
-	cal.Gripper = &MotorCalibration{ID: 6, RangeMin: 0, RangeMax: 4095, NormMode: NormModeRange100}
+	cal.Gripper = &servo.MotorCalibration{ID: 6, RangeMin: 0, RangeMax: 4095, NormMode: servo.NormModeRange100}
 	before := *cal.ShoulderPan
 
 	guarded, replaced := guardGripperTravel(cal, nil)
@@ -109,7 +111,7 @@ func TestGuardGripperTravelDoesNotTouchArmServos(t *testing.T) {
 // DefaultSO101FullCalibration holds pointers, and callers pass it straight through, so the
 // guard must copy the gripper rather than mutate the caller's struct in place.
 func TestGuardGripperTravelDoesNotMutateItsInput(t *testing.T) {
-	in := &MotorCalibration{ID: 6, RangeMin: 0, RangeMax: 4095, NormMode: NormModeRange100}
+	in := &servo.MotorCalibration{ID: 6, RangeMin: 0, RangeMax: 4095, NormMode: servo.NormModeRange100}
 	cal := DefaultSO101FullCalibration
 	cal.Gripper = in
 
@@ -144,8 +146,8 @@ func TestDefaultGripperCalibrationUsesTheSafeWindow(t *testing.T) {
 // equals the safe window proves nothing against a *default* that already equals it.
 func TestFinalizeCalibrationFromServosGuardsTheGripper(t *testing.T) {
 	logger, logs := logging.NewObservedTestLogger(t)
-	read := map[int]*MotorCalibration{
-		6: {ID: 6, RangeMin: 0, RangeMax: 4095, NormMode: NormModeRange100},
+	read := map[int]*servo.MotorCalibration{
+		6: {ID: 6, RangeMin: 0, RangeMax: 4095, NormMode: servo.NormModeRange100},
 	}
 
 	cal := finalizeCalibrationFromServos(read, []int{1, 2, 3, 4, 5, 6}, "unused", logger)
@@ -166,7 +168,7 @@ func TestFinalizeCalibrationFromServosGuardsTheGripper(t *testing.T) {
 // checks must not be free to drift apart.
 func TestFinalizeCalibrationFromServosTreatsANilEntryAsUnread(t *testing.T) {
 	logger, logs := logging.NewObservedTestLogger(t)
-	read := map[int]*MotorCalibration{6: nil}
+	read := map[int]*servo.MotorCalibration{6: nil}
 
 	cal := finalizeCalibrationFromServos(read, []int{1, 2, 3, 4, 5, 6}, "unused", logger)
 

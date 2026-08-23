@@ -1,10 +1,12 @@
-package so_arm
+package controller
 
 import (
 	"errors"
 	"fmt"
 
 	"github.com/hipsterbrown/feetech-servo/feetech"
+
+	"so_arm/internal/servo"
 )
 
 // ErrPortDisconnected is returned by bus operations when the port has been torn down,
@@ -16,15 +18,15 @@ var ErrPortDisconnected = errors.New("serial port disconnected")
 type busSession struct {
 	bus    *feetech.Bus
 	group  *feetech.ServoGroup
-	servos map[int]*CalibratedServo
+	servos map[int]*servo.CalibratedServo
 }
 
 func newBusSession(bus *feetech.Bus, cal SO101FullCalibration) *busSession {
 	raw := make(map[int]*feetech.Servo, 6)
-	servos := make(map[int]*CalibratedServo, 6)
+	servos := make(map[int]*servo.CalibratedServo, 6)
 	for id := 1; id <= 6; id++ {
 		raw[id] = feetech.NewServo(bus, id, &feetech.ModelSTS3215)
-		servos[id] = NewCalibratedServo(raw[id], copyMotorCalibration(cal.GetMotorCalibrationByID(id)))
+		servos[id] = servo.NewCalibratedServo(raw[id], copyMotorCalibration(cal.GetMotorCalibrationByID(id)))
 	}
 	return &busSession{
 		bus:    bus,
@@ -35,11 +37,11 @@ func newBusSession(bus *feetech.Bus, cal SO101FullCalibration) *busSession {
 
 // copyMotorCalibration detaches a calibration from the caller's struct, so the caller
 // cannot mutate a servo's calibration after handing it over.
-func copyMotorCalibration(src *MotorCalibration) *MotorCalibration {
+func copyMotorCalibration(src *servo.MotorCalibration) *servo.MotorCalibration {
 	if src == nil {
 		return nil
 	}
-	return &MotorCalibration{
+	return &servo.MotorCalibration{
 		ID:           src.ID,
 		DriveMode:    src.DriveMode,
 		HomingOffset: src.HomingOffset,

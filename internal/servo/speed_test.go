@@ -1,4 +1,4 @@
-package so_arm
+package servo
 
 import (
 	"math"
@@ -19,8 +19,8 @@ func TestDegPerSecToStepsPerSec(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := degPerSecToStepsPerSec(tt.degs); got != tt.want {
-				t.Errorf("degPerSecToStepsPerSec(%v) = %d, want %d", tt.degs, got, tt.want)
+			if got := DegPerSecToStepsPerSec(tt.degs); got != tt.want {
+				t.Errorf("DegPerSecToStepsPerSec(%v) = %d, want %d", tt.degs, got, tt.want)
 			}
 		})
 	}
@@ -41,9 +41,9 @@ func TestResolveSpeedDegsPerSec(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := resolveSpeedDegsPerSec(tt.maxVelRads, def)
+			got := ResolveSpeedDegsPerSec(tt.maxVelRads, def)
 			if math.Abs(got-tt.want) > 1e-6 {
-				t.Errorf("resolveSpeedDegsPerSec(%v, %v) = %v, want %v", tt.maxVelRads, def, got, tt.want)
+				t.Errorf("ResolveSpeedDegsPerSec(%v, %v) = %v, want %v", tt.maxVelRads, def, got, tt.want)
 			}
 		})
 	}
@@ -70,8 +70,8 @@ func TestMoveTimeoutMs(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := moveTimeoutMs(tt.travel, tt.speed, tt.accel); got != tt.want {
-				t.Errorf("moveTimeoutMs(%v, %v, %v) = %d, want %d",
+			if got := MoveTimeoutMs(tt.travel, tt.speed, tt.accel); got != tt.want {
+				t.Errorf("MoveTimeoutMs(%v, %v, %v) = %d, want %d",
 					tt.travel, tt.speed, tt.accel, got, tt.want)
 			}
 		})

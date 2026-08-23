@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"go.viam.com/rdk/logging"
+
+	"so_arm/internal/controller"
 )
 
 // manualParams are the resolved loop tuning constants.
@@ -216,14 +218,14 @@ func (m *manualSession) statusJoints() []manualJointStatus {
 
 // controllerManualIO adapts ControllerHandle to manualIO for a set of arm servos.
 type controllerManualIO struct {
-	controller *ControllerHandle
+	controller *controller.ControllerHandle
 	ids        []int
 	limits     map[int][2]float64
 	origPGain  map[int]int // captured lazily on applyCompliance for restore
 	origTorque map[int]int // captured lazily on applyCompliance for restore
 }
 
-func newControllerManualIO(c *ControllerHandle, ids []int, limits [][2]float64) *controllerManualIO {
+func newControllerManualIO(c *controller.ControllerHandle, ids []int, limits [][2]float64) *controllerManualIO {
 	lm := map[int][2]float64{}
 	for i, id := range ids {
 		if i < len(limits) {
