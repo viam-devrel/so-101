@@ -7,6 +7,7 @@ import (
 	"go.viam.com/rdk/referenceframe"
 	"go.viam.com/rdk/spatialmath"
 
+	"so_arm/internal/geometry"
 	"so_arm/internal/testfake"
 )
 
@@ -106,9 +107,9 @@ func toInputs(values []float64) []referenceframe.Input {
 func TestURDFExposesJSONFrameNames(t *testing.T) {
 	t.Setenv("VIAM_MODULE_ROOT", testfake.RepoRoot())
 
-	jsonModel, err := makeSO101ModelFrame("so101")
+	jsonModel, err := geometry.ArmModelJSON("so101")
 	require.NoError(t, err)
-	urdfModel, err := makeSO101Model(true, nil, false, "so101")
+	urdfModel, err := geometry.ArmModel(true, nil, false, "so101")
 	require.NoError(t, err)
 
 	jSM := jsonModel.(*referenceframe.SimpleModel)
@@ -131,18 +132,18 @@ func TestURDFExposesJSONFrameNames(t *testing.T) {
 
 // TestURDFvsJSONFrameAlignment proves that so101.json's SVA kinematics and assets/urdf/so101.urdf agree,
 // per-frame, across a range of joint configurations -- for every arm link AND the "tool" TCP
-// frame. This is the guard referenced by so101ArmMeshParts' doc comment (meshes.go): it makes it
+// frame. This is the guard referenced by the geometry package's armMeshParts doc comment: it makes it
 // safe to key the same bundled link GLBs by the shared frame names, and it proves the URDF's
 // baked-in "tool" leaf (joint-5 output + 180deg flip) lands on so101.json's TCP, preserving the
-// convention gripper.go's toolFromGripperLink transform depends on. If this test ever fails, the
+// convention the geometry package's toolFromGripperLink transform depends on. If this test ever fails, the
 // two kinematic sources have drifted apart -- do NOT loosen the tolerances here to force a pass;
 // stop and report the deltas instead.
 func TestURDFvsJSONFrameAlignment(t *testing.T) {
 	t.Setenv("VIAM_MODULE_ROOT", testfake.RepoRoot())
 
-	jsonModel, err := makeSO101ModelFrame("so101")
+	jsonModel, err := geometry.ArmModelJSON("so101")
 	require.NoError(t, err)
-	urdfModel, err := makeSO101Model(true, nil, false, "so101")
+	urdfModel, err := geometry.ArmModel(true, nil, false, "so101")
 	require.NoError(t, err)
 
 	// Both models are 5-DOF (servos 1-5). Retains the URDF geometry-count sanity check: one mesh
@@ -184,7 +185,7 @@ func TestURDFvsJSONFrameAlignment(t *testing.T) {
 	// Frame-name correspondence: the URDF model renames its frames to so101.json's names
 	// (assets/urdf/so101.urdf uses so101.json's names), so the JSON and URDF frames pair up by identical
 	// name. "tool" is the load-bearing end-effector / TCP pair -- both models use the exact
-	// same LinkConfig for it (see makeSO101ModelURDF), so this aligns almost exactly.
+	// same LinkConfig for it (see the geometry package's armModelURDF), so this aligns almost exactly.
 	pairs := [][2]string{
 		{"base", "base"},
 		{"shoulder", "shoulder"},

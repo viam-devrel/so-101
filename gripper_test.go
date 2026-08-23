@@ -13,6 +13,8 @@ import (
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/resource"
 	"go.viam.com/rdk/spatialmath"
+
+	"so_arm/internal/geometry"
 )
 
 func TestSO101GripperConfigValidate(t *testing.T) {
@@ -20,11 +22,11 @@ func TestSO101GripperConfigValidate(t *testing.T) {
 	_, _, err := (&SO101GripperConfig{Arm: "my-arm"}).Validate("")
 	require.NoError(t, err)
 
-	for _, gt := range []string{leaderGripper, followerGripper} {
+	for _, gt := range []string{geometry.LeaderGripper, geometry.FollowerGripper} {
 		_, _, err := (&SO101GripperConfig{Arm: "my-arm", GripperType: gt}).Validate("")
 		require.NoError(t, err, "gripper_type %q should be valid", gt)
 	}
-	for _, md := range []string{highDetail, lowDetail} {
+	for _, md := range []string{geometry.HighDetail, geometry.LowDetail} {
 		_, _, err := (&SO101GripperConfig{Arm: "my-arm", MeshDetail: md}).Validate("")
 		require.NoError(t, err, "mesh_detail %q should be valid", md)
 	}
@@ -61,8 +63,8 @@ func TestGripperConfigDefaultsServoID(t *testing.T) {
 }
 
 func TestBuildGripperMeshes(t *testing.T) {
-	for _, gt := range []string{followerGripper, leaderGripper} {
-		geoms, err := buildGripperMeshes(gt, lowDetail, 0)
+	for _, gt := range []string{geometry.FollowerGripper, geometry.LeaderGripper} {
+		geoms, err := geometry.BuildGripperMeshes(gt, geometry.LowDetail, 0)
 		require.NoError(t, err, "gripper_type %q", gt)
 		require.NotEmpty(t, geoms)
 		for _, g := range geoms {

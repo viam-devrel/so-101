@@ -6,6 +6,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.viam.com/rdk/referenceframe"
 
+	"so_arm/internal/geometry"
 	"so_arm/internal/testfake"
 )
 
@@ -40,12 +41,12 @@ func TestMakeSO101ModelURDFVisualizeEE(t *testing.T) {
 	}
 
 	// URDF without the marker: 5 per-link collision meshes; the grafted tool has no geometry.
-	off, err := makeSO101Model(true, nil, false, "so101")
+	off, err := geometry.ArmModel(true, nil, false, "so101")
 	require.NoError(t, err)
 	require.Equal(t, 5, inputsGeoms(off))
 
 	// URDF with the marker: the grafted tool gains the placeholder box => 6 geometries.
-	on, err := makeSO101Model(true, nil, true, "so101")
+	on, err := geometry.ArmModel(true, nil, true, "so101")
 	require.NoError(t, err)
 	require.Equal(t, 6, inputsGeoms(on))
 }

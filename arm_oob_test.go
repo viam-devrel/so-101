@@ -7,12 +7,13 @@ import (
 	"go.viam.com/rdk/referenceframe"
 	"go.viam.com/rdk/spatialmath"
 
+	"so_arm/internal/geometry"
 	"so_arm/internal/testfake"
 )
 
 // TestComputeOOBPositionFullChain guards against the rdk v0.123 regression where
 // Frame.Transform early-returns at the first out-of-bounds joint, yielding a pose
-// truncated at that joint (and every link downstream). computeOOBPosition must still
+// truncated at that joint (and every link downstream). geometry.ComputeOOBPosition must still
 // compose the full chain for a joint driven past its calibrated limit -- otherwise
 // EndPosition silently reports a wildly wrong TCP (the base-mount pose) with no error.
 func TestComputeOOBPositionFullChain(t *testing.T) {
@@ -25,7 +26,7 @@ func TestComputeOOBPositionFullChain(t *testing.T) {
 			if useURDF {
 				t.Setenv("VIAM_MODULE_ROOT", testfake.RepoRoot())
 			}
-			model, err := makeSO101Model(useURDF, nil, false, "oob-test")
+			model, err := geometry.ArmModel(useURDF, nil, false, "oob-test")
 			require.NoError(t, err)
 
 			limits := model.DoF()
@@ -45,7 +46,7 @@ func TestComputeOOBPositionFullChain(t *testing.T) {
 			copy(overMax, base)
 			overMax[0] = limits[0].Max + 0.02
 
-			pose, err := computeOOBPosition(model, overMax)
+			pose, err := geometry.ComputeOOBPosition(model, overMax)
 			require.NoError(t, err) // best-effort pose, no surfaced error
 			require.NotNil(t, pose)
 
@@ -60,7 +61,7 @@ func TestComputeOOBPositionFullChain(t *testing.T) {
 			overMin := make([]referenceframe.Input, 5)
 			copy(overMin, base)
 			overMin[0] = limits[0].Min - 0.02
-			poseMin, err := computeOOBPosition(model, overMin)
+			poseMin, err := geometry.ComputeOOBPosition(model, overMin)
 			require.NoError(t, err)
 			require.Greater(t, spatialmath.PoseDelta(pose, poseMin).Point().Norm(), 1.0,
 				"OOB pose must depend on joint 0's value (full chain), not be truncated to the base pose")

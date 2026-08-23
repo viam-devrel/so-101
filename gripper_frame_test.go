@@ -14,6 +14,8 @@ import (
 	"go.viam.com/rdk/referenceframe"
 	"go.viam.com/rdk/resource"
 	"go.viam.com/rdk/spatialmath"
+
+	"so_arm/internal/geometry"
 )
 
 // meshWorldPoints returns every triangle vertex of a mesh, transformed by the mesh's pose.
@@ -28,13 +30,13 @@ func meshWorldPoints(m *spatialmath.Mesh) []r3.Vector {
 	return out
 }
 
-// TestGripperTCPLiesBetweenTheJawTips anchors gripperTCPPose to the meshes rather than to a
+// TestGripperTCPLiesBetweenTheJawTips anchors geometry.GripperTCPPose to the meshes rather than to a
 // magic constant: the TCP must sit in the gap between the two contact pads when the jaws are
 // closed, on the pads' span along the approach axis, and centered across the jaw width. If the
 // gripper meshes are ever regenerated with different geometry, this fails instead of silently
 // leaving the TCP floating inside a finger.
 func TestGripperTCPLiesBetweenTheJawTips(t *testing.T) {
-	geoms, err := buildGripperMeshes(followerGripper, highDetail, gripperJointMin)
+	geoms, err := geometry.BuildGripperMeshes(geometry.FollowerGripper, geometry.HighDetail, geometry.GripperJointMin)
 	require.NoError(t, err)
 	require.Len(t, geoms, 2, "follower gripper is a static body plus a moving jaw")
 
@@ -71,7 +73,7 @@ func TestGripperTCPLiesBetweenTheJawTips(t *testing.T) {
 	}
 	require.Greater(t, staticFaceX, movingFaceX, "closed jaws should not interpenetrate")
 
-	tcp := gripperTCPPose.Point()
+	tcp := geometry.GripperTCPPose.Point()
 	assert.Greaterf(t, tcp.X, movingFaceX, "TCP X %.3f is inside the moving jaw (face at %.3f)", tcp.X, movingFaceX)
 	assert.Lessf(t, tcp.X, staticFaceX, "TCP X %.3f is inside the static finger (face at %.3f)", tcp.X, staticFaceX)
 	assert.InDeltaf(t, (staticFaceX+movingFaceX)/2, tcp.X, 0.5,
@@ -82,7 +84,7 @@ func TestGripperTCPLiesBetweenTheJawTips(t *testing.T) {
 
 	// The TCP is a pure translation: it keeps the arm tool frame's axes, so +Z stays the
 	// approach axis that the goal-cloud orientation planning assumes.
-	assert.True(t, spatialmath.OrientationAlmostEqual(gripperTCPPose.Orientation(), spatialmath.NewZeroOrientation()),
+	assert.True(t, spatialmath.OrientationAlmostEqual(geometry.GripperTCPPose.Orientation(), spatialmath.NewZeroOrientation()),
 		"TCP must not rotate the tool frame")
 }
 
@@ -90,9 +92,9 @@ func TestGripperTCPLiesBetweenTheJawTips(t *testing.T) {
 // kinematic model must be zero-DoF and end at the TCP, so the frame system reports the gripper's
 // pose at the jaw tips rather than at the arm's wrist.
 func TestBuildGripperModelPlacesFrameAtTCP(t *testing.T) {
-	for _, gt := range []string{followerGripper, leaderGripper} {
+	for _, gt := range []string{geometry.FollowerGripper, geometry.LeaderGripper} {
 		t.Run(gt, func(t *testing.T) {
-			model, err := buildGripperModel(gt, lowDetail, "gripper")
+			model, err := geometry.BuildGripperModel(gt, geometry.LowDetail, "gripper")
 			require.NoError(t, err)
 			require.NotNil(t, model)
 
@@ -100,8 +102,8 @@ func TestBuildGripperModelPlacesFrameAtTCP(t *testing.T) {
 
 			pose, err := model.Transform(nil)
 			require.NoError(t, err)
-			want := gripperTCPPose
-			if gt == leaderGripper {
+			want := geometry.GripperTCPPose
+			if gt == geometry.LeaderGripper {
 				// The leader gripper is a hand-held trigger, not a pair of jaws: it has no TCP,
 				// so its frame stays at the mount.
 				want = spatialmath.NewZeroPose()
@@ -120,11 +122,11 @@ func TestBuildGripperModelCarriesMeshes(t *testing.T) {
 		gripperType string
 		meshes      int
 	}{
-		{followerGripper, 2},
-		{leaderGripper, 3},
+		{geometry.FollowerGripper, 2},
+		{geometry.LeaderGripper, 3},
 	} {
 		t.Run(tc.gripperType, func(t *testing.T) {
-			model, err := buildGripperModel(tc.gripperType, lowDetail, "gripper")
+			model, err := geometry.BuildGripperModel(tc.gripperType, geometry.LowDetail, "gripper")
 			require.NoError(t, err)
 
 			gif, err := model.Geometries(nil)
@@ -133,7 +135,7 @@ func TestBuildGripperModelCarriesMeshes(t *testing.T) {
 
 			// Model geometry must land exactly where Geometries() draws the closed gripper,
 			// so the collision volume and the rendered meshes agree.
-			want, err := buildGripperMeshes(tc.gripperType, lowDetail, gripperJointMin)
+			want, err := geometry.BuildGripperMeshes(tc.gripperType, geometry.LowDetail, geometry.GripperJointMin)
 			require.NoError(t, err)
 			for i, got := range gif.Geometries() {
 				assert.Lessf(t, got.Pose().Point().Sub(want[i].Pose().Point()).Norm(), 1e-6,
@@ -149,7 +151,7 @@ func TestBuildGripperModelCarriesMeshes(t *testing.T) {
 // assembled in memory without OriginalFile transmits as UNSPECIFIED and the server sees nothing --
 // which every in-process check would miss.
 func TestGripperModelSurvivesSerialization(t *testing.T) {
-	model, err := buildGripperModel(followerGripper, lowDetail, "gripper")
+	model, err := geometry.BuildGripperModel(geometry.FollowerGripper, geometry.LowDetail, "gripper")
 	require.NoError(t, err)
 
 	resp := referenceframe.KinematicModelToProtobuf(model)
@@ -158,8 +160,8 @@ func TestGripperModelSurvivesSerialization(t *testing.T) {
 
 	pose, err := transmitted.Transform(nil)
 	require.NoError(t, err)
-	assert.Lessf(t, pose.Point().Sub(gripperTCPPose.Point()).Norm(), 1e-6,
-		"transmitted model frame at %v, want TCP %v", pose.Point(), gripperTCPPose.Point())
+	assert.Lessf(t, pose.Point().Sub(geometry.GripperTCPPose.Point()).Norm(), 1e-6,
+		"transmitted model frame at %v, want TCP %v", pose.Point(), geometry.GripperTCPPose.Point())
 
 	gif, err := transmitted.Geometries(nil)
 	require.NoError(t, err)
@@ -183,8 +185,8 @@ func TestSimulatedGripperKinematics(t *testing.T) {
 
 	pose, err := model.Transform(nil)
 	require.NoError(t, err)
-	assert.Lessf(t, pose.Point().Sub(gripperTCPPose.Point()).Norm(), 1e-6,
-		"simulated gripper frame at %v, want TCP %v", pose.Point(), gripperTCPPose.Point())
+	assert.Lessf(t, pose.Point().Sub(geometry.GripperTCPPose.Point()).Norm(), 1e-6,
+		"simulated gripper frame at %v, want TCP %v", pose.Point(), geometry.GripperTCPPose.Point())
 }
 
 // TestGripperFrameResolvesToTCPInFrameSystem is the end-to-end contract: assembled the way
@@ -193,9 +195,9 @@ func TestSimulatedGripperKinematics(t *testing.T) {
 // frame named after the gripper component must resolve to the TCP, and the gripper meshes must
 // appear as frame-system geometry.
 func TestGripperFrameResolvesToTCPInFrameSystem(t *testing.T) {
-	armModel, err := makeSO101ModelFrame("arm")
+	armModel, err := geometry.ArmModelJSON("arm")
 	require.NoError(t, err)
-	gripperModel, err := buildGripperModel(followerGripper, lowDetail, "gripper")
+	gripperModel, err := geometry.BuildGripperModel(geometry.FollowerGripper, geometry.LowDetail, "gripper")
 	require.NoError(t, err)
 
 	armLink, err := (&referenceframe.LinkConfig{ID: "arm", Parent: referenceframe.World}).ParseConfig()
@@ -217,11 +219,11 @@ func TestGripperFrameResolvesToTCPInFrameSystem(t *testing.T) {
 		referenceframe.NewPoseInFrame("gripper", spatialmath.NewZeroPose()), referenceframe.World)
 	require.NoError(t, err)
 
-	// The gripper frame must sit gripperTCPPose ahead of the arm's tool frame.
+	// The gripper frame must sit geometry.GripperTCPPose ahead of the arm's tool frame.
 	offset := spatialmath.PoseBetween(
 		toolPose.(*referenceframe.PoseInFrame).Pose(), gripperPose.(*referenceframe.PoseInFrame).Pose())
-	assert.Lessf(t, offset.Point().Sub(gripperTCPPose.Point()).Norm(), 1e-6,
-		"gripper frame is %v from the arm tool frame, want the TCP at %v", offset.Point(), gripperTCPPose.Point())
+	assert.Lessf(t, offset.Point().Sub(geometry.GripperTCPPose.Point()).Norm(), 1e-6,
+		"gripper frame is %v from the arm tool frame, want the TCP at %v", offset.Point(), geometry.GripperTCPPose.Point())
 
 	geoms, err := referenceframe.FrameSystemGeometries(fs, inputs)
 	require.NoError(t, err)

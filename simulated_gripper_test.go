@@ -11,6 +11,8 @@ import (
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/resource"
 	"go.viam.com/rdk/spatialmath"
+
+	"so_arm/internal/geometry"
 )
 
 func newTestSimGripper(t *testing.T, gripperType, meshDetail string) gripper.Gripper {
@@ -31,11 +33,11 @@ func TestSimulatedGripperConfigValidate(t *testing.T) {
 	_, _, err := (&SO101SimulatedGripperConfig{}).Validate("")
 	require.NoError(t, err)
 
-	for _, gt := range []string{leaderGripper, followerGripper} {
+	for _, gt := range []string{geometry.LeaderGripper, geometry.FollowerGripper} {
 		_, _, err := (&SO101SimulatedGripperConfig{GripperType: gt}).Validate("")
 		require.NoError(t, err, "gripper_type %q should be valid", gt)
 	}
-	for _, md := range []string{highDetail, lowDetail} {
+	for _, md := range []string{geometry.HighDetail, geometry.LowDetail} {
 		_, _, err := (&SO101SimulatedGripperConfig{MeshDetail: md}).Validate("")
 		require.NoError(t, err, "mesh_detail %q should be valid", md)
 	}
@@ -52,8 +54,8 @@ func TestSimulatedGripperGeometries(t *testing.T) {
 		gripperType string
 		meshes      int
 	}{
-		{followerGripper, 2}, // body + jaw
-		{leaderGripper, 3},   // wrist-roll + handle + trigger
+		{geometry.FollowerGripper, 2}, // body + jaw
+		{geometry.LeaderGripper, 3},   // wrist-roll + handle + trigger
 	} {
 		g := newTestSimGripper(t, tc.gripperType, "")
 		geoms, err := g.Geometries(ctx, nil)
@@ -72,7 +74,7 @@ func TestSimulatedGripperGeometries(t *testing.T) {
 func TestSimulatedGripperMeshDetail(t *testing.T) {
 	ctx := context.Background()
 	triangles := func(detail string) int {
-		g := newTestSimGripper(t, followerGripper, detail)
+		g := newTestSimGripper(t, geometry.FollowerGripper, detail)
 		defer func() { require.NoError(t, g.Close(ctx)) }()
 		geoms, err := g.Geometries(ctx, nil)
 		require.NoError(t, err)
@@ -82,7 +84,7 @@ func TestSimulatedGripperMeshDetail(t *testing.T) {
 		}
 		return n
 	}
-	assert.Greater(t, triangles(highDetail), triangles(lowDetail),
+	assert.Greater(t, triangles(geometry.HighDetail), triangles(geometry.LowDetail),
 		"high mesh_detail should serve denser meshes than low")
 }
 
@@ -90,7 +92,7 @@ func TestSimulatedGripperMeshDetail(t *testing.T) {
 // reports moving mid-travel -- and that the moving mesh ends up posed differently.
 func TestSimulatedGripperArticulates(t *testing.T) {
 	ctx := context.Background()
-	g := newTestSimGripper(t, followerGripper, "")
+	g := newTestSimGripper(t, geometry.FollowerGripper, "")
 	defer func() { require.NoError(t, g.Close(ctx)) }()
 
 	closedGeoms, err := g.Geometries(ctx, nil)

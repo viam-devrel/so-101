@@ -9,6 +9,7 @@ import (
 	"go.viam.com/rdk/referenceframe"
 	"go.viam.com/rdk/spatialmath"
 
+	"so_arm/internal/geometry"
 	"so_arm/internal/testfake"
 )
 
@@ -49,9 +50,9 @@ func aabbExtents(g spatialmath.Geometry) r3.Vector {
 func TestURDFCollisionCoversWholeLink(t *testing.T) {
 	t.Setenv("VIAM_MODULE_ROOT", testfake.RepoRoot())
 
-	jsonModel, err := makeSO101ModelFrame("so101")
+	jsonModel, err := geometry.ArmModelJSON("so101")
 	require.NoError(t, err)
-	urdfModel, err := makeSO101Model(true, nil, false, "so101")
+	urdfModel, err := geometry.ArmModel(true, nil, false, "so101")
 	require.NoError(t, err)
 
 	zero := make([]referenceframe.Input, 5)
@@ -110,7 +111,7 @@ func keysOf(m map[string]r3.Vector) []string {
 
 // TestURDFGeometryPoseMatchesJSON guards GLB visual-mesh placement. The 3D scene viewer places
 // each Get3DModels GLB at the link's *geometry* pose (not the bare frame origin), and the same
-// GLB serves both kinematic sources (so101ArmMeshParts). so101.json's per-link geometry is a
+// GLB serves both kinematic sources (the geometry package's armMeshParts). so101.json's per-link geometry is a
 // primitive box with a translation offset, so the URDF collision mesh must share that exact
 // geometry pose or the GLBs scatter by the box offsets (tens of mm/link) under use_urdf. The
 // merged meshes are generated relative to the box pose and assets/urdf/so101.urdf carries the matching
@@ -119,9 +120,9 @@ func keysOf(m map[string]r3.Vector) []string {
 // only its reported pose is aligned to so101.json's.
 func TestURDFGeometryPoseMatchesJSON(t *testing.T) {
 	t.Setenv("VIAM_MODULE_ROOT", testfake.RepoRoot())
-	jsonModel, err := makeSO101ModelFrame("so101")
+	jsonModel, err := geometry.ArmModelJSON("so101")
 	require.NoError(t, err)
-	urdfModel, err := makeSO101Model(true, nil, false, "so101")
+	urdfModel, err := geometry.ArmModel(true, nil, false, "so101")
 	require.NoError(t, err)
 
 	zero := make([]referenceframe.Input, 5)

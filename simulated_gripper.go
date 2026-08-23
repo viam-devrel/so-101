@@ -14,6 +14,8 @@ import (
 	"go.viam.com/rdk/referenceframe"
 	"go.viam.com/rdk/resource"
 	"go.viam.com/rdk/spatialmath"
+
+	"so_arm/internal/geometry"
 )
 
 // SO101SimulatedGripperModel is the model triplet for the hardware-free simulated SO-101 gripper.
@@ -49,13 +51,13 @@ type SO101SimulatedGripperConfig struct {
 
 // Validate ensures the config is valid.
 func (cfg *SO101SimulatedGripperConfig) Validate(path string) ([]string, []string, error) {
-	if cfg.GripperType != "" && cfg.GripperType != leaderGripper && cfg.GripperType != followerGripper {
+	if cfg.GripperType != "" && cfg.GripperType != geometry.LeaderGripper && cfg.GripperType != geometry.FollowerGripper {
 		return nil, nil, fmt.Errorf("gripper_type must be %q or %q, got %q",
-			leaderGripper, followerGripper, cfg.GripperType)
+			geometry.LeaderGripper, geometry.FollowerGripper, cfg.GripperType)
 	}
-	if cfg.MeshDetail != "" && cfg.MeshDetail != highDetail && cfg.MeshDetail != lowDetail {
+	if cfg.MeshDetail != "" && cfg.MeshDetail != geometry.HighDetail && cfg.MeshDetail != geometry.LowDetail {
 		return nil, nil, fmt.Errorf("mesh_detail must be %q or %q, got %q",
-			highDetail, lowDetail, cfg.MeshDetail)
+			geometry.HighDetail, geometry.LowDetail, cfg.MeshDetail)
 	}
 	return nil, nil, nil
 }
@@ -94,15 +96,15 @@ func newSimulatedSO101Gripper(
 
 	gripperType := conf.GripperType
 	if gripperType == "" {
-		gripperType = followerGripper
+		gripperType = geometry.FollowerGripper
 	}
 
 	meshDetail := conf.MeshDetail
 	if meshDetail == "" {
-		meshDetail = lowDetail
+		meshDetail = geometry.LowDetail
 	}
 
-	model, err := buildGripperModel(gripperType, meshDetail, rawConf.ResourceName().ShortName())
+	model, err := geometry.BuildGripperModel(gripperType, meshDetail, rawConf.ResourceName().ShortName())
 	if err != nil {
 		return nil, fmt.Errorf("failed to build gripper kinematic model: %w", err)
 	}
@@ -230,8 +232,8 @@ func (g *simulatedSO101Gripper) Geometries(
 	g.mu.Lock()
 	pct := g.currentPct / 100.0
 	g.mu.Unlock()
-	jawAngle := gripperJointMin + pct*(gripperJointMax-gripperJointMin)
-	return buildGripperMeshes(g.gripperType, g.meshDetail, jawAngle)
+	jawAngle := geometry.GripperJointMin + pct*(geometry.GripperJointMax-geometry.GripperJointMin)
+	return geometry.BuildGripperMeshes(g.gripperType, g.meshDetail, jawAngle)
 }
 
 // Status returns the current status of the resource as a map of key-value pairs.
@@ -267,7 +269,7 @@ func (g *simulatedSO101Gripper) DoCommand(
 }
 
 // Kinematics returns the gripper's static model, whose leaf frame is the TCP between the jaw
-// tips. See buildGripperModel for why the gripper needs one at all.
+// tips. See geometry.BuildGripperModel for why the gripper needs one at all.
 func (g *simulatedSO101Gripper) Kinematics(ctx context.Context) (referenceframe.Model, error) {
 	return g.model, nil
 }

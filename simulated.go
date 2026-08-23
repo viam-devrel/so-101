@@ -16,6 +16,8 @@ import (
 	"go.viam.com/rdk/resource"
 	"go.viam.com/rdk/services/motion"
 	"go.viam.com/rdk/spatialmath"
+
+	"so_arm/internal/geometry"
 )
 
 // SO101SimulatedModel is the model triplet for the hardware-free simulated SO-101 arm.
@@ -177,7 +179,7 @@ func newSimulatedSO101(
 		return nil, err
 	}
 
-	model, err := makeSO101Model(conf.UseURDF, conf.MeshDecimationRatios, conf.VisualizeEEFrame, rawConf.Name)
+	model, err := geometry.ArmModel(conf.UseURDF, conf.MeshDecimationRatios, conf.VisualizeEEFrame, rawConf.Name)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create kinematic model: %w", err)
 	}
@@ -318,7 +320,7 @@ func (s *simulatedSO101) EndPosition(ctx context.Context, extra map[string]inter
 	if err != nil {
 		return nil, err
 	}
-	return computeOOBPosition(s.model, inputs)
+	return geometry.ComputeOOBPosition(s.model, inputs)
 }
 
 // MoveToPosition moves the arm's end effector to the target pose using the motion service.
@@ -468,7 +470,7 @@ func (s *simulatedSO101) Geometries(ctx context.Context, extra map[string]interf
 // Get3DModels returns the SO-101 link meshes for the 3D scene viewer, plus a colored
 // end-effector coordinate-frame marker when visualize_ee_frame is enabled.
 func (s *simulatedSO101) Get3DModels(ctx context.Context, extra map[string]interface{}) (map[string]*commonpb.Mesh, error) {
-	return so101ArmModels(s.visualizeEEFrame), nil
+	return geometry.ArmMeshes(s.visualizeEEFrame), nil
 }
 
 // Status returns the current status of the resource as a map of key-value pairs.

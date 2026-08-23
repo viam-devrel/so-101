@@ -6,6 +6,8 @@ import (
 	"slices"
 
 	"go.viam.com/rdk/logging"
+
+	"so_arm/internal/geometry"
 )
 
 // Servos with a homing offset but untouched position limits read as calibrated (the factory
@@ -40,7 +42,7 @@ const (
 // gripperTravelTicks is the jaw's travel in encoder ticks, derived from the URDF joint limits
 // so it tracks the kinematics.
 func gripperTravelTicks() int {
-	return int(math.Round((gripperJointMax - gripperJointMin) / (2 * math.Pi) * gripperEncoderTicks))
+	return int(math.Round((geometry.GripperJointMax - geometry.GripperJointMin) / (2 * math.Pi) * gripperEncoderTicks))
 }
 
 // gripperRangeIsPlausible judges a recorded range by width, so it catches any too-wide range
