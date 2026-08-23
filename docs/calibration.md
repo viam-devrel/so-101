@@ -29,6 +29,7 @@ _If you have already calibrated the servos on this arm, use the `devrel:so101:di
 | `calibration_file` | string   | Optional     | Path where calibration will be saved. If relative path, uses `$VIAM_MODULE_DATA` directory. Default: `"so101_calibration.json"` |
 | `baudrate`         | int      | Optional     | Serial communication speed. Default: `1000000`                                                                                  |
 | `timeout`          | duration | Optional     | Communication timeout. Default: `"5s"`                                                                                          |
+| `servo_ids`        | []int    | Optional     | Servos to calibrate. Defaults to all six (`[1, 2, 3, 4, 5, 6]`).                                                                 |
 
 ## Communication
 
@@ -111,15 +112,80 @@ Example output:
 | `abort`                 | Cancel calibration                              | Any                          |
 | `reset`                 | Reset to initial state                          | `error`                      |
 
+Each returns `success`, the resulting `state`, and a `message` carrying the next instruction. A full run:
+
+```json
+{ "command": "start" }
+```
+```json
+{ "success": true, "state": "started", "message": "Move each joint to the middle of its range of motion, then call set_homing." }
+```
+
+```json
+{ "command": "set_homing" }
+```
+```json
+{ "success": true, "state": "homing_position", "homing_offsets": { "shoulder_pan": -103, "shoulder_lift": 47 } }
+```
+
+```json
+{ "command": "start_range_recording" }
+```
+```json
+{ "success": true, "state": "range_recording", "message": "Recording. Move all joints through their full ranges." }
+```
+
+```json
+{ "command": "stop_range_recording" }
+```
+```json
+{
+  "success": true,
+  "state": "completed",
+  "samples_collected": 306,
+  "recording_duration": 15.3,
+  "ranges": { "shoulder_pan": { "min": 758, "max": 3292, "range": 2534 } }
+}
+```
+
+```json
+{ "command": "save_calibration" }
+```
+```json
+{ "success": true, "state": "idle", "joints_calibrated": 6, "calibration_file": "/root/.viam/module-data/.../so101_calibration.json" }
+```
+
+`abort` cancels a run from any state; `reset` clears the `error` state. Both take no arguments and
+return the same `success`/`state`/`message` shape:
+
+```json
+{ "command": "abort" }
+```
+```json
+{ "command": "reset" }
+```
+
 ### Utility Commands
 
 | Command                 | Description                  |
 | ----------------------- | ---------------------------- |
 | `get_current_positions` | Read current servo positions |
 
+```json
+{ "command": "get_current_positions" }
+```
+```json
+{
+  "success": true,
+  "positions": {
+    "shoulder_pan": { "servo_id": 1, "raw_position": 2150, "degrees": 9.0, "radians": 0.157 }
+  }
+}
+```
+
 ### Motor Setup Commands
 
-The calibration sensor also provides motor setup commands for initial SO-101 servo configuration. These commands implement the systematic motor setup process described in `MOTOR_SETUP.md` and are separate from the calibration workflow.
+The calibration sensor also provides motor setup commands for initial SO-101 servo configuration. They assign each servo its ID and baudrate for the first time, and are separate from the calibration workflow. See [Motor Setup Workflow](#motor-setup-workflow) below for the order to run them in.
 
 | Command                    | Description                                       | Parameters                                                                             |
 | -------------------------- | ------------------------------------------------- | -------------------------------------------------------------------------------------- |
@@ -128,6 +194,27 @@ The calibration sensor also provides motor setup commands for initial SO-101 ser
 | `motor_setup_verify`       | Verify all SO-101 motors are properly configured  | None                                                                                   |
 | `motor_setup_scan_bus`     | Scan the entire bus for connected servos          | None                                                                                   |
 | `motor_setup_reset_status` | Reset motor setup status                          | None                                                                                   |
+
+`motor_setup_scan_bus` reports every servo answering on the bus, and flags any ID outside the
+expected 1-6 as unexpected:
+
+```json
+{ "command": "motor_setup_scan_bus" }
+```
+```json
+{
+  "success": true,
+  "servos_found": 6,
+  "unexpected_count": 0,
+  "servos": [{ "id": 1, "model": "STS3215", "status": "ok" }]
+}
+```
+
+`motor_setup_reset_status` clears the recorded setup progress and takes no arguments:
+
+```json
+{ "command": "motor_setup_reset_status" }
+```
 
 ### Motor Setup Workflow
 

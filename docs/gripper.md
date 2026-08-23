@@ -121,3 +121,63 @@ Check the status of the serial controller, forwarded from the arm that owns it:
 }
 ```
 
+### Calibrate Positions
+
+Override the open and closed set points the `Open`/`Grab` API calls drive to, as percentages of the calibrated jaw range. Both arguments are optional and each is ignored unless it is within `[0, 100]`; supply one to change only that end. This tunes the component in memory and is not persisted — use the [calibration sensor](calibration.md#model-devrelso101calibration) to write a calibration file.
+
+```json
+{
+  "command": "calibrate_positions",
+  "open_position": 90,
+  "closed_position": 5
+}
+```
+
+Returns the values in effect after the call:
+
+```json
+{
+  "success": true,
+  "open_position": 90,
+  "closed_position": 5
+}
+```
+
+### Set Motion Params
+
+Set the speed and acceleration used for gripper moves. Both arguments are optional and each is ignored unless it is in range — `speed` in `(0, 180]` degrees per second, `acceleration` in `(0, 500]` degrees per second².
+
+```json
+{
+  "command": "set_motion_params",
+  "speed": 60,
+  "acceleration": 300
+}
+```
+
+Returns the values in effect after the call:
+
+```json
+{
+  "success": true,
+  "speed": 60,
+  "acceleration": 300
+}
+```
+
+### Get Motion Params
+
+Read the current gripper speed and acceleration:
+
+```json
+{
+  "command": "get_motion_params"
+}
+```
+
+```json
+{
+  "speed": 60,
+  "acceleration": 300
+}
+```

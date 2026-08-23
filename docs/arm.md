@@ -138,7 +138,25 @@ While manual mode is active, it also reports live per-joint telemetry (`actual_d
 }
 ```
 
-**Tuning diagnostic:** the `set_torque_limit` DoCommand directly writes the `torque_limit` register on every arm servo (with a readback in the response) so you can find the lowest value that still holds the arm before dialing it into `manual_mode`. It takes a `value` (0–1000), requires manual mode to be off, and does not auto-restore — set it back to `1000` (or reinitialize) when done.
+**Tuning diagnostic:** the `set_torque_limit` DoCommand writes the `torque_limit` register directly on every arm servo, so you can find the lowest value that still holds the arm before dialing it into `manual_mode`. It requires manual mode to be off and does **not** auto-restore — set it back to `1000` (or reinitialize) when done.
+
+```json
+{
+  "command": "set_torque_limit",
+  "value": 120
+}
+```
+
+```json
+{
+  "set_torque_limit": 120,
+  "servos": [
+    { "servo": 1, "ok": true },
+    { "servo": 2, "ok": true }
+  ],
+  "note": "diagnostic: restore full torque with value 1000 (or reinitialize) when done"
+}
+```
 
 ## Communication
 
