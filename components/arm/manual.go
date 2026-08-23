@@ -379,3 +379,33 @@ func resolveManualParams(cfg *ManualModeConfig, overrides map[string]interface{}
 	}
 	return p, pGain, torqueLimit
 }
+
+// enterManualLocked starts a manual-mode session. Caller holds s.mu.
+func (s *so101) enterManualLocked(overrides map[string]interface{}) map[string]interface{} {
+	// If already active, tear down first so the new parameters take effect (live re-tuning).
+	// exitManualLocked restores the prior compliance registers before the fresh session
+	// re-applies with the new values.
+	if s.manual != nil && s.manual.running() {
+		s.exitManualLocked("re-enter with new parameters")
+	}
+	var mm *ManualModeConfig
+	if s.cfg != nil {
+		mm = s.cfg.ManualMode
+	}
+	params, pGain, torqueLimit := resolveManualParams(mm, overrides)
+	io := newControllerManualIO(s.controller, s.armServoIDs, s.calculateJointLimits())
+	s.manual = newManualSession(s.cancelCtx, io, params, pGain, torqueLimit, s.logger)
+	s.manual.start()
+	return map[string]interface{}{"mode": "manual", "servos": s.armServoIDs}
+}
+
+// exitManualLocked tears down manual mode if active and holds the current pose.
+// Caller holds s.mu. Safe to call when not active.
+func (s *so101) exitManualLocked(reason string) {
+	if s.manual == nil || !s.manual.running() {
+		return
+	}
+	s.logger.Infof("manual mode exiting: %s", reason)
+	s.manual.stop()
+	s.manual = nil
+}

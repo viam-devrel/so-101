@@ -4,26 +4,10 @@ import (
 	"context"
 	"fmt"
 
-	commonpb "go.viam.com/api/common/v1"
-	"go.viam.com/rdk/referenceframe"
-	"go.viam.com/rdk/spatialmath"
-
 	"so_arm/internal/controller"
-	"so_arm/internal/geometry"
 	"so_arm/internal/servo"
 	"so_arm/internal/servocmd"
 )
-
-func (s *so101) Kinematics(ctx context.Context) (referenceframe.Model, error) {
-	return s.model, nil
-}
-
-// Get3DModels serves the SO-101 link meshes for the 3D scene viewer, plus a colored XYZ
-// coordinate-frame marker at the end-effector when the visualize_ee_frame attribute is
-// enabled.
-func (s *so101) Get3DModels(ctx context.Context, extra map[string]interface{}) (map[string]*commonpb.Mesh, error) {
-	return geometry.ArmMeshes(s.cfg.VisualizeEEFrame), nil
-}
 
 // Status returns the current status of the resource as a map of key-value pairs.
 func (s *so101) Status(ctx context.Context) (map[string]interface{}, error) {
@@ -102,36 +86,6 @@ func (s *so101) setTorqueLimitDiag(ctx context.Context, cmd map[string]interface
 		"servos":           results,
 		"note":             "diagnostic: restore full torque with value 1000 (or reinitialize) when done",
 	}, nil
-}
-
-// enterManualLocked starts a manual-mode session. Caller holds s.mu.
-func (s *so101) enterManualLocked(overrides map[string]interface{}) map[string]interface{} {
-	// If already active, tear down first so the new parameters take effect (live re-tuning).
-	// exitManualLocked restores the prior compliance registers before the fresh session
-	// re-applies with the new values.
-	if s.manual != nil && s.manual.running() {
-		s.exitManualLocked("re-enter with new parameters")
-	}
-	var mm *ManualModeConfig
-	if s.cfg != nil {
-		mm = s.cfg.ManualMode
-	}
-	params, pGain, torqueLimit := resolveManualParams(mm, overrides)
-	io := newControllerManualIO(s.controller, s.armServoIDs, s.calculateJointLimits())
-	s.manual = newManualSession(s.cancelCtx, io, params, pGain, torqueLimit, s.logger)
-	s.manual.start()
-	return map[string]interface{}{"mode": "manual", "servos": s.armServoIDs}
-}
-
-// exitManualLocked tears down manual mode if active and holds the current pose.
-// Caller holds s.mu. Safe to call when not active.
-func (s *so101) exitManualLocked(reason string) {
-	if s.manual == nil || !s.manual.running() {
-		return
-	}
-	s.logger.Infof("manual mode exiting: %s", reason)
-	s.manual.stop()
-	s.manual = nil
 }
 
 func (s *so101) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
@@ -311,16 +265,4 @@ func (s *so101) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[
 
 		return nil, fmt.Errorf("unknown command: %v", cmd)
 	}
-}
-
-func (s *so101) Geometries(ctx context.Context, extra map[string]interface{}) ([]spatialmath.Geometry, error) {
-	inputs, err := s.CurrentInputs(ctx)
-	if err != nil {
-		return nil, err
-	}
-	gif, err := s.model.Geometries(inputs)
-	if err != nil {
-		return nil, err
-	}
-	return gif.Geometries(), nil
 }
