@@ -58,7 +58,7 @@ type SO101SimulatedArmConfig struct {
 	VisualizeEEFrame bool `json:"visualize_ee_frame,omitempty"`
 
 	// UseURDF sources kinematics + mesh collision geometry from the bundled
-	// arm/so101.urdf instead of the embedded so101.json. Requires VIAM_MODULE_ROOT
+	// assets/urdf/so101.urdf instead of the embedded so101.json. Requires VIAM_MODULE_ROOT
 	// (set by viam-server). Lets the simulated arm visualize/test the URDF collision
 	// model and 3D meshes without a physical robot. Default false.
 	UseURDF bool `json:"use_urdf,omitempty"`

@@ -6,6 +6,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.viam.com/rdk/referenceframe"
 	"go.viam.com/rdk/spatialmath"
+
+	"so_arm/internal/testfake"
 )
 
 // TestURDFModelSurvivesSerialization is the guard for the module-boundary bug: a component ships
@@ -19,7 +21,7 @@ import (
 // the exact gRPC (de)serialization and asserts the transmitted model matches the JSON TCP and keeps
 // its meshes. Do NOT weaken it to an in-process Transform check -- the boundary is the whole point.
 func TestURDFModelSurvivesSerialization(t *testing.T) {
-	t.Setenv("VIAM_MODULE_ROOT", ".")
+	t.Setenv("VIAM_MODULE_ROOT", testfake.RepoRoot())
 
 	roundTrip := func(t *testing.T, m referenceframe.Model) referenceframe.Model {
 		t.Helper()

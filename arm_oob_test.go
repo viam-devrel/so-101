@@ -6,6 +6,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.viam.com/rdk/referenceframe"
 	"go.viam.com/rdk/spatialmath"
+
+	"so_arm/internal/testfake"
 )
 
 // TestComputeOOBPositionFullChain guards against the rdk v0.123 regression where
@@ -21,7 +23,7 @@ func TestComputeOOBPositionFullChain(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			if useURDF {
-				t.Setenv("VIAM_MODULE_ROOT", ".")
+				t.Setenv("VIAM_MODULE_ROOT", testfake.RepoRoot())
 			}
 			model, err := makeSO101Model(useURDF, nil, false, "oob-test")
 			require.NoError(t, err)

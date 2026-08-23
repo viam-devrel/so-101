@@ -6,11 +6,13 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.viam.com/rdk/referenceframe"
 	"go.viam.com/rdk/spatialmath"
+
+	"so_arm/internal/testfake"
 )
 
 // worldPosesForInputs walks a ModelConfigJSON's links and joints (as produced by both
 // UnmarshalModelJSON/ParseConfig for so101.json and UnmarshalModelXML/ParseModelXMLFile for
-// arm/so101.urdf -- both kinematic sources funnel through the same SVA ModelConfigJSON
+// assets/urdf/so101.urdf -- both kinematic sources funnel through the same SVA ModelConfigJSON
 // representation) and returns the world-frame pose of every named link/joint frame, given a
 // map of joint-frame-ID -> radian value. Joint frames not present in jointRadians (e.g. fixed
 // joints folded into links) transform with a zero input. This mirrors the technique in
@@ -71,7 +73,7 @@ func worldPosesForInputs(t *testing.T, cfg *referenceframe.ModelConfigJSON, join
 // model.DoF()) into a map keyed by the model's own joint-frame IDs, using SimpleModel's
 // exported MoveableFrameNames() (schema order == DoF order). This is required because the
 // underlying ModelConfigJSON.Joints slice order differs between the two sources: so101.json
-// lists joints "1".."5" already base-to-tip, but arm/so101.urdf's XML document order is
+// lists joints "1".."5" already base-to-tip, but assets/urdf/so101.urdf's XML document order is
 // tip-to-base (joints "5","4","3","2","1") -- relying on slice order would silently pair the
 // wrong joints across models.
 func jointRadiansByChainOrder(t *testing.T, m referenceframe.Model, values []float64) map[string]float64 {
@@ -98,11 +100,11 @@ func toInputs(values []float64) []referenceframe.Input {
 // TestURDFExposesJSONFrameNames is the drop-in guard: use_urdf must expose the exact same
 // frame-system frame names as the default JSON arm, so any config that references an arm frame
 // by name (a gripper, camera, or obstacle parented to an arm link) keeps resolving when
-// use_urdf is toggled. arm/so101.urdf therefore uses so101.json's names directly (base/1/...,
+// use_urdf is toggled. assets/urdf/so101.urdf therefore uses so101.json's names directly (base/1/...,
 // not base_link/shoulder_pan/...); the upstream names would silently detach such children toward
 // the world origin. Covers moveable (joint) frames, link geometry labels, and the tool leaf.
 func TestURDFExposesJSONFrameNames(t *testing.T) {
-	t.Setenv("VIAM_MODULE_ROOT", ".")
+	t.Setenv("VIAM_MODULE_ROOT", testfake.RepoRoot())
 
 	jsonModel, err := makeSO101ModelFrame("so101")
 	require.NoError(t, err)
@@ -127,7 +129,7 @@ func TestURDFExposesJSONFrameNames(t *testing.T) {
 		"URDF geometry frame labels must match JSON's exactly")
 }
 
-// TestURDFvsJSONFrameAlignment proves that so101.json's SVA kinematics and arm/so101.urdf agree,
+// TestURDFvsJSONFrameAlignment proves that so101.json's SVA kinematics and assets/urdf/so101.urdf agree,
 // per-frame, across a range of joint configurations -- for every arm link AND the "tool" TCP
 // frame. This is the guard referenced by so101ArmMeshParts' doc comment (meshes.go): it makes it
 // safe to key the same bundled link GLBs by the shared frame names, and it proves the URDF's
@@ -136,7 +138,7 @@ func TestURDFExposesJSONFrameNames(t *testing.T) {
 // two kinematic sources have drifted apart -- do NOT loosen the tolerances here to force a pass;
 // stop and report the deltas instead.
 func TestURDFvsJSONFrameAlignment(t *testing.T) {
-	t.Setenv("VIAM_MODULE_ROOT", ".")
+	t.Setenv("VIAM_MODULE_ROOT", testfake.RepoRoot())
 
 	jsonModel, err := makeSO101ModelFrame("so101")
 	require.NoError(t, err)
@@ -180,7 +182,7 @@ func TestURDFvsJSONFrameAlignment(t *testing.T) {
 	}
 
 	// Frame-name correspondence: the URDF model renames its frames to so101.json's names
-	// (arm/so101.urdf uses so101.json's names), so the JSON and URDF frames pair up by identical
+	// (assets/urdf/so101.urdf uses so101.json's names), so the JSON and URDF frames pair up by identical
 	// name. "tool" is the load-bearing end-effector / TCP pair -- both models use the exact
 	// same LinkConfig for it (see makeSO101ModelURDF), so this aligns almost exactly.
 	pairs := [][2]string{

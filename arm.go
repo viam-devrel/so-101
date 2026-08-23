@@ -28,7 +28,7 @@ var (
 	SO101Model = resource.NewModel("devrel", "so101", "arm")
 )
 
-//go:embed so101.json
+//go:embed internal/geometry/so101.json
 var so101ModelJson []byte
 
 // computeOOBPosition takes a frame and a slice of Inputs and returns the cartesian position of
@@ -88,7 +88,7 @@ type SO101ArmConfig struct {
 	VisualizeEEFrame bool `json:"visualize_ee_frame,omitempty"`
 
 	// UseURDF sources kinematics + mesh collision geometry from the bundled
-	// arm/so101.urdf instead of the embedded so101.json. Requires VIAM_MODULE_ROOT
+	// assets/urdf/so101.urdf instead of the embedded so101.json. Requires VIAM_MODULE_ROOT
 	// (set by viam-server). Default false.
 	UseURDF bool `json:"use_urdf,omitempty"`
 	// MeshDecimationRatios is the per-collision-mesh simplification ratio in [0,1],
@@ -277,7 +277,7 @@ func makeSO101ModelFrameWithEEMarker(resourceName string) (referenceframe.Model,
 }
 
 // makeModelFrame builds the SO-101 kinematic model from either the embedded so101.json
-// (default) or the bundled arm/so101.urdf (when cfg.UseURDF). On the JSON path, when
+// (default) or the bundled assets/urdf/so101.urdf (when cfg.UseURDF). On the JSON path, when
 // visualize_ee_frame is set the "tool" link gets a placeholder geometry so the viewer
 // draws the EE marker (see makeSO101ModelFrameWithEEMarker). VisualizeEEFrame's placeholder
 // handling under URDF mode is deferred to a later task (frame-alignment), so it is not
@@ -287,7 +287,7 @@ func makeModelFrame(cfg *SO101ArmConfig, name string) (referenceframe.Model, err
 }
 
 // makeSO101Model builds the SO-101 kinematic model from either the embedded so101.json
-// (default) or the bundled arm/so101.urdf (when useURDF). Shared by the hardware and
+// (default) or the bundled assets/urdf/so101.urdf (when useURDF). Shared by the hardware and
 // simulated arms. See makeModelFrame for the JSON/URDF and VisualizeEEFrame semantics.
 func makeSO101Model(useURDF bool, ratios []float64, visualizeEE bool, name string) (referenceframe.Model, error) {
 	if !useURDF {
@@ -303,19 +303,19 @@ func makeSO101Model(useURDF bool, ratios []float64, visualizeEE bool, name strin
 // wrist, 5 total, in document order). The RDK URDF parser assigns mesh_decimation_ratios per mesh
 // in that order, so the default fills one ratio per mesh. 0.9 is a light default (keep ~90% of
 // triangles) that trims the dense merged meshes without the sliver artifacts more aggressive
-// ratios produced (see arm/gen_collision_meshes.py).
+// ratios produced (see tools/gen_collision_meshes.py).
 const (
 	numSO101CollisionMeshes = 5
 	defaultMeshDecimation   = 0.9
 )
 
-// makeSO101ModelURDF builds the SO-101 model from arm/so101.urdf. The URDF is authored so its
+// makeSO101ModelURDF builds the SO-101 model from assets/urdf/so101.urdf. The URDF is authored so its
 // raw form is already a drop-in for so101.json: so101.json's frame names (base, shoulder,
 // upper_arm, lower_arm, wrist; joints 1-5) and its "tool" TCP (joint-5 output + 180deg flip),
 // with only the collision geometry differing (per-link meshes vs so101.json's primitives). This
 // correctness has to live in the file itself, not in an in-memory patch, because a component
 // ships its kinematics to viam-server as ModelConfig().OriginalFile.Bytes -- this raw URDF --
-// and in-memory edits would be lost across the module gRPC boundary (see the arm/so101.urdf
+// and in-memory edits would be lost across the module gRPC boundary (see the assets/urdf/so101.urdf
 // header and TestURDFModelSurvivesSerialization). Returning the parsed URDF lets it transmit AS
 // URDF, with meshes sent separately, which is a much smaller kinematics payload than embedding
 // them in SVA JSON.
@@ -331,7 +331,7 @@ func makeSO101ModelURDF(ratios []float64, visualizeEE bool, name string) (refere
 	if root == "" {
 		return nil, errors.New("use_urdf is set but VIAM_MODULE_ROOT is empty")
 	}
-	path := filepath.Join(root, "arm", "so101.urdf")
+	path := filepath.Join(root, "assets", "urdf", "so101.urdf")
 	// The RDK URDF parser assigns mesh_decimation_ratios per collision mesh in document order
 	// (base/shoulder/upper_arm/lower_arm/wrist), so an empty or short slice would leave trailing
 	// meshes undecimated. When the user supplies none, default every mesh to defaultMeshDecimation.

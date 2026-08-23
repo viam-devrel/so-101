@@ -12,6 +12,8 @@ import (
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/referenceframe"
 	"go.viam.com/rdk/resource"
+
+	"so_arm/internal/testfake"
 )
 
 // newTestSimArm constructs a simulated SO-101 with the simulated clock disabled, so tests
@@ -81,7 +83,7 @@ func TestSimulatedConfigValidateMeshRatios(t *testing.T) {
 }
 
 func TestSimulatedUseURDF(t *testing.T) {
-	t.Setenv("VIAM_MODULE_ROOT", ".")
+	t.Setenv("VIAM_MODULE_ROOT", testfake.RepoRoot())
 	simulateTime := false
 	conf := resource.Config{
 		Name: "urdfSimArm", API: arm.API, Model: SO101SimulatedModel,

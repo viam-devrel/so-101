@@ -5,12 +5,14 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"go.viam.com/rdk/referenceframe"
+
+	"so_arm/internal/testfake"
 )
 
 func TestMakeModelFrameURDF(t *testing.T) {
-	// URDF path: VIAM_MODULE_ROOT resolves arm/so101.urdf. During `go test .` the
-	// working dir is the package dir (repo root), so "." locates the arm/ assets.
-	t.Setenv("VIAM_MODULE_ROOT", ".")
+	// URDF path: VIAM_MODULE_ROOT resolves assets/urdf/so101.urdf. testfake.RepoRoot()
+	// locates the repo root regardless of the test package's working directory.
+	t.Setenv("VIAM_MODULE_ROOT", testfake.RepoRoot())
 	m, err := makeModelFrame(&SO101ArmConfig{UseURDF: true}, "so101")
 	require.NoError(t, err)
 	require.Equal(t, 5, len(m.DoF()))
@@ -30,7 +32,7 @@ func TestMakeModelFrameURDF(t *testing.T) {
 // grafted "tool" leaf gains the placeholder box geometry so the viewer draws the EE marker,
 // exactly as on the JSON path.
 func TestMakeSO101ModelURDFVisualizeEE(t *testing.T) {
-	t.Setenv("VIAM_MODULE_ROOT", ".")
+	t.Setenv("VIAM_MODULE_ROOT", testfake.RepoRoot())
 	inputsGeoms := func(m referenceframe.Model) int {
 		g, err := m.Geometries(make([]referenceframe.Input, len(m.DoF())))
 		require.NoError(t, err)

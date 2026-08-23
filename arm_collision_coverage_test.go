@@ -8,6 +8,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.viam.com/rdk/referenceframe"
 	"go.viam.com/rdk/spatialmath"
+
+	"so_arm/internal/testfake"
 )
 
 // aabbExtents returns the axis-aligned bounding-box side lengths (world frame) of a geometry's
@@ -40,12 +42,12 @@ func aabbExtents(g spatialmath.Geometry) r3.Vector {
 // TestURDFCollisionCoversWholeLink guards against the "only Collision[0] survives" defect: rdk's
 // URDF parser keeps a single <collision> element per link (model_urdf.go), so a link authored as a
 // multi-part assembly (as the upstream SO-ARM100 meshes are) would otherwise contribute only one
-// sub-part's mesh -- a fragment offset within the link. arm/so101.urdf therefore ships ONE merged
-// collision mesh per link (arm/gen_collision_meshes.py). This test asserts each URDF-mode link's
+// sub-part's mesh -- a fragment offset within the link. assets/urdf/so101.urdf therefore ships ONE merged
+// collision mesh per link (tools/gen_collision_meshes.py). This test asserts each URDF-mode link's
 // collision geometry spans essentially the same extent as the JSON-mode primitive for that link
 // (the JSON boxes were fit to the same full-link bounds), which a lone sub-part mesh cannot do.
 func TestURDFCollisionCoversWholeLink(t *testing.T) {
-	t.Setenv("VIAM_MODULE_ROOT", ".")
+	t.Setenv("VIAM_MODULE_ROOT", testfake.RepoRoot())
 
 	jsonModel, err := makeSO101ModelFrame("so101")
 	require.NoError(t, err)
@@ -69,7 +71,7 @@ func TestURDFCollisionCoversWholeLink(t *testing.T) {
 	uExt := byLabelExtent(urdfGeoms)
 
 	// JSON label <-> URDF label per link. The URDF model renames its frames to so101.json's
-	// names (arm/so101.urdf uses so101.json's link names), so the geometry labels are identical between modes.
+	// names (assets/urdf/so101.urdf uses so101.json's link names), so the geometry labels are identical between modes.
 	pairs := [][2]string{
 		{"so101:base", "so101:base"},
 		{"so101:shoulder", "so101:shoulder"},
@@ -111,12 +113,12 @@ func keysOf(m map[string]r3.Vector) []string {
 // GLB serves both kinematic sources (so101ArmMeshParts). so101.json's per-link geometry is a
 // primitive box with a translation offset, so the URDF collision mesh must share that exact
 // geometry pose or the GLBs scatter by the box offsets (tens of mm/link) under use_urdf. The
-// merged meshes are generated relative to the box pose and arm/so101.urdf carries the matching
-// <collision><origin> (see arm/gen_collision_meshes.py, URDF_TO_JSON_LINK). This asserts the two
+// merged meshes are generated relative to the box pose and assets/urdf/so101.urdf carries the matching
+// <collision><origin> (see tools/gen_collision_meshes.py, URDF_TO_JSON_LINK). This asserts the two
 // sources agree per link; the collision *shape* is unchanged (TestURDFCollisionCoversWholeLink),
 // only its reported pose is aligned to so101.json's.
 func TestURDFGeometryPoseMatchesJSON(t *testing.T) {
-	t.Setenv("VIAM_MODULE_ROOT", ".")
+	t.Setenv("VIAM_MODULE_ROOT", testfake.RepoRoot())
 	jsonModel, err := makeSO101ModelFrame("so101")
 	require.NoError(t, err)
 	urdfModel, err := makeSO101Model(true, nil, false, "so101")

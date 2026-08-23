@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the SO-101 gripper meshes in meshes/gripper/ as ASCII PLY.
+"""Generate the SO-101 gripper meshes in internal/geometry/meshes/gripper/ as ASCII PLY.
 
 Source: TheRobotStudio/SO-ARM100 (Apache-2.0). The follower meshes come from the
 SO-101 simulation assets (already in the URDF assembly frame); the leader meshes
@@ -7,14 +7,14 @@ come from the printable STLs. Each binary STL is welded + grid-decimated and
 written as ASCII PLY -- rdk's spatialmath.NewMeshFromProto accepts ASCII PLY only,
 and the gripper component serves these via Geometries() as spatialmath.Mesh.
 
-Each mesh is written at two detail levels -- meshes/gripper/high/ and
-meshes/gripper/low/ -- chosen at runtime by the gripper's mesh_detail attribute.
-The gripper mesh doubles as the motion-planning collision geometry, so "low" is
-the responsive default and "high" is for visual comparison.
+Each mesh is written at two detail levels -- internal/geometry/meshes/gripper/high/
+and internal/geometry/meshes/gripper/low/ -- chosen at runtime by the gripper's
+mesh_detail attribute. The gripper mesh doubles as the motion-planning collision
+geometry, so "low" is the responsive default and "high" is for visual comparison.
 
 PLY vertices are kept in METERS (rdk's PLY reader scales x1000 to millimeters).
 
-Run from the repo root:  python3 meshes/gen_gripper_meshes.py
+Run from the repo root:  python3 tools/gen_gripper_meshes.py
 """
 import os
 import struct
@@ -83,7 +83,10 @@ def write_ascii_ply(path, verts, faces):
 
 
 def main():
-    base_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gripper")
+    base_dir = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), os.pardir,
+        "internal", "geometry", "meshes", "gripper",
+    )
     for name, (url, scale) in MESHES.items():
         with urllib.request.urlopen(url) as resp:
             stl = resp.read()

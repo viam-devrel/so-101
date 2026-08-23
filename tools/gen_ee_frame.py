@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Generate meshes/so101/ee_frame.glb -- a colored XYZ coordinate-frame marker
-for the SO-101 end-effector.
+"""Generate internal/geometry/meshes/so101/ee_frame.glb -- a colored XYZ
+coordinate-frame marker for the SO-101 end-effector.
 
 The marker is a grey origin cube plus three axis bars. Axis colors follow the
 viam-labs/viam-viz-helpers-go CoordinateFrame defaults (X=red, Y=green, Z=blue).
 The arm's Get3DModels serves this mesh at the "tool" frame when the
 visualize_ee_frame attribute is enabled.
 
-Run from the repo root:  python3 meshes/gen_ee_frame.py
+Run from the repo root:  python3 tools/gen_ee_frame.py
 """
 import json
 import os
@@ -128,7 +128,10 @@ glb += struct.pack("<III", 0x46546C67, 2, 12 + 8 + len(json_bytes) + 8 + len(buf
 glb += struct.pack("<II", len(json_bytes), 0x4E4F534A) + json_bytes
 glb += struct.pack("<II", len(buf), 0x004E4942) + bytes(buf)
 
-out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "so101", "ee_frame.glb")
+out = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), os.pardir,
+    "internal", "geometry", "meshes", "so101", "ee_frame.glb",
+)
 with open(out, "wb") as f:
     f.write(glb)
 print(f"wrote {out}: {len(glb)} bytes")
