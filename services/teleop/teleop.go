@@ -1,4 +1,5 @@
-// teleop.go
+// Package teleop implements devrel:so101:teleop, which mirrors a leader arm's joint
+// positions and gripper onto a follower arm for hand-guided teleoperation.
 package teleop
 
 import (

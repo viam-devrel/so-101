@@ -1,4 +1,3 @@
-// discovery_test.go
 package discovery
 
 import (

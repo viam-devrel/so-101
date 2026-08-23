@@ -1,5 +1,3 @@
-// Motor Setup Functions - separate from calibration workflow
-// These implement the systematic motor setup process described in MOTOR_SETUP.md
 package calibration
 
 import (

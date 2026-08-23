@@ -1,4 +1,7 @@
-// calibration_sensor.go - SO-101 Calibration Sensor Component
+// Package calibration implements devrel:so101:calibration, the sensor that runs the
+// SO-101 homing and range-recording workflow over DoCommand and persists the result
+// as a calibration file. Split across sensor.go (registration, state, dispatch),
+// workflow.go (the workflow steps), and motorsetup.go (servo ID/baud assignment).
 package calibration
 
 import (

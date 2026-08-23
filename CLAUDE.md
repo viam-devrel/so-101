@@ -5,83 +5,117 @@
 Go module `so_arm`, Go 1.25, `go.viam.com/rdk v1.0.0`. It can drive either the leader or
 the follower arm, or both as separate components for mirrored teleoperation.
 
-## Models
+## Layout
 
-| Model | API | File | Notes |
-|---|---|---|---|
-| `devrel:so101:arm` | arm | `arm.go` | Hardware arm — 5-DOF, servos 1-5 |
-| `devrel:so101:simulated` | arm | `simulated.go` | Hardware-free arm; time-interpolated joint motion |
-| `devrel:so101:gripper` | gripper | `gripper.go` | Hardware gripper — servo 6 |
-| `devrel:so101:simulated-gripper` | gripper | `simulated_gripper.go` | Hardware-free gripper; time-interpolated open/close |
-| `devrel:so101:calibration` | sensor | `calibration.go` | Servo-calibration workflow (state machine) |
-| `devrel:so101:discovery` | service | `discovery.go` | Auto-detects connected SO-101 components |
+```
+cmd/module/            entrypoint; registers all seven models
+components/arm/        devrel:so101:arm          — hardware arm, servos 1-5
+components/gripper/    devrel:so101:gripper      — hardware gripper, servo 6
+components/calibration/devrel:so101:calibration  — calibration sensor workflow
+components/simulated/  devrel:so101:simulated + :simulated-gripper
+services/teleop/       devrel:so101:teleop
+services/discovery/    devrel:so101:discovery
+internal/controller/   ref-counted shared serial bus (registry, manager, bus session,
+                       calibration file I/O, gripper travel guard)
+internal/servo/        servo primitives: MotorCalibration, CalibratedServo,
+                       degree<->tick conversion, coordinated-arrival profiles
+internal/geometry/     kinematic model builders + all embedded assets
+internal/planning/     approach-axis goal clouds
+internal/servocmd/     the servo_* DoCommand wire protocol
+internal/testfake/     test doubles shared across package boundaries
+assets/urdf/           runtime-loaded URDF + collision meshes + SO-ARM100 license
+tools/                 mesh/URDF generator scripts
+docs/                  one file per model; README.md is an index
+```
 
-All models register in `cmd/module/main.go`. Per-model config attributes are documented
-in `README.md` (one `## Model …` section each).
+**Dependency rule:** `internal/*` never imports `components/*` or `services/*`.
+`components/gripper` does not import `components/arm` (it reaches the arm through the
+`servocmd` DoCommand protocol, which may cross gRPC to a remote arm).
+`components/simulated` imports neither hardware component. `internal/servocmd` imports
+nothing else in the module — its `ServoOps` is deliberately a *structural* interface that
+`*controller.ControllerHandle` satisfies implicitly, so no import edge exists.
+
+Per-model config attributes are documented in `docs/<model>.md`, one file per model, linked
+from `README.md` and from `meta.json`'s per-model `markdown_link` fields.
 
 ## Hardware architecture
 
 - The SO-101 has 6 servos on one serial bus: the **arm uses servos 1-5**, the **gripper
   uses servo 6**. The arm and gripper components therefore need the *same* serial port.
-- The **shared controller** (`registry.go`, `manager.go`, `bus_session.go`,
-  `calibrated_servo.go`) is ref-counted — `AcquireController` / `handle.Release()` — so
-  every component on one SO-101 shares a single serial connection instead of contending for
-  the port. A `ControllerEntry` owns the port: it holds the open bus in a `busSession`, the
-  one calibration all servos normalize through, the reference count, and the mutex that
-  serializes bus work. Components hold a `ControllerHandle`, which reaches the bus only
-  through that entry. The last `Release()` closes the port and evicts the entry.
-- **Calibration** (`config.go`): priority is calibration file → servo registers →
-  hardcoded defaults. The `devrel:so101:calibration` sensor runs a homing / range-recording
-  workflow via `DoCommand` and persists calibration files.
-- **Discovery** (`discovery.go`): enumerates serial ports, pings servos 1 and 6 to detect
-  which components are present, and suggests configs.
-- **Simulated models** (`simulated.go`, `simulated_gripper.go`) use none of the above —
-  no controller, no serial port — and exist for developing, testing, and visualizing
-  without a physical robot.
+- The **shared controller** (`internal/controller`) is ref-counted —
+  `AcquireController` / `handle.Release()` — so every component on one SO-101 shares a
+  single serial connection instead of contending for the port. A `ControllerEntry` owns the
+  port: it holds the open bus in a `busSession`, the one calibration all servos normalize
+  through, the reference count, and the mutex that serializes bus work. Components hold a
+  `ControllerHandle`, which reaches the bus only through that entry. The last `Release()`
+  closes the port and evicts the entry.
+- **Calibration**: priority is calibration file → servo registers → hardcoded defaults.
+  The `devrel:so101:calibration` sensor runs a homing / range-recording workflow via
+  `DoCommand` and persists calibration files.
+- **Discovery** enumerates serial ports, pings servos 1 and 6 to detect which components
+  are present, and suggests configs. It imports the three hardware component packages for
+  their model vars.
+- **Simulated models** use none of the above — no controller, no serial port — and exist
+  for developing, testing, and visualizing without a physical robot.
 
 ## Kinematics & meshes
 
-- `so101.json` — SVA kinematics, `//go:embed`-ed, shared by both arm models. Derived from
-  TheRobotStudio/SO-ARM100's URDF; its `tool` link is the end-effector (TCP) frame. This is
-  the default kinematic source for both arm models.
-- `arm/so101.urdf` — the alternate kinematic source, used when an arm model's `use_urdf`
-  config attribute is set. Vendored from TheRobotStudio/SO-ARM100 (Apache-2.0, see
-  `arm/SO-ARM100-LICENSE`), trimmed to the arm-only 5-DOF chain (servos 1-5). Each of the 5
-  arm links carries **one merged collision mesh** (`arm/meshes/<link>_collision.stl`, ~88k
-  tris / 4.2 MB total): rdk's URDF parser keeps only the *first* `<collision>` per link
-  (`referenceframe/model_urdf.go`), but the upstream links are multi-part assemblies, so
-  `arm/gen_collision_meshes.py` bakes every sub-part's `<collision>` origin into its vertices
-  and concatenates them per link into a single mesh — otherwise a lone offset sub-part would
-  survive per link (see `arm_collision_coverage_test.go`). Each mesh is generated relative to
-  so101.json's per-link box pose, with a matching `<collision><origin>` in the URDF, so the
-  geometry pose equals so101.json's — the 3D viewer places each Get3DModels GLB at the link's
-  *geometry* pose, so without this the shared GLBs scatter by the box offsets under `use_urdf`
-  (see `TestURDFGeometryPoseMatchesJSON`). Printable parts use the optimized `STL/SO101/Individual`
-  print files (scaled mm→m; same local frame as the sim meshes); the servo body comes from
-  `Simulation/SO101/assets` decimated to ~3k tris. The merged mesh is not decimated offline (that
-  created sliver artifacts); instead `mesh_decimation_ratios` defaults to `0.9` per link (a light
-  keep-~90% trim) when empty — `makeSO101ModelURDF` fills `numSO101CollisionMeshes` (5) copies of
-  `defaultMeshDecimation` so no trailing mesh is left at full resolution (aggressive ratios reintroduced
-  the slivers, hence 0.9). The URDF is authored to be a true drop-in for
-  `so101.json` **in the file itself** — its links/joints use so101.json's names (`base`,
-  `shoulder`, …; joints `1`-`5`) and it ends at a `tool` leaf at so101.json's TCP (joint-5
-  output + 180° flip, via a `tool_mount`+`tool_joint` pair). This has to be baked into the file
-  rather than patched in memory because the model ships to viam-server as the raw URDF bytes
-  (see the module-boundary gotcha below); guarded by `TestURDFvsJSONFrameAlignment`,
-  `TestURDFExposesJSONFrameNames`, and `TestURDFModelSurvivesSerialization`. So `use_urdf` is a
-  true drop-in: identical kinematics/TCP **and** frame names as the JSON model — only the
-  collision geometry changes (per-link meshes vs so101.json's primitives). `makeSO101ModelURDF`
-  therefore just parses the URDF; it only re-serializes to SVA JSON for `visualize_ee_frame`
-  (to carry the tool's placeholder marker box across the wire). Assets ship under `arm/` in
-  `module.tar.gz` and are located at runtime via `VIAM_MODULE_ROOT`.
-- `meshes/so101/*.glb` — arm-link meshes (Draco GLB) + `ee_frame.glb` (the colored EE
-  coordinate-frame marker). Served via the arm's `Get3DModels`. `visualize_ee_frame` works
-  in both JSON and URDF modes, since both end at a `tool` frame that gets the same EE-marker
-  placeholder box either way.
-- `meshes/gripper/*.ply` — gripper meshes (ASCII PLY — rdk's `spatialmath.Mesh` reads PLY
-  only, not GLB). Served via the gripper's `Geometries()` as `spatialmath.Mesh`.
-- Asset generators: `meshes/gen_ee_frame.py`, `meshes/gen_gripper_meshes.py`. Meshes are
-  authored in **meters** (the viewer scales to the millimeter kinematics).
+All kinematic model construction and mesh handling lives in `internal/geometry`, shared by
+both arm models and both gripper models.
+
+- `internal/geometry/so101.json` — SVA kinematics, `//go:embed`-ed. Derived from
+  TheRobotStudio/SO-ARM100's URDF; its `tool` link is the end-effector (TCP) frame. The
+  default kinematic source for both arm models.
+- `assets/urdf/so101.urdf` — the alternate kinematic source, used when an arm model's
+  `use_urdf` config attribute is set. Vendored from TheRobotStudio/SO-ARM100 (Apache-2.0,
+  see `assets/urdf/SO-ARM100-LICENSE`), trimmed to the arm-only 5-DOF chain (servos 1-5).
+  Each of the 5 arm links carries **one merged collision mesh**
+  (`assets/urdf/meshes/<link>_collision.stl`, ~88k tris / 4.2 MB total): rdk's URDF parser
+  keeps only the *first* `<collision>` per link (`referenceframe/model_urdf.go`), but the
+  upstream links are multi-part assemblies, so `tools/gen_collision_meshes.py` bakes every
+  sub-part's `<collision>` origin into its vertices and concatenates them per link into a
+  single mesh — otherwise a lone offset sub-part would survive per link (see
+  `collision_coverage_test.go`). Each mesh is generated relative to so101.json's per-link
+  box pose, with a matching `<collision><origin>` in the URDF, so the geometry pose equals
+  so101.json's — the 3D viewer places each Get3DModels GLB at the link's *geometry* pose, so
+  without this the shared GLBs scatter by the box offsets under `use_urdf` (see
+  `TestURDFGeometryPoseMatchesJSON`). Printable parts use the optimized
+  `STL/SO101/Individual` print files (scaled mm→m; same local frame as the sim meshes); the
+  servo body comes from `Simulation/SO101/assets` decimated to ~3k tris. The merged mesh is
+  not decimated offline (that created sliver artifacts); instead `mesh_decimation_ratios`
+  defaults to `0.9` per link (a light keep-~90% trim) when empty — `armModelURDF` fills
+  `numCollisionMeshes` (5) copies of `defaultMeshDecimation` so no trailing mesh is left at
+  full resolution (aggressive ratios reintroduced the slivers, hence 0.9). The URDF is
+  authored to be a true drop-in for so101.json **in the file itself** — its links/joints use
+  so101.json's names (`base`, `shoulder`, …; joints `1`-`5`) and it ends at a `tool` leaf at
+  so101.json's TCP (joint-5 output + 180° flip, via a `tool_mount`+`tool_joint` pair). This
+  has to be baked into the file rather than patched in memory because the model ships to
+  viam-server as the raw URDF bytes (see the module-boundary gotcha below); guarded by
+  `TestURDFvsJSONFrameAlignment`, `TestURDFExposesJSONFrameNames`, and
+  `TestURDFModelSurvivesSerialization`. So `use_urdf` is a true drop-in: identical
+  kinematics/TCP **and** frame names as the JSON model — only the collision geometry changes
+  (per-link meshes vs so101.json's primitives). `armModelURDF` therefore just parses the
+  URDF; it only re-serializes to SVA JSON for `visualize_ee_frame` (to carry the tool's
+  placeholder marker box across the wire).
+- `internal/geometry/meshes/so101/*.glb` — arm-link meshes (Draco GLB) + `ee_frame.glb`
+  (the colored EE coordinate-frame marker). Served via the arm's `Get3DModels`.
+  `visualize_ee_frame` works in both JSON and URDF modes, since both end at a `tool` frame
+  that gets the same EE-marker placeholder box either way.
+- `internal/geometry/meshes/gripper/*.ply` — gripper meshes (ASCII PLY — rdk's
+  `spatialmath.Mesh` reads PLY only, not GLB). Served via the gripper's `Geometries()`.
+- Asset generators live in `tools/`. Meshes are authored in **meters** (the viewer scales
+  to the millimeter kinematics).
+
+**Two asset classes, opposite constraints.** Embedded assets (`so101.json`, `meshes/`) are
+compiled in and must live inside `internal/geometry`, since a `//go:embed` pattern cannot
+traverse `..` upward (it *can* descend into a subdirectory that is itself a package).
+Runtime-loaded assets (`assets/urdf/`) are read via
+`filepath.Join(os.Getenv("VIAM_MODULE_ROOT"), "assets", "urdf", ...)`; `VIAM_MODULE_ROOT` is
+the *tarball* unpack root, so that path is stable relative to the tarball and independent of
+Go package layout. **When an `//go:embed` directive changes, its `embed.FS.ReadFile` path
+string must change in lockstep** — the FS's internal paths mirror the directive exactly, and
+a mismatch compiles cleanly and fails only at runtime (`gripperMeshPLY` is the one such
+call; `TestBuildGripperMeshes` covers it).
 
 ## setup-app
 
@@ -90,10 +124,13 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
 
 ## Build & release
 
-- `make bin/arm` — builds just the Go module binary. Embedded assets (`so101.json`,
-  `meshes/`) are listed in the target's prerequisites, so mesh-only edits trigger a rebuild.
+- `make bin/arm` — builds just the Go module binary. `GO_SRC`, `EMBEDS`, and
+  `RUNTIME_ASSETS` are computed with `$(shell find ...)`, guarded by `$(if ...,$(error ...))`
+  — `find` on a missing directory prints to stderr and **exits 0**, so without the guards a
+  moved directory would silently yield an empty prerequisite list and stop triggering
+  rebuilds.
 - `make module.tar.gz` — the full module, including the `setup-app` build. `setup.sh`
-  installs mise + Node 22 + pnpm for this.
+  installs mise + Node 22 + pnpm for this. The tar excludes `.DS_Store` and ships `assets/`.
 - Release: publishing a GitHub release runs `.github/workflows/deploy.yml` →
   `viamrobotics/build-action`, which builds for darwin/arm64 + linux/{amd64,arm64} and
   uploads the version to the Viam registry.
@@ -102,8 +139,10 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
 
 - Build/test with `go test ./...` (the Makefile `test` target).
 - Lint/format with `gofmt -s -w .` (the Makefile `lint` target); also run `go vet`.
-- `enumerateSerialPorts` returns a non-nil empty slice when no ports are present, so
-  `TestEnumerateSerialPorts` passes on machines with no serial hardware.
+- Tests that need `VIAM_MODULE_ROOT` must use `testfake.RepoRoot()`, never `"."` — tests run
+  from their own package directory, not the repo root.
+- `go build ./...` drops a stray binary named `module` at the repo root (Go names it after
+  `cmd/module`'s directory). It is gitignored.
 
 ## Gotchas
 
@@ -115,33 +154,32 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
   One mutex serializes individual operations, so their transactions cannot interleave, but
   nothing stops an arm move during a calibration workflow. `Discover` holds that mutex for
   the whole ID sweep — seconds on a sparse bus — so motion waits during motor setup.
-
-- A `*_arm.go` filename is treated by Go as a GOARCH=`arm`-only file — the simulated-arm
-  model lives in `simulated.go` (not `simulated_arm.go`), its tests in `simulated_test.go`.
-- The `arm/` directory holds vendored URDF assets (`so101.urdf`, its per-link merged
-  collision meshes, `gen_collision_meshes.py`, the SO-ARM100 license) — not Go source,
-  despite the name.
+- **`controller.NewControllerRegistry` does not share the process-wide port ownership** the
+  shared-bus design depends on; two registries can open one serial port and contend. It is
+  exported only so a caller outside the package can inject a bus factory
+  (`WithBusFactory`) — production goes through the package-level `AcquireController`.
+- A `*_arm.go` filename is treated by Go as a GOARCH=`arm`-only file. Use `arm` as a
+  filename *prefix*, never a suffix — this is why the simulated arm is `simulated.go`.
 - rdk's URDF parser uses only the **first** `<collision>` element per link (falls back to
   `Collision[0]` after a capsule-pattern check; see `referenceframe/model_urdf.go`). A link
   authored as several `<collision>` sub-parts therefore keeps just one offset fragment. This
-  is why `arm/so101.urdf` gives each arm link a single merged mesh (`arm/gen_collision_meshes.py`)
-  — passing the raw upstream multi-part links renders incomplete/misaligned collision geometry.
+  is why `assets/urdf/so101.urdf` gives each arm link a single merged mesh.
 - **A component ships its kinematics to viam-server as `ModelConfig().OriginalFile.Bytes`**
-  (`referenceframe.KinematicModelToProtobuf`), NOT its in-memory `LinkConfig`s. So any in-memory
-  edit to a parsed model is **lost across the module gRPC boundary** — viam-server rebuilds the
-  model from the original file bytes. This is why the correct TCP/frame names are baked into
-  `arm/so101.urdf` itself rather than patched in `makeSO101ModelURDF`: an in-memory graft/rename
-  left `OriginalFile` as the raw (un-grafted) URDF, so the server used an EE ~98mm past
-  so101.json's TCP and the gripper (parented to the arm) followed it — while every in-process
-  unit test stayed green. `TestURDFModelSurvivesSerialization` guards this by round-tripping
-  through the real gRPC (de)serialization (`KinematicModelToProtobuf`/`FromProtobuf`); an
-  in-process `Transform` check would NOT have caught it. The one place we still rely on this: for
-  `visualize_ee_frame` the tool needs an in-memory placeholder box, so that path re-serializes to
-  **SVA JSON** (`spatialmath.GeometryConfig.MeshData` embeds the mesh bytes, so meshes survive) —
-  a bigger payload (~5.9 MB vs ~4.4 MB URDF), hence only when the marker is enabled.
+  (`referenceframe.KinematicModelToProtobuf`), NOT its in-memory `LinkConfig`s. So any
+  in-memory edit to a parsed model is **lost across the module gRPC boundary** — viam-server
+  rebuilds the model from the original file bytes. This is why the correct TCP/frame names
+  are baked into `assets/urdf/so101.urdf` itself rather than patched in `armModelURDF`: an
+  in-memory graft/rename left `OriginalFile` as the raw (un-grafted) URDF, so the server used
+  an EE ~98mm past so101.json's TCP and the gripper (parented to the arm) followed it — while
+  every in-process unit test stayed green. `TestURDFModelSurvivesSerialization` guards this
+  by round-tripping through the real gRPC (de)serialization; an in-process `Transform` check
+  would NOT have caught it. The one place we still rely on this: for `visualize_ee_frame` the
+  tool needs an in-memory placeholder box, so that path re-serializes to **SVA JSON**
+  (`spatialmath.GeometryConfig.MeshData` embeds the mesh bytes, so meshes survive) — a bigger
+  payload (~5.9 MB vs ~4.4 MB URDF), hence only when the marker is enabled.
 - The Viam `tool` frame in `so101.json` is rotated ~180° from the URDF `gripper_link`
   frame (the TCP convention). Gripper meshes are authored in `gripper_link` coords, so
-  `gripper.go`'s `toolFromGripperLink` transform corrects them in `buildGripperMeshes`.
+  `internal/geometry`'s `toolFromGripperLink` transform corrects them in `BuildGripperMeshes`.
 - Leader gripper meshes are printable STLs with no assembly transforms (the SO-ARM100
   repo ships only a *follower* URDF/sim model), so leader placement is best-effort. The
   follower gripper meshes come from the SO-ARM100 simulation assets + URDF and are accurate.
@@ -150,65 +188,70 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
   `arm`/`gantry`/`gripper` subtypes take a dedicated branch that reads `Kinematics()` and then
   `continue`s — the `Geometries()` query below it is reached only by *other* subtypes. So a
   gripper's meshes become collision geometry only by riding on its kinematic model. Worse, on
-  **viam-server >= 1.0.0 a `Kinematics()` error drops the gripper from the frame system entirely**
-  (`continue`); on <= 0.13x it was added with a nil `ModelFrame`, i.e. a zero static frame at the
-  configured offset. Both grippers here therefore return a model from `buildGripperModel`
-  (`gripper.go`) rather than `errors.ErrUnsupported`.
-- `buildGripperModel` builds that model as **SVA JSON round-tripped through
-  `referenceframe.UnmarshalModelJSON`**, not as an in-memory `SimpleModel` — same module-boundary
-  reason as the arm (`KinematicModelToProtobuf` transmits `ModelConfig().OriginalFile.Bytes`, and a
-  hand-assembled model has none, so it ships as `UNSPECIFIED` while every in-process test stays
-  green). `TestGripperModelSurvivesSerialization` guards it. Shape constraints worth knowing:
-  a `LinkConfig` carries **at most one geometry**, so each mesh needs its own link; and
-  `ParseConfig` requires **exactly one leaf** unless `output_frames` is set, so the links form a
-  chain. All the mesh links have identity transforms (the pose lives in the geometry offset), and
+  **viam-server >= 1.0.0 a `Kinematics()` error drops the gripper from the frame system
+  entirely** (`continue`); on <= 0.13x it was added with a nil `ModelFrame`. Both grippers here
+  therefore return a model from `geometry.BuildGripperModel` rather than `errors.ErrUnsupported`.
+- `BuildGripperModel` builds that model as **SVA JSON round-tripped through
+  `referenceframe.UnmarshalModelJSON`**, not as an in-memory `SimpleModel` — same
+  module-boundary reason as the arm (a hand-assembled model has no `OriginalFile`, so it ships
+  as `UNSPECIFIED` while every in-process test stays green).
+  `TestGripperModelSurvivesSerialization` guards it. Shape constraints worth knowing: a
+  `LinkConfig` carries **at most one geometry**, so each mesh needs its own link; and
+  `ParseConfig` requires **exactly one leaf** unless `output_frames` is set, so the links form
+  a chain. All mesh links have identity transforms (the pose lives in the geometry offset), and
   the leaf is the `tcp` link — which is what makes the model's `Transform` the TCP.
-- The gripper's frame is its **TCP between the jaw tips** (`gripperTCPPose`, `(6.835, 0, 99.9)` mm
-  from the arm's `tool` frame, pure translation so `+Z` stays the approach axis the goal cloud
-  assumes). Measured off the follower meshes with the jaws closed; `TestGripperTCPLiesBetweenTheJawTips`
-  re-derives the jaw bounds from the meshes so regenerating them can't strand the TCP inside a
-  finger. The `leader` gripper has no jaws, so its leaf offset is zero. The model is **0-DoF on
-  purpose**: a jaw DoF would become a variable the motion planner may drive, and it means the
-  frame-system collision meshes are frozen closed while `Geometries()` keeps serving the live
-  articulating jaw to the 3D viewer. `TestGripperFrameResolvesToTCPInFrameSystem` asserts the
-  end-to-end contract (gripper parented to the arm at zero offset → gripper frame lands at the TCP),
-  which is also why users must **not** add a compensating `translation` to the gripper's `frame`.
-- **A part's `frame` config and its `kinematics` are two independent things**, and the 3D viewer reads
-  frames from the kinematics. Verified against a live machine: `RobotService.FrameSystemConfig` reports
-  `follower-gripper`'s `frame.poseInObserverFrame` as a *zero* pose relative to `follower-arm` (the
-  mount, on the arm's `tool` frame) while the TCP lives only in `kinematics` as the `tcp` link's
-  +99.9mm. The viewer draws a `<gripper>:tcp` node with axes at the grasp point from that link alone —
-  no geometry required. (It did not always: an earlier viewer drew frames only where geometry existed,
-  which briefly motivated a `visualize_tcp_frame` placeholder-box attribute. That was reverted once
-  the viewer was fixed; don't re-add it.) The module cannot move the mount marker anyway — only the
-  machine config's `frame.translation` can, and pushing the TCP there would make the module
-  wrong-by-default whenever a user omits it. Note also that `Get3DModels` is on the **arm API only**,
-  so the gripper cannot serve the colored `ee_frame.glb` marker the arm uses.
+- The gripper's frame is its **TCP between the jaw tips** (`GripperTCPPose`, `(6.835, 0, 99.9)`
+  mm from the arm's `tool` frame, pure translation so `+Z` stays the approach axis the goal
+  cloud assumes). Measured off the follower meshes with the jaws closed;
+  `TestGripperTCPLiesBetweenTheJawTips` re-derives the jaw bounds from the meshes so
+  regenerating them can't strand the TCP inside a finger. The `leader` gripper has no jaws, so
+  its leaf offset is zero. The model is **0-DoF on purpose**: a jaw DoF would become a variable
+  the motion planner may drive, and it means the frame-system collision meshes are frozen
+  closed while `Geometries()` keeps serving the live articulating jaw to the 3D viewer.
+  `TestGripperFrameResolvesToTCPInFrameSystem` asserts the end-to-end contract, which is also
+  why users must **not** add a compensating `translation` to the gripper's `frame`.
+- **A part's `frame` config and its `kinematics` are two independent things**, and the 3D viewer
+  reads frames from the kinematics. Verified against a live machine:
+  `RobotService.FrameSystemConfig` reports `follower-gripper`'s `frame.poseInObserverFrame` as
+  a *zero* pose relative to `follower-arm` (the mount, on the arm's `tool` frame) while the TCP
+  lives only in `kinematics` as the `tcp` link's +99.9mm. The viewer draws a `<gripper>:tcp`
+  node with axes at the grasp point from that link alone — no geometry required. (It did not
+  always: an earlier viewer drew frames only where geometry existed, which briefly motivated a
+  `visualize_tcp_frame` placeholder-box attribute. That was reverted once the viewer was fixed;
+  don't re-add it.) The module cannot move the mount marker anyway — only the machine config's
+  `frame.translation` can. Note also that `Get3DModels` is on the **arm API only**, so the
+  gripper cannot serve the colored `ee_frame.glb` marker the arm uses.
 - **In SVA, a link's `geometry` offset is relative to the link's *input* (parent) frame, not its
   output.** Empirically: a geometry on a link with a non-zero `translation` renders at the parent
   pose, not the link's own pose (this is also what `referenceframe`'s `tailGeometryStaticFrame`
   exists to flip for a *part's* `frame.geometry`). so101.json follows the same convention — the
-  `base` link translates to `z=62.4` but its box offset `z=33.6` is measured from world. Hence every
-  mesh link in `buildGripperModel` carries an identity transform with the full mesh pose in the
-  geometry offset; the `tcp` link is the only one with a real `translation`, and it carries no
-  geometry at all.
-- pnpm 11 approves dependency install-scripts via `allowBuilds` (a map of dependency
-  name to true/false) in `setup-app/pnpm-workspace.yaml` — not the older
-  `onlyBuiltDependencies` list, and not `package.json`'s `pnpm` field. `setup.sh` pins
-  `pnpm@11` (matching the `node@22` pin) so a future pnpm major can't silently break
-  the build again.
-- Both the **simulated arm** and the **hardware arm** now use coordinated-arrival
-  interpolation: each joint's speed and acceleration are scaled by its share of the travel so
-  all joints finish together. The hardware arm used to move each joint at the same configured
-  speed independently, so longer-travel joints finished later (measured on hardware as a
-  260-520 ms spread); that divergence from the simulated arm is resolved.
+  `base` link translates to `z=62.4` but its box offset `z=33.6` is measured from world. Hence
+  every mesh link in `BuildGripperModel` carries an identity transform with the full mesh pose in
+  the geometry offset; the `tcp` link is the only one with a real `translation`, and it carries
+  no geometry at all.
+- pnpm 11 approves dependency install-scripts via `allowBuilds` (a map of dependency name to
+  true/false) in `setup-app/pnpm-workspace.yaml` — not the older `onlyBuiltDependencies` list,
+  and not `package.json`'s `pnpm` field. `setup.sh` pins `pnpm@11` (matching the `node@22` pin)
+  so a future pnpm major can't silently break the build again.
+- Both the **simulated arm** and the **hardware arm** use coordinated-arrival interpolation:
+  each joint's speed and acceleration are scaled by its share of the travel so all joints finish
+  together. The hardware arm used to move each joint at the same configured speed independently,
+  so longer-travel joints finished later (measured on hardware as a 260-520 ms spread).
 - **`Speed: 0` means MAXIMUM, not stopped**, and **`Acc: 0` means UNLIMITED, not zero** — both
   Feetech register sentinels are the opposite of what they look like, and both have already
   caused real bugs in this project. A short-travel joint scaled down by a small `k` can round
-  into either floor if the scaling math doesn't guard against it.
+  into either floor if the scaling math doesn't guard against it (`servo.MinAccUnits = 1`,
+  `servo.AccFloorDegsPerSecSq = 43.0`).
+- In `internal/servo`, the package const `MaxAccelDegsPerSecSq` and the `JointLimits` field of
+  the same name coexist, as do `maxSpeedDegsPerSec` (const) and `MaxSpeedDegsPerSec` (field).
+  All field references are selector-qualified so they cannot be confused by the compiler — but
+  in a package where speed/accel mix-ups have caused real bugs, read carefully before editing.
+- Several locals in `internal/controller` are named `servo` and shadow the imported `servo`
+  package within their scope (`config.go` uses `dev` where it needs `servo.X`). Harmless today;
+  an edit inside one of those scopes that needs `servo.X` must rename the local first.
 - **`referenceframe.PoseCloud` semantics are counterintuitive and were established
   empirically** (see `docs/superpowers/specs/2026-07-15-pose-cloud-orientation-design.md`;
-  `goal_cloud.go` depends on all of it):
+  `internal/planning` depends on all of it):
   - `PoseInCloud` compares the *relative* pose `PoseBetween(goal, candidate)`, where zero
     deviation is the orientation vector `(0,0,1)`.
   - **`Theta` encodes the AZIMUTH of a tilt, not roll.** Measured exactly:
@@ -221,33 +264,35 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
     The cost: roll cannot be constrained alongside tilt, which is why this is
     approach-axis planning with **free roll**.
   - **`OZ` alone defines the cone**; `OX`/`OY` are set to `1` (unconstrained). Valid across
-    `[0, 180]`, saturating at `acos(-0.999) = 177.4374412669`. Check saturation by
-    comparing cosines (`cos(tol) <= -0.999`), never a rounded degree literal — every
-    rounding is wrong in one direction or the other.
+    `[0, 180]`, saturating at `acos(-0.999) = 177.4374412669`. Check saturation by comparing
+    cosines (`cos(tol) <= -0.999`), never a rounded degree literal — every rounding is wrong
+    in one direction or the other.
   - **`defaultEpsilon = 0.001` is ADDED to every leeway**, not just zeroed ones. So zero
-    `X`/`Y`/`Z` demands a match within 1 micron (which no IK solution realistically
-    achieves), and the effective cone is `acos(cos(tol) - 0.001)` — always slightly wider
-    than requested, floored at ~2.56°.
-  - The cloud only *zeroes the score* when a candidate is inside it. A cloud the solver
-    cannot realistically land inside is **worse than no cloud**: planning reverts to strict
-    six-DOF scoring and fails. `position_only` sets `orientScale=0`, so a cloud's
-    orientation leeways stop mattering (its positional leeways still zero the positional
-    residual, since `GetGoalMetric` consults `PoseInCloud` regardless of metric type).
-    Passing both is rejected as incoherent rather than silently honoring one.
-  - **There is no `ReferenceFrame` field.** v0.123.0 had one; v1.0.0 removed it while
-    leaving the struct's reference-frame doc comment in place as free-floating prose, so it
-    reads as though the field still exists. The complete field set is
-    `X, Y, Z, OX, OY, OZ, Theta`.
+    `X`/`Y`/`Z` demands a match within 1 micron (which no IK solution realistically achieves),
+    and the effective cone is `acos(cos(tol) - 0.001)` — always slightly wider than requested,
+    floored at ~2.56°.
+  - The cloud only *zeroes the score* when a candidate is inside it. A cloud the solver cannot
+    realistically land inside is **worse than no cloud**: planning reverts to strict six-DOF
+    scoring and fails. `position_only` sets `orientScale=0`, so a cloud's orientation leeways
+    stop mattering (its positional leeways still zero the positional residual, since
+    `GetGoalMetric` consults `PoseInCloud` regardless of metric type). Passing both is rejected
+    as incoherent rather than silently honoring one.
+  - **There is no `ReferenceFrame` field.** v0.123.0 had one; v1.0.0 removed it while leaving
+    the struct's reference-frame doc comment in place as free-floating prose, so it reads as
+    though the field still exists. The complete field set is `X, Y, Z, OX, OY, OZ, Theta`.
+  - `planning.GoalCloudConfig`'s fields are exported, so a zero-valued literal is constructible
+    — and a zero-valued cloud is the silently-fatal case above. Build one with
+    `ResolveGoalCloudConfig`.
 - **Goal clouds require viam-server >= 0.127.0.** RDK v0.125.0–v0.126.1 read `GoalCloud` in
-  `armplanning` but never decode it in `ProtobufToPoseInFrame`, so the cloud is silently
-  inert there; v0.127.0 is the first release with both halves. The module only *sends* the
-  cloud — its own RDK version has no bearing on whether the server honors it. The minimum is
-  declared Registry-side; `meta.json` has no field for it.
+  `armplanning` but never decode it in `ProtobufToPoseInFrame`, so the cloud is silently inert
+  there; v0.127.0 is the first release with both halves. The module only *sends* the cloud — its
+  own RDK version has no bearing on whether the server honors it. The minimum is declared
+  Registry-side; `meta.json` has no field for it.
 - **`NewSO101`'s `goalCloud` wiring is untested** — it needs serial hardware, so no test
-  constructs the hardware arm. Deleting `goalCloud: resolveGoalCloudConfig(...)` from
+  constructs the hardware arm. Deleting `goalCloud: planning.ResolveGoalCloudConfig(...)` from
   `NewSO101` leaves the whole suite green, and the result is a zero-valued cloud that fails
-  every move silently. `TestSimulatedConstructorWiresGoalCloud` covers the equivalent line
-  in `newSimulatedSO101` and the shared `resolveGoalCloudConfig` contract, but the hardware
+  every move silently. `TestSimulatedConstructorWiresGoalCloud` covers the equivalent line in
+  the simulated constructor and the shared `ResolveGoalCloudConfig` contract, but the hardware
   constructor's line is guarded only by review.
 - **The gripper's calibrated range is a scale factor; the arm's is only a center point.**
   `NormModeRange100` (servo 6) maps 0-100% linearly onto `[RangeMin, RangeMax]`, so a wrong
@@ -258,28 +303,27 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
   (`Present_Position = Actual_Position - Homing_Offset`).
 - **`0`/`4095` position limits mean "unset", not "calibrated".** `ReadCalibrationFromServos`
   accepts them (`min < max && max <= 4095`), so kits that ship with a homing offset but no
-  limits read as calibrated. `guardGripperTravel` (`gripper_range.go`) narrows the gripper's
-  range when it is too wide to be real. The window is **anchored, not centered**: tick 2048
-  (`gripperClosedStopTick`) is the jaw's *closed* stop on a vendor half-turn-homed kit, not
-  its mid-travel, and the window opens `gripperSafeTravelTicks = 1200` ticks from there
-  (`2048..3248`). `DefaultSO101FullCalibration`'s servo-6 entry is this same window, not the
-  arm joints' `500/3500` — because `LoadFullCalibrationFromFile`'s `convertOrDefault` fills a
-  *missing* `gripper` key with the default and returns `fromFile=true`, which makes
-  `registry.go:177` skip both the servo read and the guard, so an unsafe default there would
-  never get caught. The guard itself runs inside `ReadCalibrationFromServos`, so a calibration
-  file with a `gripper` entry bypasses it entirely. `resetCalibrationRegisters` does **not**
-  run at calibration start — `startCalibration` only resets in-memory struct fields. It runs
-  from `setHomingPosition`, so `0`/`4095` is reached only by abandoning *after* `set_homing`,
-  and that same step also writes a fresh homing offset centered on wherever the jaw was told to
-  sit ("move to the middle of its range of motion", `calibration.go:375`). So this path does not
-  land in the vendor's closed-stop state the anchor assumes — it lands in the mid-travel-homed
-  state the anchor is *wrong* for (see the design doc's "conflict this design knowingly
-  accepts"). Abandoning *before* `set_homing` leaves the registers untouched.
-- **`Grab()` used to return `true` unconditionally.** Under the old `500/3500` default an
-  empty jaw resting at its closed stop (tick 2048) normalized to 51.6%, clearing the `> 15.0`
-  grasp threshold regardless of whether anything was held. Anyone who wrote code branching on
+  limits read as calibrated. `guardGripperTravel` narrows the gripper's range when it is too
+  wide to be real. The window is **anchored, not centered**: tick 2048
+  (`GripperClosedStopTick`) is the jaw's *closed* stop on a vendor half-turn-homed kit, not its
+  mid-travel, and the window opens `gripperSafeTravelTicks = 1200` ticks from there
+  (`2048..3248`). `DefaultSO101FullCalibration`'s servo-6 entry is this same window, not the arm
+  joints' `500/3500` — because `LoadFullCalibrationFromFile`'s `convertOrDefault` fills a
+  *missing* `gripper` key with the default and returns `fromFile=true`, which makes the registry
+  skip both the servo read and the guard, so an unsafe default there would never get caught. The
+  guard itself runs inside `ReadCalibrationFromServos`, so a calibration file with a `gripper`
+  entry bypasses it entirely. `resetCalibrationRegisters` does **not** run at calibration start —
+  `startCalibration` only resets in-memory struct fields. It runs from `setHomingPosition`, so
+  `0`/`4095` is reached only by abandoning *after* `set_homing`, and that same step also writes a
+  fresh homing offset centered on wherever the jaw was told to sit ("move to the middle of its
+  range of motion"). So this path does not land in the vendor's closed-stop state the anchor
+  assumes — it lands in the mid-travel-homed state the anchor is *wrong* for (see the design
+  doc's "conflict this design knowingly accepts"). Abandoning *before* `set_homing` leaves the
+  registers untouched.
+- **`Grab()` used to return `true` unconditionally.** Under the old `500/3500` default an empty
+  jaw resting at its closed stop (tick 2048) normalized to 51.6%, clearing the `> 15.0` grasp
+  threshold regardless of whether anything was held. Anyone who wrote code branching on
   `Grab()`'s return value before this change was reading a constant.
 - **`feetech.BusConfig` takes an exported `Transport`**, so `ReadCalibrationFromServos`'s
-  bus-dependent paths are unit-testable without serial hardware (see `deadTransport` in
-  `gripper_range_test.go`). Worth knowing generally — the repo has other paths written off as
-  hardware-only that may not be.
+  bus-dependent paths are unit-testable without serial hardware. Worth knowing generally — the
+  repo has other paths written off as hardware-only that may not be.

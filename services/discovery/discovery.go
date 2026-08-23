@@ -1,4 +1,6 @@
-// discovery.go
+// Package discovery implements devrel:so101:discovery, which enumerates serial ports,
+// pings servos 1 and 6 to detect which SO-101 components are present, and suggests
+// configs for them.
 package discovery
 
 import (

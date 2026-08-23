@@ -1,3 +1,6 @@
+// Package gripper implements devrel:so101:gripper, the hardware gripper (servo 6).
+// It owns no serial connection: it drives its servo by sending servo_* DoCommands to
+// the arm component it depends on, which may be remote.
 package gripper
 
 import (

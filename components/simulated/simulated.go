@@ -1,3 +1,7 @@
+// Package simulated implements devrel:so101:simulated and devrel:so101:simulated-gripper,
+// the hardware-free models. They use no controller and no serial port, interpolating
+// joint motion over time, and exist for development, testing, and 3D visualization
+// without a physical robot.
 package simulated
 
 import (
