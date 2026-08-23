@@ -16,6 +16,7 @@ import (
 	"go.viam.com/rdk/spatialmath"
 
 	"so_arm/internal/geometry"
+	"so_arm/internal/servocmd"
 )
 
 var (
@@ -168,7 +169,7 @@ func (g *so101Gripper) Name() resource.Name {
 // the servo_* protocol and offers this gripper's servo. Without it, a gripper pointed at a
 // non-SO-101 arm (or a stale arm name) would build cleanly and fail only on the first move.
 func probeServoSupport(ctx context.Context, a arm.Arm, armName string, servoID int) error {
-	res, err := a.DoCommand(ctx, map[string]interface{}{"command": cmdServoCapabilities})
+	res, err := a.DoCommand(ctx, map[string]interface{}{"command": servocmd.CmdServoCapabilities})
 	if err != nil {
 		return fmt.Errorf(
 			"arm %q does not support the servo_* command family (is it a devrel:so101:arm?): %w",
@@ -192,7 +193,7 @@ func servoIDsFromCapabilities(res map[string]interface{}) []int {
 	case []interface{}:
 		out := make([]int, 0, len(ids))
 		for i := range ids {
-			if n, ok := numArg(map[string]any{"v": ids[i]}, "v"); ok {
+			if n, ok := servocmd.NumArg(map[string]any{"v": ids[i]}, "v"); ok {
 				out = append(out, n)
 			}
 		}
@@ -215,22 +216,22 @@ func (g *so101Gripper) servoDo(
 
 // moveToPercent commands the servo and waits for it to settle.
 func (g *so101Gripper) moveToPercent(ctx context.Context, percent float64) error {
-	if _, err := g.servoDo(ctx, cmdServoMove,
-		map[string]interface{}{"percent": clampPercent(percent)}); err != nil {
+	if _, err := g.servoDo(ctx, servocmd.CmdServoMove,
+		map[string]interface{}{"percent": servocmd.ClampPercent(percent)}); err != nil {
 		return err
 	}
-	_, err := g.servoDo(ctx, cmdServoWaitStop,
+	_, err := g.servoDo(ctx, servocmd.CmdServoWaitStop,
 		map[string]interface{}{"timeout_ms": gripperSettleTimeoutMs})
 	return err
 }
 
 // positionPercent reads the servo's current opening as a percentage.
 func (g *so101Gripper) positionPercent(ctx context.Context) (float64, error) {
-	res, err := g.servoDo(ctx, cmdServoPosition, nil)
+	res, err := g.servoDo(ctx, servocmd.CmdServoPosition, nil)
 	if err != nil {
 		return 0, err
 	}
-	pct, ok := floatArg(res, "percent")
+	pct, ok := servocmd.FloatArg(res, "percent")
 	if !ok {
 		return 0, fmt.Errorf("no position data available")
 	}
@@ -296,7 +297,7 @@ func (g *so101Gripper) Grab(ctx context.Context, extra map[string]interface{}) (
 // killed any in-flight arm motion.
 func (g *so101Gripper) Stop(ctx context.Context, extra map[string]interface{}) error {
 	g.isMoving.Store(false)
-	_, err := g.servoDo(ctx, cmdServoStop, nil)
+	_, err := g.servoDo(ctx, servocmd.CmdServoStop, nil)
 	return err
 }
 
@@ -351,7 +352,7 @@ func (g *so101Gripper) DoCommand(ctx context.Context, cmd map[string]interface{}
 	}
 
 	if percentPos, ok := cmd["set"].(float64); ok {
-		percentPos = clampPercent(percentPos)
+		percentPos = servocmd.ClampPercent(percentPos)
 
 		g.mu.Lock()
 		defer g.mu.Unlock()
@@ -390,8 +391,8 @@ func (g *so101Gripper) DoCommand(ctx context.Context, cmd map[string]interface{}
 
 		// The raw servo_position form goes to the arm as raw ticks; the arm owns the
 		// calibration needed to interpret them, so the gripper no longer converts.
-		if servoPos, ok := floatArg(cmd, "servo_position"); ok {
-			_, err := g.servoDo(ctx, cmdServoMove, map[string]interface{}{"raw": int(servoPos)})
+		if servoPos, ok := servocmd.FloatArg(cmd, "servo_position"); ok {
+			_, err := g.servoDo(ctx, servocmd.CmdServoMove, map[string]interface{}{"raw": int(servoPos)})
 			return map[string]interface{}{"success": err == nil}, err
 		}
 

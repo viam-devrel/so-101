@@ -1,4 +1,4 @@
-package so_arm
+package planning
 
 import (
 	"math"
@@ -15,46 +15,46 @@ import (
 
 func TestResolveGoalCloudConfigDefaults(t *testing.T) {
 	// Zero and unset are indistinguishable for a float64 with omitempty; both default.
-	got := resolveGoalCloudConfig(0, 0, nil)
+	got := ResolveGoalCloudConfig(0, 0, nil)
 	assert.Equal(t, defaultOrientationToleranceDeg, got.OrientationToleranceDeg)
 	assert.Equal(t, defaultPositionToleranceMM, got.PositionToleranceMM)
 }
 
 func TestResolveGoalCloudConfigKeepsExplicitValues(t *testing.T) {
-	got := resolveGoalCloudConfig(12.5, 0.25, nil)
+	got := ResolveGoalCloudConfig(12.5, 0.25, nil)
 	assert.Equal(t, 12.5, got.OrientationToleranceDeg)
 	assert.Equal(t, 0.25, got.PositionToleranceMM)
 }
 
 // The warnings are the production path -- both tests above pass a nil logger and so
-// exercise only the early return. resolveGoalCloudConfig is the SINGLE owner of these
+// exercise only the early return. ResolveGoalCloudConfig is the SINGLE owner of these
 // thresholds; nothing downstream re-checks them, so nothing downstream would catch a
 // regression either.
 func TestResolveGoalCloudConfigWarnsAtSaturationBoundary(t *testing.T) {
 	// The boundary is acos(-0.999) = 177.4374412669 -- exactly the band a literal
 	// ">= 177.44" check would miss, which is why poseCloudSaturationCos is a cosine.
 	logger, logs := logging.NewObservedTestLogger(t)
-	resolveGoalCloudConfig(177.438, 0, logger)
+	ResolveGoalCloudConfig(177.438, 0, logger)
 	assert.Equal(t, 1, logs.FilterMessageSnippet("saturates").Len(), "just inside the boundary must warn")
 
 	logger, logs = logging.NewObservedTestLogger(t)
-	resolveGoalCloudConfig(177.40, 0, logger)
+	ResolveGoalCloudConfig(177.40, 0, logger)
 	assert.Equal(t, 0, logs.FilterMessageSnippet("saturates").Len(), "just outside must not warn")
 }
 
 func TestResolveGoalCloudConfigWarnsOnLargePositionTolerance(t *testing.T) {
 	logger, logs := logging.NewObservedTestLogger(t)
-	resolveGoalCloudConfig(0, 25, logger)
+	ResolveGoalCloudConfig(0, 25, logger)
 	assert.Equal(t, 1, logs.FilterMessageSnippet("is large").Len())
 
 	logger, logs = logging.NewObservedTestLogger(t)
-	resolveGoalCloudConfig(0, 10, logger)
+	ResolveGoalCloudConfig(0, 10, logger)
 	assert.Equal(t, 0, logs.FilterMessageSnippet("is large").Len(), "at the threshold must not warn")
 }
 
 func TestResolveGoalCloudConfigDefaultsDoNotWarn(t *testing.T) {
 	logger, logs := logging.NewObservedTestLogger(t)
-	resolveGoalCloudConfig(0, 0, logger)
+	ResolveGoalCloudConfig(0, 0, logger)
 	assert.Equal(t, 0, logs.Len(), "the defaults must be quiet")
 }
 
@@ -79,7 +79,7 @@ func tiltedBy(ax, ay, deg float64) spatialmath.Pose {
 // sentinel of 1, so the position -> X/Y/Z mapping stays legible and a transposition of the
 // two would be caught.
 func coneCloud(tolDeg float64) *referenceframe.PoseCloud {
-	return coneToPoseCloud(goalCloudConfig{OrientationToleranceDeg: tolDeg, PositionToleranceMM: 2.5})
+	return coneToPoseCloud(GoalCloudConfig{OrientationToleranceDeg: tolDeg, PositionToleranceMM: 2.5})
 }
 
 // TestConeToPoseCloudFields pins the complete field set: X, Y, Z, OX, OY, OZ, Theta is the
@@ -135,13 +135,13 @@ func TestConeSaturationBoundary(t *testing.T) {
 
 // TestSaturationConstantMatchesConeMapping ties Task 2's poseCloudSaturationCos to this
 // task's cone mapping. The constant is only correct while coneToPoseCloud maps the cone to
-// OZ = 1-cos(a); if that formula ever changes, resolveGoalCloudConfig would keep warning at
+// OZ = 1-cos(a); if that formula ever changes, ResolveGoalCloudConfig would keep warning at
 // the wrong angle with nothing to catch it. The tests above use literal degrees and would
 // not notice. This one derives the angle FROM the constant, so the two cannot drift apart.
 func TestSaturationConstantMatchesConeMapping(t *testing.T) {
 	satDeg := math.Acos(poseCloudSaturationCos) * 180 / math.Pi // 177.4374...
 	assert.True(t, coneCloud(satDeg+0.001).PoseInCloud(testGoal(), tiltedBy(1, 0, 180)),
-		"at the angle where resolveGoalCloudConfig warns, the cone must actually be saturated")
+		"at the angle where ResolveGoalCloudConfig warns, the cone must actually be saturated")
 	assert.False(t, coneCloud(satDeg-0.01).PoseInCloud(testGoal(), tiltedBy(1, 0, 180)),
 		"just below that angle the cone must still bound tilt")
 }
@@ -207,7 +207,7 @@ func TestConeEffectiveWideningFormula(t *testing.T) {
 func TestConePositionalBoxNotRadius(t *testing.T) {
 	// Deliberately NOT coneCloud (which uses 2.5): the bounds below are measured values
 	// tied to a 1.0mm tolerance, so this test pins its own.
-	c := coneToPoseCloud(goalCloudConfig{OrientationToleranceDeg: 30, PositionToleranceMM: 1.0})
+	c := coneToPoseCloud(GoalCloudConfig{OrientationToleranceDeg: 30, PositionToleranceMM: 1.0})
 	offset := func(dx, dy, dz float64) spatialmath.Pose {
 		g := testGoal()
 		return spatialmath.NewPose(
@@ -314,8 +314,8 @@ func TestParsePoseCloudRejects(t *testing.T) {
 }
 
 func TestBuildMoveDestinationConePath(t *testing.T) {
-	cfg := resolveGoalCloudConfig(0, 0, nil)
-	dest, planExtra, path, err := buildMoveDestination("myarm_origin", testGoal(), cfg, nil)
+	cfg := ResolveGoalCloudConfig(0, 0, nil)
+	dest, planExtra, path, err := BuildMoveDestination("myarm_origin", testGoal(), cfg, nil)
 	require.NoError(t, err)
 	assert.Equal(t, pathCone, path)
 	assert.Equal(t, "myarm_origin", dest.Parent(), "the frame name is passed through unmodified")
@@ -325,16 +325,16 @@ func TestBuildMoveDestinationConePath(t *testing.T) {
 }
 
 func TestBuildMoveDestinationForwardsCallerExtras(t *testing.T) {
-	cfg := resolveGoalCloudConfig(0, 0, nil)
-	_, planExtra, _, err := buildMoveDestination("a_origin", testGoal(), cfg,
+	cfg := ResolveGoalCloudConfig(0, 0, nil)
+	_, planExtra, _, err := BuildMoveDestination("a_origin", testGoal(), cfg,
 		map[string]interface{}{"timeout": 5.0})
 	require.NoError(t, err)
 	assert.Equal(t, 5.0, planExtra["timeout"], "unrelated caller keys still pass through")
 }
 
 func TestBuildMoveDestinationRawCloudPath(t *testing.T) {
-	cfg := resolveGoalCloudConfig(0, 0, nil)
-	dest, planExtra, path, err := buildMoveDestination("a_origin", testGoal(), cfg,
+	cfg := ResolveGoalCloudConfig(0, 0, nil)
+	dest, planExtra, path, err := BuildMoveDestination("a_origin", testGoal(), cfg,
 		map[string]interface{}{"pose_cloud": map[string]interface{}{"oz": 0.5}, "timeout": 5.0})
 	require.NoError(t, err)
 	assert.Equal(t, pathRawCloud, path)
@@ -345,8 +345,8 @@ func TestBuildMoveDestinationRawCloudPath(t *testing.T) {
 }
 
 func TestBuildMoveDestinationMetricTypePath(t *testing.T) {
-	cfg := resolveGoalCloudConfig(0, 0, nil)
-	dest, planExtra, path, err := buildMoveDestination("a_origin", testGoal(), cfg,
+	cfg := ResolveGoalCloudConfig(0, 0, nil)
+	dest, planExtra, path, err := BuildMoveDestination("a_origin", testGoal(), cfg,
 		map[string]interface{}{"goal_metric_type": "position_only"})
 	require.NoError(t, err)
 	assert.Equal(t, pathMetricType, path)
@@ -355,8 +355,8 @@ func TestBuildMoveDestinationMetricTypePath(t *testing.T) {
 }
 
 func TestBuildMoveDestinationRejectsBothKeys(t *testing.T) {
-	cfg := resolveGoalCloudConfig(0, 0, nil)
-	_, _, _, err := buildMoveDestination("a_origin", testGoal(), cfg, map[string]interface{}{
+	cfg := ResolveGoalCloudConfig(0, 0, nil)
+	_, _, _, err := BuildMoveDestination("a_origin", testGoal(), cfg, map[string]interface{}{
 		"pose_cloud":       map[string]interface{}{"oz": 0.5},
 		"goal_metric_type": "position_only",
 	})
@@ -368,16 +368,16 @@ func TestBuildMoveDestinationRejectsBothKeys(t *testing.T) {
 }
 
 func TestBuildMoveDestinationDoesNotMutateCallerExtra(t *testing.T) {
-	cfg := resolveGoalCloudConfig(0, 0, nil)
+	cfg := ResolveGoalCloudConfig(0, 0, nil)
 	extra := map[string]interface{}{"pose_cloud": map[string]interface{}{"oz": 0.5}}
-	_, _, _, err := buildMoveDestination("a_origin", testGoal(), cfg, extra)
+	_, _, _, err := BuildMoveDestination("a_origin", testGoal(), cfg, extra)
 	require.NoError(t, err)
 	assert.Contains(t, extra, "pose_cloud", "the caller's map must not be mutated")
 }
 
 func TestBuildMoveDestinationPropagatesParseError(t *testing.T) {
-	cfg := resolveGoalCloudConfig(0, 0, nil)
-	dest, planExtra, _, err := buildMoveDestination("a_origin", testGoal(), cfg,
+	cfg := ResolveGoalCloudConfig(0, 0, nil)
+	dest, planExtra, _, err := BuildMoveDestination("a_origin", testGoal(), cfg,
 		map[string]interface{}{"pose_cloud": map[string]interface{}{"OX": 1.0}})
 	require.Error(t, err)
 	assert.Nil(t, dest)
@@ -385,21 +385,21 @@ func TestBuildMoveDestinationPropagatesParseError(t *testing.T) {
 }
 
 func TestBuildMoveDestinationReturnsPathInvalidOnError(t *testing.T) {
-	cfg := resolveGoalCloudConfig(0, 0, nil)
-	_, _, path, err := buildMoveDestination("a_origin", testGoal(), cfg,
+	cfg := ResolveGoalCloudConfig(0, 0, nil)
+	_, _, path, err := BuildMoveDestination("a_origin", testGoal(), cfg,
 		map[string]interface{}{"pose_cloud": map[string]interface{}{"OX": 1.0}})
 	require.Error(t, err)
 	assert.Equal(t, pathInvalid, path,
-		"an error must not return pathCone, or wrapMoveErr would blame the cone for a parse error")
-	// The guarantee that makes this matter: wrapMoveErr must not dress it up as a cone failure.
-	assert.Equal(t, err, wrapMoveErr(err, path, cfg), "pathInvalid must pass the error through unwrapped")
+		"an error must not return pathCone, or WrapMoveErr would blame the cone for a parse error")
+	// The guarantee that makes this matter: WrapMoveErr must not dress it up as a cone failure.
+	assert.Equal(t, err, WrapMoveErr(err, path, cfg), "pathInvalid must pass the error through unwrapped")
 }
 
 // TestGoalCloudSurvivesSerialization guards the module-boundary gotcha: the cloud is only
 // useful if it crosses gRPC. An in-process check would pass even if it never shipped.
 func TestGoalCloudSurvivesSerialization(t *testing.T) {
-	cfg := resolveGoalCloudConfig(30, 1.0, nil)
-	dest, _, _, err := buildMoveDestination("myarm_origin", testGoal(), cfg, nil)
+	cfg := ResolveGoalCloudConfig(30, 1.0, nil)
+	dest, _, _, err := BuildMoveDestination("myarm_origin", testGoal(), cfg, nil)
 	require.NoError(t, err)
 
 	proto := referenceframe.PoseInFrameToProtobuf(dest)
@@ -416,49 +416,4 @@ func TestGoalCloudSurvivesSerialization(t *testing.T) {
 	assert.InDelta(t, want.OY, got.GoalCloud.OY, 1e-9)
 	assert.InDelta(t, want.OZ, got.GoalCloud.OZ, 1e-9)
 	assert.InDelta(t, want.Theta, got.GoalCloud.Theta, 1e-9)
-}
-
-func TestArmConfigValidateToleranceRanges(t *testing.T) {
-	base := func() *SO101ArmConfig { return &SO101ArmConfig{Port: "/dev/null"} }
-
-	for name, mutate := range map[string]func(*SO101ArmConfig){
-		"negative orientation": func(c *SO101ArmConfig) { c.OrientationToleranceDeg = -1 },
-		"orientation over 180": func(c *SO101ArmConfig) { c.OrientationToleranceDeg = 181 },
-		"NaN orientation":      func(c *SO101ArmConfig) { c.OrientationToleranceDeg = math.NaN() },
-		"negative position":    func(c *SO101ArmConfig) { c.PositionToleranceMM = -0.1 },
-		"NaN position":         func(c *SO101ArmConfig) { c.PositionToleranceMM = math.NaN() },
-	} {
-		t.Run(name, func(t *testing.T) {
-			c := base()
-			mutate(c)
-			_, _, err := c.Validate("")
-			assert.Error(t, err)
-		})
-	}
-
-	t.Run("valid bounds accepted", func(t *testing.T) {
-		c := base()
-		c.OrientationToleranceDeg, c.PositionToleranceMM = 180, 75
-		_, _, err := c.Validate("")
-		assert.NoError(t, err)
-	})
-}
-
-func TestSimulatedConfigValidateToleranceRanges(t *testing.T) {
-	c := &SO101SimulatedArmConfig{OrientationToleranceDeg: 181}
-	_, _, err := c.Validate("")
-	assert.Error(t, err)
-
-	c = &SO101SimulatedArmConfig{PositionToleranceMM: -1}
-	_, _, err = c.Validate("")
-	assert.Error(t, err)
-
-	// Negative control: without this, the two assertions above would pass even if Validate
-	// errored unconditionally, i.e. they could not tell "tolerances validated" from
-	// "Validate always fails".
-	t.Run("valid bounds accepted", func(t *testing.T) {
-		c := &SO101SimulatedArmConfig{OrientationToleranceDeg: 30, PositionToleranceMM: 5}
-		_, _, err := c.Validate("")
-		assert.NoError(t, err)
-	})
 }

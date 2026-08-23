@@ -82,6 +82,29 @@ func TestSimulatedConfigValidateMeshRatios(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// TestSimulatedConfigValidateToleranceRanges pins that Validate rejects out-of-range
+// orientation_tolerance_deg/position_tolerance_mm by delegating to
+// planning.ValidateGoalCloudTolerances -- see internal/planning's own tests for the
+// exhaustive range/NaN cases; this only pins the wiring.
+func TestSimulatedConfigValidateToleranceRanges(t *testing.T) {
+	c := &SO101SimulatedArmConfig{OrientationToleranceDeg: 181}
+	_, _, err := c.Validate("")
+	assert.Error(t, err)
+
+	c = &SO101SimulatedArmConfig{PositionToleranceMM: -1}
+	_, _, err = c.Validate("")
+	assert.Error(t, err)
+
+	// Negative control: without this, the two assertions above would pass even if Validate
+	// errored unconditionally, i.e. they could not tell "tolerances validated" from
+	// "Validate always fails".
+	t.Run("valid bounds accepted", func(t *testing.T) {
+		c := &SO101SimulatedArmConfig{OrientationToleranceDeg: 30, PositionToleranceMM: 5}
+		_, _, err := c.Validate("")
+		assert.NoError(t, err)
+	})
+}
+
 func TestSimulatedUseURDF(t *testing.T) {
 	t.Setenv("VIAM_MODULE_ROOT", testfake.RepoRoot())
 	simulateTime := false

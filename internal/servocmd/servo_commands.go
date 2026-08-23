@@ -1,4 +1,7 @@
-package so_arm
+// Package servocmd implements the servo_* DoCommand protocol: the gripper owns no serial
+// connection, so it drives its servo by sending these commands to the arm component it
+// depends on.
+package servocmd
 
 import (
 	"context"
@@ -11,17 +14,17 @@ import (
 // the command names are shared constants rather than loose strings -- but they are still
 // wire-compatible, so the arm may be a remote.
 const (
-	cmdServoCapabilities = "servo_capabilities"
-	cmdServoMove         = "servo_move"
-	cmdServoPosition     = "servo_position"
-	cmdServoStop         = "servo_stop"
-	cmdServoWaitStop     = "servo_wait_stop"
+	CmdServoCapabilities = "servo_capabilities"
+	CmdServoMove         = "servo_move"
+	CmdServoPosition     = "servo_position"
+	CmdServoStop         = "servo_stop"
+	CmdServoWaitStop     = "servo_wait_stop"
 )
 
-// servoOps is the single-servo surface handleServoCommand needs. Keeping dispatch behind
+// ServoOps is the single-servo surface HandleServoCommand needs. Keeping dispatch behind
 // this interface (rather than calling the controller directly) is what lets the protocol be
 // tested without serial hardware.
-type servoOps interface {
+type ServoOps interface {
 	MoveServoPercent(ctx context.Context, id int, percent float64, speed int) error
 	MoveServoRaw(ctx context.Context, id, raw int) error
 	ServoPositionPercent(ctx context.Context, id int) (percent float64, raw int, err error)
@@ -29,19 +32,19 @@ type servoOps interface {
 	WaitForServosToStop(ctx context.Context, ids []int, timeoutMs int) error
 }
 
-// isServoCommand reports whether a DoCommand belongs to this family, so the arm can route
+// IsServoCommand reports whether a DoCommand belongs to this family, so the arm can route
 // it here and leave its own commands untouched.
-func isServoCommand(command string) bool {
+func IsServoCommand(command string) bool {
 	return strings.HasPrefix(command, "servo_")
 }
 
-// numArg coerces a DoCommand numeric argument to int.
+// NumArg coerces a DoCommand numeric argument to int.
 //
 // This coercion is load-bearing, not defensive. When the arm is a local dependency the
 // module hands over the real Go object, so values arrive as native ints. When the arm is
 // remote the call crosses gRPC and structpb renders every number as float64. Accepting only
 // one shape would work in every in-process test and fail against a remote arm.
-func numArg(cmd map[string]any, key string) (int, bool) {
+func NumArg(cmd map[string]any, key string) (int, bool) {
 	switch v := cmd[key].(type) {
 	case int:
 		return v, true
@@ -54,8 +57,8 @@ func numArg(cmd map[string]any, key string) (int, bool) {
 	}
 }
 
-// floatArg coerces a DoCommand numeric argument to float64, accepting the same shapes.
-func floatArg(cmd map[string]any, key string) (float64, bool) {
+// FloatArg coerces a DoCommand numeric argument to float64, accepting the same shapes.
+func FloatArg(cmd map[string]any, key string) (float64, bool) {
 	switch v := cmd[key].(type) {
 	case int:
 		return float64(v), true
@@ -68,7 +71,8 @@ func floatArg(cmd map[string]any, key string) (float64, bool) {
 	}
 }
 
-func clampPercent(p float64) float64 {
+// ClampPercent clamps p into [0, 100].
+func ClampPercent(p float64) float64 {
 	if p < 0 {
 		return 0
 	}
@@ -99,7 +103,7 @@ func availableServoIDs(ownServos []int) []int {
 // resolveServoID extracts and validates the target servo, refusing any servo the arm drives
 // itself -- otherwise the arm and the gripper would fight over the same joint.
 func resolveServoID(cmd map[string]any, ownServos []int) (int, error) {
-	id, ok := numArg(cmd, "servo_id")
+	id, ok := NumArg(cmd, "servo_id")
 	if !ok {
 		return 0, fmt.Errorf("%s requires a numeric servo_id", cmd["command"])
 	}
@@ -116,14 +120,14 @@ func resolveServoID(cmd map[string]any, ownServos []int) (int, error) {
 	return id, nil
 }
 
-// handleServoCommand dispatches the servo_* family against ops. ownServos is the arm's own
+// HandleServoCommand dispatches the servo_* family against ops. ownServos is the arm's own
 // servo set, used to reject commands that would collide with arm motion.
-func handleServoCommand(
-	ctx context.Context, cmd map[string]any, ops servoOps, ownServos []int,
+func HandleServoCommand(
+	ctx context.Context, cmd map[string]any, ops ServoOps, ownServos []int,
 ) (map[string]any, error) {
 	command, _ := cmd["command"].(string)
 
-	if command == cmdServoCapabilities {
+	if command == CmdServoCapabilities {
 		return map[string]any{
 			"servo_commands": true,
 			"servo_ids":      availableServoIDs(ownServos),
@@ -136,39 +140,39 @@ func handleServoCommand(
 	}
 
 	switch command {
-	case cmdServoMove:
-		if raw, ok := numArg(cmd, "raw"); ok {
+	case CmdServoMove:
+		if raw, ok := NumArg(cmd, "raw"); ok {
 			if err := ops.MoveServoRaw(ctx, id, raw); err != nil {
 				return nil, err
 			}
 			return map[string]any{"raw": raw}, nil
 		}
-		percent, ok := floatArg(cmd, "percent")
+		percent, ok := FloatArg(cmd, "percent")
 		if !ok {
-			return nil, fmt.Errorf("%s requires a numeric percent or raw", cmdServoMove)
+			return nil, fmt.Errorf("%s requires a numeric percent or raw", CmdServoMove)
 		}
-		percent = clampPercent(percent)
-		speed, _ := numArg(cmd, "speed")
+		percent = ClampPercent(percent)
+		speed, _ := NumArg(cmd, "speed")
 		if err := ops.MoveServoPercent(ctx, id, percent, speed); err != nil {
 			return nil, err
 		}
 		return map[string]any{"percent": percent}, nil
 
-	case cmdServoPosition:
+	case CmdServoPosition:
 		percent, raw, err := ops.ServoPositionPercent(ctx, id)
 		if err != nil {
 			return nil, err
 		}
 		return map[string]any{"percent": percent, "raw": raw}, nil
 
-	case cmdServoStop:
+	case CmdServoStop:
 		if err := ops.StopServo(ctx, id); err != nil {
 			return nil, err
 		}
 		return map[string]any{}, nil
 
-	case cmdServoWaitStop:
-		timeoutMs, ok := numArg(cmd, "timeout_ms")
+	case CmdServoWaitStop:
+		timeoutMs, ok := NumArg(cmd, "timeout_ms")
 		if !ok {
 			timeoutMs = defaultServoWaitTimeoutMs
 		}

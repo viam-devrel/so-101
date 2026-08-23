@@ -2,6 +2,7 @@ package so_arm
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -110,6 +111,36 @@ func TestSO101ArmConfigValidateMeshRatios(t *testing.T) {
 	ok := &SO101ArmConfig{Port: "/dev/null", UseURDF: true, MeshDecimationRatios: []float64{0.1, 0.2}}
 	_, _, err = ok.Validate("")
 	require.NoError(t, err)
+}
+
+// TestArmConfigValidateToleranceRanges pins that Validate rejects out-of-range
+// orientation_tolerance_deg/position_tolerance_mm by delegating to
+// planning.ValidateGoalCloudTolerances -- see internal/planning's own tests for the
+// exhaustive range/NaN cases; this only pins the wiring.
+func TestArmConfigValidateToleranceRanges(t *testing.T) {
+	base := func() *SO101ArmConfig { return &SO101ArmConfig{Port: "/dev/null"} }
+
+	for name, mutate := range map[string]func(*SO101ArmConfig){
+		"negative orientation": func(c *SO101ArmConfig) { c.OrientationToleranceDeg = -1 },
+		"orientation over 180": func(c *SO101ArmConfig) { c.OrientationToleranceDeg = 181 },
+		"NaN orientation":      func(c *SO101ArmConfig) { c.OrientationToleranceDeg = math.NaN() },
+		"negative position":    func(c *SO101ArmConfig) { c.PositionToleranceMM = -0.1 },
+		"NaN position":         func(c *SO101ArmConfig) { c.PositionToleranceMM = math.NaN() },
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := base()
+			mutate(c)
+			_, _, err := c.Validate("")
+			assert.Error(t, err)
+		})
+	}
+
+	t.Run("valid bounds accepted", func(t *testing.T) {
+		c := base()
+		c.OrientationToleranceDeg, c.PositionToleranceMM = 180, 75
+		_, _, err := c.Validate("")
+		assert.NoError(t, err)
+	})
 }
 
 func TestManualModeConfigValidate(t *testing.T) {

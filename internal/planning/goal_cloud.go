@@ -1,4 +1,6 @@
-package so_arm
+// Package planning builds approach-axis orientation goal clouds so motion requests
+// constrain the tool's approach axis while leaving roll free.
+package planning
 
 import (
 	"fmt"
@@ -37,18 +39,18 @@ const (
 	poseCloudSaturationCos = -0.999
 )
 
-// goalCloudConfig is the resolved tolerance pair, letting both arm models share one code
+// GoalCloudConfig is the resolved tolerance pair, letting both arm models share one code
 // path despite their separate config structs. Defaults are already applied.
-type goalCloudConfig struct {
+type GoalCloudConfig struct {
 	OrientationToleranceDeg float64
 	PositionToleranceMM     float64
 }
 
-// resolveGoalCloudConfig applies defaults to zero or unset values and emits the two
+// ResolveGoalCloudConfig applies defaults to zero or unset values and emits the two
 // construction warnings. It is the single owner of both, so each constructor is one call
 // and neither arm model re-implements the thresholds. logger may be nil (unit tests).
-func resolveGoalCloudConfig(tolDeg, posTolMM float64, logger logging.Logger) goalCloudConfig {
-	cfg := goalCloudConfig{OrientationToleranceDeg: tolDeg, PositionToleranceMM: posTolMM}
+func ResolveGoalCloudConfig(tolDeg, posTolMM float64, logger logging.Logger) GoalCloudConfig {
+	cfg := GoalCloudConfig{OrientationToleranceDeg: tolDeg, PositionToleranceMM: posTolMM}
 	if cfg.OrientationToleranceDeg == 0 {
 		cfg.OrientationToleranceDeg = defaultOrientationToleranceDeg
 	}
@@ -77,10 +79,10 @@ func resolveGoalCloudConfig(tolDeg, posTolMM float64, logger logging.Logger) goa
 	return cfg
 }
 
-// validateGoalCloudTolerances is shared by both arm models' Validate methods. Note NaN
+// ValidateGoalCloudTolerances is shared by both arm models' Validate methods. Note NaN
 // must be rejected explicitly: NaN comparisons are always false, so a NaN would slip
 // through the range checks.
-func validateGoalCloudTolerances(tolDeg, posTolMM float64) error {
+func ValidateGoalCloudTolerances(tolDeg, posTolMM float64) error {
 	if math.IsNaN(tolDeg) || tolDeg < 0 || tolDeg > 180 {
 		return fmt.Errorf("orientation_tolerance_deg must be in [0, 180], got %v", tolDeg)
 	}
@@ -111,7 +113,7 @@ func validateGoalCloudTolerances(tolDeg, posTolMM float64) error {
 //     is exactly -180.
 //     The cost is that roll cannot be constrained at all, which is why this is
 //     approach-axis planning with free roll.
-func coneToPoseCloud(cfg goalCloudConfig) *referenceframe.PoseCloud {
+func coneToPoseCloud(cfg GoalCloudConfig) *referenceframe.PoseCloud {
 	return &referenceframe.PoseCloud{
 		X:     cfg.PositionToleranceMM,
 		Y:     cfg.PositionToleranceMM,
@@ -184,32 +186,34 @@ const (
 	extraKeyGoalMetricType = "goal_metric_type"
 )
 
-// goalPath reports which precedence row buildMoveDestination took, so callers can wrap
+// GoalPath reports which precedence row BuildMoveDestination took, so callers can wrap
 // failures appropriately without re-inspecting extra (which would duplicate the
 // precedence logic across both arm models and let it drift).
-type goalPath int
+// The type is exported so callers can name what BuildMoveDestination hands them; its
+// values are not, so no caller can name a path other than the one it hands back.
+type GoalPath int
 
 const (
 	// pathInvalid is the zero value, returned alongside any error. It exists so that an
-	// error return is never mistakable for pathCone: wrapMoveErr would otherwise dress a
+	// error return is never mistakable for pathCone: WrapMoveErr would otherwise dress a
 	// pose_cloud parse error up as a cone-planning failure and tell the caller to widen
 	// tolerances they never set.
-	pathInvalid    goalPath = iota
+	pathInvalid    GoalPath = iota
 	pathCone                // cone from config
 	pathRawCloud            // caller-supplied pose_cloud
 	pathMetricType          // caller-supplied goal_metric_type; no cloud sent
 )
 
-// buildMoveDestination applies the precedence table (see the plan/spec).
+// BuildMoveDestination applies the precedence table (see the plan/spec).
 //
 // originFrame is the FULLY-FORMED frame name (e.g. "myarm_origin"); this function does
 // not append "_origin". It is passed to NewPoseInFrame unmodified.
 //
 // On success it returns a destination, a NEW extras map (the caller's map is never
 // mutated), and the path taken. On error it returns (nil, nil, pathInvalid, err).
-func buildMoveDestination(originFrame string, pose spatialmath.Pose, cfg goalCloudConfig,
+func BuildMoveDestination(originFrame string, pose spatialmath.Pose, cfg GoalCloudConfig,
 	extra map[string]interface{},
-) (*referenceframe.PoseInFrame, map[string]interface{}, goalPath, error) {
+) (*referenceframe.PoseInFrame, map[string]interface{}, GoalPath, error) {
 	rawCloud, hasCloud := extra[extraKeyPoseCloud]
 	_, hasMetric := extra[extraKeyGoalMetricType]
 
@@ -246,7 +250,7 @@ func buildMoveDestination(originFrame string, pose spatialmath.Pose, cfg goalClo
 	}
 }
 
-// wrapMoveErr adds actionable guidance to a planning failure. The cone-specific wording
+// WrapMoveErr adds actionable guidance to a planning failure. The cone-specific wording
 // applies only on the cone path: on the other paths it would misdirect, telling a caller
 // who just passed position_only to pass position_only, or blaming a config tolerance that
 // had no bearing on a raw-cloud failure.
@@ -255,7 +259,7 @@ func buildMoveDestination(originFrame string, pose spatialmath.Pose, cfg goalClo
 // leaves no reachable orientation, and too small a position tolerance means the solver can
 // never land inside the cloud (which reverts planning to strict 6-DOF scoring and fails
 // every move). Naming only the orientation knob would point at the wrong one half the time.
-func wrapMoveErr(err error, path goalPath, cfg goalCloudConfig) error {
+func WrapMoveErr(err error, path GoalPath, cfg GoalCloudConfig) error {
 	if err == nil {
 		return nil
 	}

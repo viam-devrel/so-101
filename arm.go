@@ -19,6 +19,8 @@ import (
 	"go.viam.com/utils/rpc"
 
 	"so_arm/internal/geometry"
+	"so_arm/internal/planning"
+	"so_arm/internal/servocmd"
 )
 
 var (
@@ -147,7 +149,7 @@ func (cfg *SO101ArmConfig) Validate(path string) ([]string, []string, error) {
 		return nil, nil, err
 	}
 
-	if err := validateGoalCloudTolerances(cfg.OrientationToleranceDeg, cfg.PositionToleranceMM); err != nil {
+	if err := planning.ValidateGoalCloudTolerances(cfg.OrientationToleranceDeg, cfg.PositionToleranceMM); err != nil {
 		return nil, nil, err
 	}
 
@@ -175,7 +177,7 @@ type so101 struct {
 
 	// goalCloud is the resolved approach-axis tolerance pair. Set once in NewSO101 and
 	// never mutated (the model is resource.AlwaysRebuild), so it needs no mutex.
-	goalCloud goalCloudConfig
+	goalCloud planning.GoalCloudConfig
 
 	mu       sync.RWMutex
 	moveLock sync.Mutex
@@ -340,7 +342,7 @@ func NewSO101(ctx context.Context, deps resource.Dependencies, name resource.Nam
 		defaultSpeed: speedDegsPerSec,
 		defaultAcc:   accelerationDegsPerSec,
 		motion:       ms,
-		goalCloud:    resolveGoalCloudConfig(conf.OrientationToleranceDeg, conf.PositionToleranceMM, logger),
+		goalCloud:    planning.ResolveGoalCloudConfig(conf.OrientationToleranceDeg, conf.PositionToleranceMM, logger),
 		cancelCtx:    cancelCtx,
 		cancelFunc:   cancelFunc,
 		initCtx:      ctx, // Store initialization context
@@ -392,7 +394,7 @@ func (s *so101) EndPosition(ctx context.Context, extra map[string]interface{}) (
 // constrained to within orientation_tolerance_deg, while roll about that axis is free.
 //
 // Callers may bypass the cone via extra: "goal_metric_type" restores the old
-// orientation-agnostic behavior, and "pose_cloud" supplies a raw cloud. See goal_cloud.go.
+// orientation-agnostic behavior, and "pose_cloud" supplies a raw cloud. See internal/planning.
 //
 // Requires viam-server >= 0.127.0; older servers silently ignore goal clouds, which makes
 // planning revert to strict six-DOF scoring and fail.
@@ -402,10 +404,10 @@ func (s *so101) MoveToPosition(ctx context.Context, pose spatialmath.Pose, extra
 	s.exitManualLocked("motion command received")
 	s.mu.Unlock()
 
-	dest, planExtra, path, err := buildMoveDestination(
+	dest, planExtra, path, err := planning.BuildMoveDestination(
 		fmt.Sprintf("%v_origin", s.Name().Name), pose, s.goalCloud, extra)
 	if err != nil {
-		// Return the build error UNWRAPPED: path is pathInvalid, and wrapping a pose_cloud
+		// Return the build error UNWRAPPED: path is the zero GoalPath, and wrapping a pose_cloud
 		// parse error as a cone-planning failure would tell the caller to widen tolerances
 		// they never set.
 		return err
@@ -417,7 +419,7 @@ func (s *so101) MoveToPosition(ctx context.Context, pose spatialmath.Pose, extra
 		Destination:   dest,
 		Extra:         planExtra,
 	})
-	return wrapMoveErr(err, path, s.goalCloud)
+	return planning.WrapMoveErr(err, path, s.goalCloud)
 }
 
 // clampPositions clamps joint inputs (already in radians) to each joint's calibrated
@@ -843,10 +845,10 @@ func (s *so101) exitManualLocked(reason string) {
 
 func (s *so101) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
 	// The servo_* family lets a gripper on this bus drive its own servo without holding a
-	// serial connection. Routed before the arm's own commands; handleServoCommand refuses
-	// any servo this arm drives itself, so the two cannot collide.
-	if command, ok := cmd["command"].(string); ok && isServoCommand(command) {
-		return handleServoCommand(ctx, cmd, s.controller, s.armServoIDs)
+	// serial connection. Routed before the arm's own commands; servocmd.HandleServoCommand
+	// refuses any servo this arm drives itself, so the two cannot collide.
+	if command, ok := cmd["command"].(string); ok && servocmd.IsServoCommand(command) {
+		return servocmd.HandleServoCommand(ctx, cmd, s.controller, s.armServoIDs)
 	}
 
 	// Handle custom commands specific to SO-101

@@ -15,6 +15,7 @@ import (
 	"go.viam.com/rdk/spatialmath"
 
 	"so_arm/internal/geometry"
+	"so_arm/internal/servocmd"
 )
 
 func TestSO101GripperConfigValidate(t *testing.T) {
@@ -104,14 +105,14 @@ func (f *fakeServoArm) DoCommand(_ context.Context, cmd map[string]any) (map[str
 	defer f.mu.Unlock()
 	f.commands = append(f.commands, cmd)
 
-	if cmd["command"] == cmdServoCapabilities {
+	if cmd["command"] == servocmd.CmdServoCapabilities {
 		return map[string]any{"servo_commands": true, "servo_ids": f.capabilities}, nil
 	}
 	if f.doErr != nil {
 		return nil, f.doErr
 	}
 	switch cmd["command"] {
-	case cmdServoPosition:
+	case servocmd.CmdServoPosition:
 		return map[string]any{"percent": f.percent, "raw": f.raw}, nil
 	default:
 		return map[string]any{}, nil
@@ -125,7 +126,7 @@ func (f *fakeServoArm) issued() []string {
 	var names []string
 	for _, c := range f.commands {
 		name, _ := c["command"].(string)
-		if name == cmdServoCapabilities {
+		if name == servocmd.CmdServoCapabilities {
 			continue
 		}
 		names = append(names, name)
@@ -173,7 +174,7 @@ func TestGripperConstructorProbesCapabilities(t *testing.T) {
 	_ = newTestGripper(t, fa)
 
 	require.NotEmpty(t, fa.commands)
-	assert.Equal(t, cmdServoCapabilities, fa.commands[0]["command"],
+	assert.Equal(t, servocmd.CmdServoCapabilities, fa.commands[0]["command"],
 		"constructor must probe before being used")
 }
 
@@ -211,10 +212,10 @@ func TestGripperOpenCommandsServoAndWaits(t *testing.T) {
 
 	require.NoError(t, g.Open(context.Background(), nil))
 
-	assert.Equal(t, []string{cmdServoMove, cmdServoWaitStop}, fa.issued(),
+	assert.Equal(t, []string{servocmd.CmdServoMove, servocmd.CmdServoWaitStop}, fa.issued(),
 		"Open should command the servo then wait for it to settle")
 
-	move := fa.lastCommand(cmdServoMove)
+	move := fa.lastCommand(servocmd.CmdServoMove)
 	assert.Equal(t, 6, move["servo_id"])
 	assert.Equal(t, 95.0, move["percent"], "open position, as a percentage")
 }
@@ -227,8 +228,8 @@ func TestGripperStopIsScopedToItsOwnServo(t *testing.T) {
 
 	require.NoError(t, g.Stop(context.Background(), nil))
 
-	assert.Equal(t, []string{cmdServoStop}, fa.issued())
-	assert.Equal(t, 6, fa.lastCommand(cmdServoStop)["servo_id"])
+	assert.Equal(t, []string{servocmd.CmdServoStop}, fa.issued())
+	assert.Equal(t, 6, fa.lastCommand(servocmd.CmdServoStop)["servo_id"])
 }
 
 func TestGripperGetPositionReturnsPercent(t *testing.T) {
@@ -249,7 +250,7 @@ func TestGripperSetPositionClampsAndCommands(t *testing.T) {
 		"command": "set_position", "percentage": 150.0,
 	})
 	require.NoError(t, err)
-	assert.Equal(t, 100.0, fa.lastCommand(cmdServoMove)["percent"])
+	assert.Equal(t, 100.0, fa.lastCommand(servocmd.CmdServoMove)["percent"])
 }
 
 // Geometries must degrade rather than fail when the arm cannot be reached, so a leased or
@@ -264,7 +265,7 @@ func TestGripperGeometriesFallsBackWhenArmErrors(t *testing.T) {
 	assert.NotEmpty(t, geoms)
 }
 
-// The full loop: a real handleServoCommand backed by fake single-servo ops, driven by the
+// The full loop: a real servocmd.HandleServoCommand backed by fake single-servo ops, driven by the
 // real gripper over DoCommand. This is what proves the protocol actually connects.
 type dispatchingArm struct {
 	arm.Arm
@@ -275,7 +276,7 @@ type dispatchingArm struct {
 func (d *dispatchingArm) Name() resource.Name { return d.name }
 
 func (d *dispatchingArm) DoCommand(ctx context.Context, cmd map[string]any) (map[string]any, error) {
-	return handleServoCommand(ctx, cmd, d.ops, []int{1, 2, 3, 4, 5})
+	return servocmd.HandleServoCommand(ctx, cmd, d.ops, []int{1, 2, 3, 4, 5})
 }
 
 func TestGripperDrivesRealDispatcherEndToEnd(t *testing.T) {

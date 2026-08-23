@@ -6,14 +6,29 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/golang/geo/r3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.viam.com/rdk/components/arm"
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/resource"
 	"go.viam.com/rdk/services/motion"
+	"go.viam.com/rdk/spatialmath"
 	injectmotion "go.viam.com/rdk/testutils/inject/motion"
+
+	"so_arm/internal/planning"
 )
+
+// testGoal is a tool pointing straight down, a typical SO-101 grasp pose. Mirrors
+// internal/planning's own testGoal helper (moved there with goal_cloud.go); this copy
+// exists because this file constructs the root so101/simulatedSO101 structs directly and
+// so cannot move with it.
+func testGoal() spatialmath.Pose {
+	return spatialmath.NewPose(
+		r3.Vector{X: 300, Y: 0, Z: 200},
+		&spatialmath.OrientationVectorDegrees{OX: 0, OY: 0, OZ: -1, Theta: 0},
+	)
+}
 
 // captureMotion returns an injected motion service that records the last MoveReq.
 func captureMotion(got *motion.MoveReq) *injectmotion.MotionService {
@@ -26,7 +41,7 @@ func captureMotion(got *motion.MoveReq) *injectmotion.MotionService {
 }
 
 // failingMotion returns an injected motion service whose Move always fails, so tests can
-// exercise wrapMoveErr -- the error message is this design's entire UX, since a failed
+// exercise planning.WrapMoveErr -- the error message is this design's entire UX, since a failed
 // plan deliberately has no fallback.
 func failingMotion(err error) *injectmotion.MotionService {
 	ms := injectmotion.NewMotionService("builtin")
@@ -42,7 +57,7 @@ func TestHardwareArmMoveToPositionSendsGoalCloud(t *testing.T) {
 		name:      arm.Named("myarm"),
 		logger:    logging.NewTestLogger(t),
 		motion:    captureMotion(&got),
-		goalCloud: resolveGoalCloudConfig(0, 0, nil),
+		goalCloud: planning.ResolveGoalCloudConfig(0, 0, nil),
 	}
 
 	require.NoError(t, a.MoveToPosition(context.Background(), testGoal(), nil))
@@ -60,7 +75,7 @@ func TestHardwareArmMoveToPositionHonorsMetricTypeOverride(t *testing.T) {
 		name:      arm.Named("myarm"),
 		logger:    logging.NewTestLogger(t),
 		motion:    captureMotion(&got),
-		goalCloud: resolveGoalCloudConfig(0, 0, nil),
+		goalCloud: planning.ResolveGoalCloudConfig(0, 0, nil),
 	}
 
 	require.NoError(t, a.MoveToPosition(context.Background(), testGoal(),
@@ -71,13 +86,13 @@ func TestHardwareArmMoveToPositionHonorsMetricTypeOverride(t *testing.T) {
 }
 
 // TestHardwareArmMoveToPositionWrapsConeFailure drives a REAL failing Move down the cone
-// path (no extra) and pins wrapMoveErr's cone-branch message. This is the design's whole
+// path (no extra) and pins planning.WrapMoveErr's cone-branch message. This is the design's whole
 // UX for a failed plan -- there is deliberately no fallback -- so the message must name
 // BOTH tolerances (either can cause the failure), the position_only remedy, and the
 // silent-ignore version hint.
 func TestHardwareArmMoveToPositionWrapsConeFailure(t *testing.T) {
 	sentinel := errors.New("boom")
-	cfg := resolveGoalCloudConfig(0, 0, nil)
+	cfg := planning.ResolveGoalCloudConfig(0, 0, nil)
 	a := &so101{
 		name:      arm.Named("myarm"),
 		logger:    logging.NewTestLogger(t),
@@ -96,7 +111,7 @@ func TestHardwareArmMoveToPositionWrapsConeFailure(t *testing.T) {
 }
 
 // TestHardwareArmMoveToPositionWrapsRawCloudFailure drives a REAL failing Move down the
-// raw-cloud path (caller-supplied pose_cloud) and pins wrapMoveErr's raw-cloud branch. The
+// raw-cloud path (caller-supplied pose_cloud) and pins planning.WrapMoveErr's raw-cloud branch. The
 // important assertion is the NEGATIVE one: this path must NOT name
 // orientation_tolerance_deg, since the config tolerance had no bearing on a caller-supplied
 // cloud's failure and naming it would misdirect. This is also what catches a `case`
@@ -107,7 +122,7 @@ func TestHardwareArmMoveToPositionWrapsRawCloudFailure(t *testing.T) {
 		name:      arm.Named("myarm"),
 		logger:    logging.NewTestLogger(t),
 		motion:    failingMotion(sentinel),
-		goalCloud: resolveGoalCloudConfig(0, 0, nil),
+		goalCloud: planning.ResolveGoalCloudConfig(0, 0, nil),
 	}
 
 	err := a.MoveToPosition(context.Background(), testGoal(),
@@ -121,7 +136,7 @@ func TestHardwareArmMoveToPositionWrapsRawCloudFailure(t *testing.T) {
 
 // TestHardwareArmMoveToPositionMetricTypeFailureUnwrapped drives a REAL failing Move down
 // the metric-type path (caller-supplied goal_metric_type; no cloud sent) and pins that
-// wrapMoveErr passes the error through EXACTLY unwrapped: the caller chose the metric, so
+// planning.WrapMoveErr passes the error through EXACTLY unwrapped: the caller chose the metric, so
 // cone wording would just tell them to do what they already did.
 func TestHardwareArmMoveToPositionMetricTypeFailureUnwrapped(t *testing.T) {
 	sentinel := errors.New("boom")
@@ -129,7 +144,7 @@ func TestHardwareArmMoveToPositionMetricTypeFailureUnwrapped(t *testing.T) {
 		name:      arm.Named("myarm"),
 		logger:    logging.NewTestLogger(t),
 		motion:    failingMotion(sentinel),
-		goalCloud: resolveGoalCloudConfig(0, 0, nil),
+		goalCloud: planning.ResolveGoalCloudConfig(0, 0, nil),
 	}
 
 	err := a.MoveToPosition(context.Background(), testGoal(),
@@ -143,7 +158,7 @@ func TestSimulatedArmMoveToPositionSendsGoalCloud(t *testing.T) {
 		name:      arm.Named("simarm"),
 		logger:    logging.NewTestLogger(t),
 		motion:    captureMotion(&got),
-		goalCloud: resolveGoalCloudConfig(0, 0, nil),
+		goalCloud: planning.ResolveGoalCloudConfig(0, 0, nil),
 	}
 
 	require.NoError(t, s.MoveToPosition(context.Background(), testGoal(), nil))
@@ -187,21 +202,19 @@ func simArmWithTolerances(t *testing.T, tolDeg, posTolMM float64) *simulatedSO10
 
 // TestSimulatedConstructorWiresGoalCloud guards the one thing the struct-literal tests
 // above cannot see: that the CONSTRUCTOR resolves the config into goalCloud. Dropping that
-// line leaves goalCloud zero-valued -- X/Y/Z/OZ all 0 -- which per goal_cloud.go is a cloud
+// line leaves goalCloud zero-valued -- X/Y/Z/OZ all 0 -- which per internal/planning is a cloud
 // no IK solution realistically satisfies, so planning reverts to strict 6-DOF scoring and
 // every move fails silently, with the construction-time warnings dead. The struct-literal
 // tests set the field themselves and would stay green through all of that.
 func TestSimulatedConstructorWiresGoalCloud(t *testing.T) {
 	// Defaults: catches the line being dropped entirely.
 	sim := simArmWithTolerances(t, 0, 0)
-	assert.Equal(t, goalCloudConfig{
-		OrientationToleranceDeg: defaultOrientationToleranceDeg,
-		PositionToleranceMM:     defaultPositionToleranceMM,
-	}, sim.goalCloud, "the constructor must resolve defaults into goalCloud")
+	assert.Equal(t, planning.GoalCloudConfig{OrientationToleranceDeg: 30, PositionToleranceMM: 1},
+		sim.goalCloud, "the constructor must resolve defaults into goalCloud")
 
 	// Explicit values: catches a line that resolves but ignores the config.
 	sim = simArmWithTolerances(t, 12.5, 0.25)
-	assert.Equal(t, goalCloudConfig{OrientationToleranceDeg: 12.5, PositionToleranceMM: 0.25},
+	assert.Equal(t, planning.GoalCloudConfig{OrientationToleranceDeg: 12.5, PositionToleranceMM: 0.25},
 		sim.goalCloud, "explicit config must reach goalCloud unchanged")
 }
 
@@ -214,7 +227,7 @@ func TestHardwareArmMoveToPositionExitsManualMode(t *testing.T) {
 		name:      arm.Named("myarm"),
 		logger:    logging.NewTestLogger(t),
 		motion:    captureMotion(&got),
-		goalCloud: resolveGoalCloudConfig(0, 0, nil),
+		goalCloud: planning.ResolveGoalCloudConfig(0, 0, nil),
 	}
 	// exitManualLocked no-ops unless the session is non-nil AND running, so the test only
 	// has teeth with a started session. newFakeIO stands in for the servo bus.

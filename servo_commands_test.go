@@ -7,9 +7,11 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"so_arm/internal/servocmd"
 )
 
-// fakeServoOps records the single-servo operations handleServoCommand dispatches, so the
+// fakeServoOps records the single-servo operations servocmd.HandleServoCommand dispatches, so the
 // protocol can be tested without a serial bus.
 type fakeServoOps struct {
 	movedID      int
@@ -60,8 +62,8 @@ var armServos = []int{1, 2, 3, 4, 5}
 
 func TestServoCapabilitiesReportsNonArmServos(t *testing.T) {
 	ops := &fakeServoOps{}
-	res, err := handleServoCommand(context.Background(),
-		map[string]any{"command": cmdServoCapabilities}, ops, armServos)
+	res, err := servocmd.HandleServoCommand(context.Background(),
+		map[string]any{"command": servocmd.CmdServoCapabilities}, ops, armServos)
 	require.NoError(t, err)
 	assert.Equal(t, true, res["servo_commands"])
 	assert.Equal(t, []int{6}, res["servo_ids"])
@@ -70,16 +72,16 @@ func TestServoCapabilitiesReportsNonArmServos(t *testing.T) {
 func TestServoCapabilitiesRespectsFourDOFArm(t *testing.T) {
 	// A 4-DOF variant leaves servos 5 and 6 available, so a gripper may sit on servo 5.
 	ops := &fakeServoOps{}
-	res, err := handleServoCommand(context.Background(),
-		map[string]any{"command": cmdServoCapabilities}, ops, []int{1, 2, 3, 4})
+	res, err := servocmd.HandleServoCommand(context.Background(),
+		map[string]any{"command": servocmd.CmdServoCapabilities}, ops, []int{1, 2, 3, 4})
 	require.NoError(t, err)
 	assert.Equal(t, []int{5, 6}, res["servo_ids"])
 }
 
 func TestServoMoveByPercent(t *testing.T) {
 	ops := &fakeServoOps{percent: 95, raw: 3000}
-	res, err := handleServoCommand(context.Background(), map[string]any{
-		"command": cmdServoMove, "servo_id": 6, "percent": 95.0,
+	res, err := servocmd.HandleServoCommand(context.Background(), map[string]any{
+		"command": servocmd.CmdServoMove, "servo_id": 6, "percent": 95.0,
 	}, ops, armServos)
 	require.NoError(t, err)
 	assert.Equal(t, 6, ops.movedID)
@@ -89,8 +91,8 @@ func TestServoMoveByPercent(t *testing.T) {
 
 func TestServoMoveByRaw(t *testing.T) {
 	ops := &fakeServoOps{}
-	_, err := handleServoCommand(context.Background(), map[string]any{
-		"command": cmdServoMove, "servo_id": 6, "raw": 1834,
+	_, err := servocmd.HandleServoCommand(context.Background(), map[string]any{
+		"command": servocmd.CmdServoMove, "servo_id": 6, "raw": 1834,
 	}, ops, armServos)
 	require.NoError(t, err)
 	assert.Equal(t, 1834, ops.movedRaw)
@@ -100,8 +102,8 @@ func TestServoMoveByRaw(t *testing.T) {
 func TestServoMoveClampsPercent(t *testing.T) {
 	for _, tc := range []struct{ in, want float64 }{{-10, 0}, {150, 100}, {42, 42}} {
 		ops := &fakeServoOps{}
-		_, err := handleServoCommand(context.Background(), map[string]any{
-			"command": cmdServoMove, "servo_id": 6, "percent": tc.in,
+		_, err := servocmd.HandleServoCommand(context.Background(), map[string]any{
+			"command": servocmd.CmdServoMove, "servo_id": 6, "percent": tc.in,
 		}, ops, armServos)
 		require.NoError(t, err)
 		assert.Equal(t, tc.want, ops.movedPercent, "percent %v", tc.in)
@@ -113,8 +115,8 @@ func TestServoMoveClampsPercent(t *testing.T) {
 func TestServoCommandRejectsArmOwnedServo(t *testing.T) {
 	for _, id := range armServos {
 		ops := &fakeServoOps{}
-		_, err := handleServoCommand(context.Background(), map[string]any{
-			"command": cmdServoMove, "servo_id": id, "percent": 50.0,
+		_, err := servocmd.HandleServoCommand(context.Background(), map[string]any{
+			"command": servocmd.CmdServoMove, "servo_id": id, "percent": 50.0,
 		}, ops, armServos)
 		require.Error(t, err, "servo %d belongs to the arm", id)
 		assert.Zero(t, ops.movedID, "no move should be issued for servo %d", id)
@@ -124,8 +126,8 @@ func TestServoCommandRejectsArmOwnedServo(t *testing.T) {
 func TestServoCommandRejectsOutOfRangeServo(t *testing.T) {
 	for _, id := range []int{0, 7, -1} {
 		ops := &fakeServoOps{}
-		_, err := handleServoCommand(context.Background(), map[string]any{
-			"command": cmdServoMove, "servo_id": id, "percent": 50.0,
+		_, err := servocmd.HandleServoCommand(context.Background(), map[string]any{
+			"command": servocmd.CmdServoMove, "servo_id": id, "percent": 50.0,
 		}, ops, armServos)
 		require.Error(t, err, "servo id %d is out of range", id)
 	}
@@ -133,8 +135,8 @@ func TestServoCommandRejectsOutOfRangeServo(t *testing.T) {
 
 func TestServoCommandRequiresServoID(t *testing.T) {
 	ops := &fakeServoOps{}
-	_, err := handleServoCommand(context.Background(),
-		map[string]any{"command": cmdServoMove, "percent": 50.0}, ops, armServos)
+	_, err := servocmd.HandleServoCommand(context.Background(),
+		map[string]any{"command": servocmd.CmdServoMove, "percent": 50.0}, ops, armServos)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "servo_id")
 }
@@ -150,8 +152,8 @@ func TestServoCommandCoercesNumericTypes(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			ops := &fakeServoOps{}
-			_, err := handleServoCommand(context.Background(), map[string]any{
-				"command": cmdServoMove, "servo_id": id, "percent": 50.0,
+			_, err := servocmd.HandleServoCommand(context.Background(), map[string]any{
+				"command": servocmd.CmdServoMove, "servo_id": id, "percent": 50.0,
 			}, ops, armServos)
 			require.NoError(t, err)
 			assert.Equal(t, 6, ops.movedID)
@@ -160,8 +162,8 @@ func TestServoCommandCoercesNumericTypes(t *testing.T) {
 
 	t.Run("raw as float64", func(t *testing.T) {
 		ops := &fakeServoOps{}
-		_, err := handleServoCommand(context.Background(), map[string]any{
-			"command": cmdServoMove, "servo_id": float64(6), "raw": float64(1834),
+		_, err := servocmd.HandleServoCommand(context.Background(), map[string]any{
+			"command": servocmd.CmdServoMove, "servo_id": float64(6), "raw": float64(1834),
 		}, ops, armServos)
 		require.NoError(t, err)
 		assert.Equal(t, 1834, ops.movedRaw)
@@ -170,8 +172,8 @@ func TestServoCommandCoercesNumericTypes(t *testing.T) {
 
 func TestServoPositionReturnsPercentAndRaw(t *testing.T) {
 	ops := &fakeServoOps{percent: 42.5, raw: 1834}
-	res, err := handleServoCommand(context.Background(),
-		map[string]any{"command": cmdServoPosition, "servo_id": 6}, ops, armServos)
+	res, err := servocmd.HandleServoCommand(context.Background(),
+		map[string]any{"command": servocmd.CmdServoPosition, "servo_id": 6}, ops, armServos)
 	require.NoError(t, err)
 	assert.Equal(t, 42.5, res["percent"])
 	assert.Equal(t, 1834, res["raw"])
@@ -179,16 +181,16 @@ func TestServoPositionReturnsPercentAndRaw(t *testing.T) {
 
 func TestServoStopIsScopedToOneServo(t *testing.T) {
 	ops := &fakeServoOps{}
-	_, err := handleServoCommand(context.Background(),
-		map[string]any{"command": cmdServoStop, "servo_id": 6}, ops, armServos)
+	_, err := servocmd.HandleServoCommand(context.Background(),
+		map[string]any{"command": servocmd.CmdServoStop, "servo_id": 6}, ops, armServos)
 	require.NoError(t, err)
 	assert.Equal(t, 6, ops.stoppedID)
 }
 
 func TestServoWaitStopIsScopedToOneServo(t *testing.T) {
 	ops := &fakeServoOps{}
-	_, err := handleServoCommand(context.Background(), map[string]any{
-		"command": cmdServoWaitStop, "servo_id": 6, "timeout_ms": 1500,
+	_, err := servocmd.HandleServoCommand(context.Background(), map[string]any{
+		"command": servocmd.CmdServoWaitStop, "servo_id": 6, "timeout_ms": 1500,
 	}, ops, armServos)
 	require.NoError(t, err)
 	assert.Equal(t, []int{6}, ops.waitedIDs)
@@ -198,23 +200,23 @@ func TestServoWaitStopIsScopedToOneServo(t *testing.T) {
 func TestServoCommandPropagatesOpsError(t *testing.T) {
 	boom := errors.New("bus is on fire")
 	ops := &fakeServoOps{moveErr: boom}
-	_, err := handleServoCommand(context.Background(), map[string]any{
-		"command": cmdServoMove, "servo_id": 6, "percent": 50.0,
+	_, err := servocmd.HandleServoCommand(context.Background(), map[string]any{
+		"command": servocmd.CmdServoMove, "servo_id": 6, "percent": 50.0,
 	}, ops, armServos)
 	require.ErrorIs(t, err, boom)
 }
 
-// isServoCommand lets the arm's DoCommand route only the servo_* family here and leave
+// servocmd.IsServoCommand lets the arm's DoCommand route only the servo_* family here and leave
 // its own commands alone.
 func TestIsServoCommand(t *testing.T) {
-	assert.True(t, isServoCommand(cmdServoMove))
-	assert.True(t, isServoCommand(cmdServoCapabilities))
-	assert.False(t, isServoCommand("set_torque"))
-	assert.False(t, isServoCommand(""))
+	assert.True(t, servocmd.IsServoCommand(servocmd.CmdServoMove))
+	assert.True(t, servocmd.IsServoCommand(servocmd.CmdServoCapabilities))
+	assert.False(t, servocmd.IsServoCommand("set_torque"))
+	assert.False(t, servocmd.IsServoCommand(""))
 }
 
-// The real controller must satisfy servoOps, or the arm cannot serve the protocol that
+// The real controller must satisfy servocmd.ServoOps, or the arm cannot serve the protocol that
 // every test above exercises against fakes. This assertion is the seam between the tested
 // dispatch logic and the hardware path, which needs a serial port and so cannot be unit
 // tested directly.
-var _ servoOps = (*ControllerHandle)(nil)
+var _ servocmd.ServoOps = (*ControllerHandle)(nil)

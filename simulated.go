@@ -18,6 +18,7 @@ import (
 	"go.viam.com/rdk/spatialmath"
 
 	"so_arm/internal/geometry"
+	"so_arm/internal/planning"
 )
 
 // SO101SimulatedModel is the model triplet for the hardware-free simulated SO-101 arm.
@@ -104,7 +105,7 @@ func (cfg *SO101SimulatedArmConfig) Validate(path string) ([]string, []string, e
 		}
 	}
 
-	if err := validateGoalCloudTolerances(cfg.OrientationToleranceDeg, cfg.PositionToleranceMM); err != nil {
+	if err := planning.ValidateGoalCloudTolerances(cfg.OrientationToleranceDeg, cfg.PositionToleranceMM); err != nil {
 		return nil, nil, err
 	}
 
@@ -156,7 +157,7 @@ type simulatedSO101 struct {
 
 	// goalCloud is the resolved approach-axis tolerance pair. Set once in
 	// newSimulatedSO101 and never mutated (resource.AlwaysRebuild), so it needs no mutex.
-	goalCloud goalCloudConfig
+	goalCloud planning.GoalCloudConfig
 
 	// lifetime management
 	closed     atomic.Bool
@@ -211,7 +212,7 @@ func newSimulatedSO101(
 		motion:           ms,
 		speed:            speedDegsPerSec * math.Pi / 180.0,
 		visualizeEEFrame: conf.VisualizeEEFrame,
-		goalCloud:        resolveGoalCloudConfig(conf.OrientationToleranceDeg, conf.PositionToleranceMM, logger),
+		goalCloud:        planning.ResolveGoalCloudConfig(conf.OrientationToleranceDeg, conf.PositionToleranceMM, logger),
 		cancelCtx:        cancelCtx,
 		cancelFunc:       cancelFunc,
 		currInputs:       make([]float64, len(model.DoF())),
@@ -328,7 +329,7 @@ func (s *simulatedSO101) EndPosition(ctx context.Context, extra map[string]inter
 // As with the devrel:so101:arm model, the planner is given an approach-axis cone around
 // the goal orientation rather than discarding orientation via "position_only": the tool's
 // pointing direction is constrained to within orientation_tolerance_deg, while roll about
-// that axis is free. Callers may bypass the cone via extra; see goal_cloud.go.
+// that axis is free. Callers may bypass the cone via extra; see internal/planning.
 //
 // Requires viam-server >= 0.127.0; older servers silently ignore goal clouds.
 func (s *simulatedSO101) MoveToPosition(ctx context.Context, pose spatialmath.Pose, extra map[string]interface{}) error {
@@ -336,10 +337,10 @@ func (s *simulatedSO101) MoveToPosition(ctx context.Context, pose spatialmath.Po
 		return errors.New("MoveToPosition requires a motion service, which was not available at construction")
 	}
 
-	dest, planExtra, path, err := buildMoveDestination(
+	dest, planExtra, path, err := planning.BuildMoveDestination(
 		fmt.Sprintf("%v_origin", s.name.Name), pose, s.goalCloud, extra)
 	if err != nil {
-		// Return the build error UNWRAPPED: path is pathInvalid, and wrapping a pose_cloud
+		// Return the build error UNWRAPPED: path is the zero GoalPath, and wrapping a pose_cloud
 		// parse error as a cone-planning failure would tell the caller to widen tolerances
 		// they never set.
 		return err
@@ -351,7 +352,7 @@ func (s *simulatedSO101) MoveToPosition(ctx context.Context, pose spatialmath.Po
 		Destination:   dest,
 		Extra:         planExtra,
 	})
-	return wrapMoveErr(err, path, s.goalCloud)
+	return planning.WrapMoveErr(err, path, s.goalCloud)
 }
 
 // MoveToJointPositions starts a move to the given joint configuration and blocks until it
