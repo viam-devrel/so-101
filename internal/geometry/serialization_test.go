@@ -16,10 +16,10 @@ import (
 // tool-frame graft and frame rename are in-memory edits to the parsed LinkConfigs; if OriginalFile
 // still points at the raw URDF, the transmitted model is the UN-grafted arm (native end effector
 // ~98mm past so101.json's TCP) even though the in-process model is correct. That mismatch put the
-// motion service's EE -- and any child component (the gripper) parented to the arm -- at the wrong
-// place while every in-process unit test stayed green. This test round-trips the URDF model through
-// the exact gRPC (de)serialization and asserts the transmitted model matches the JSON TCP and keeps
-// its meshes. Do NOT weaken it to an in-process Transform check -- the boundary is the whole point.
+// motion service's EE -- and the gripper parented to the arm -- in the wrong place while every
+// in-process unit test stayed green. This round-trips the model through the exact gRPC
+// (de)serialization and asserts the result matches the JSON TCP and keeps its meshes. Do NOT
+// weaken it to an in-process Transform check -- the boundary is the whole point.
 func TestURDFModelSurvivesSerialization(t *testing.T) {
 	t.Setenv("VIAM_MODULE_ROOT", testfake.RepoRoot())
 

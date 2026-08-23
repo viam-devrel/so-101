@@ -118,16 +118,15 @@ type ServoProfile struct {
 // MoveServosWithProfiles commands each servo to its angle under its OWN speed and
 // acceleration, in a single SetGoals sync write.
 //
-// This exists alongside writePositions rather than replacing it. writePositions can only
-// issue one shared speed and cannot set acceleration at all, which is why joints arrive at
-// different times today; but two of its callers are single-servo gripper paths where
-// coordination is meaningless, so it stays as it is.
+// It sits alongside writePositions rather than replacing it: writePositions issues one shared
+// speed and no acceleration, but its remaining callers are single-servo gripper paths where
+// coordination is meaningless.
 //
-// Time is always written as 0. RegGoalTime (register 44) is inert on STS servos: it is an
-// SCS-series feature, and FEETECH's own SDK reflects that -- SMS_STS.h defines
-// SMS_STS_GOAL_TIME_L but SMS_STS.cpp never references it, and WritePosEx takes no time
-// parameter and writes a hardcoded 0 to those bytes. Confirmed on hardware: a 10 degree move
-// takes ~335ms whether commanded at 200ms or 3000ms. Writing anything else is ignored.
+// Time is always written as 0. RegGoalTime (register 44) is inert on STS servos -- an
+// SCS-series feature FEETECH's own SDK ignores: SMS_STS.h defines SMS_STS_GOAL_TIME_L,
+// SMS_STS.cpp never references it, and WritePosEx takes no time parameter and writes a
+// hardcoded 0 to those bytes. Confirmed on hardware: a 10 degree move takes ~335ms whether
+// commanded at 200ms or 3000ms.
 func (h *ControllerHandle) MoveServosWithProfiles(
 	ctx context.Context,
 	servoIDs []int,
@@ -385,13 +384,13 @@ func (h *ControllerHandle) Stop(ctx context.Context) error {
 // warning and returns nil, so a still-settling servo doesn't fail an otherwise-complete
 // move).
 //
-// Scoped to the requested servos so an in-flight gripper move on the shared bus cannot
-// block an arm move's completion wait. Polls lock-free after capturing servo references
-// under a brief read lock, so a concurrent Stop is not blocked.
+// Scoped to the requested servos so an in-flight gripper move on the shared bus cannot block
+// an arm move's completion wait. Polls lock-free after capturing servo references under a
+// brief read lock, so a concurrent Stop is not blocked.
 //
-// Each cycle issues one Moving read per servo; those reads serialize at the feetech bus
-// mutex alongside in-flight motion writes. At the 50ms cadence this is negligible, but a
-// future optimization could batch them into a single SyncRead of the Moving register.
+// Each cycle issues one Moving read per servo, serializing at the feetech bus mutex alongside
+// in-flight motion writes. Negligible at the 50ms cadence, but they could be batched into a
+// single SyncRead of the Moving register.
 func (h *ControllerHandle) WaitForServosToStop(ctx context.Context, servoIDs []int, timeoutMs int) error {
 	sess := h.entry.session.Load()
 	if sess == nil {

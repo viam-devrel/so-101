@@ -44,16 +44,16 @@ var (
 		spatialmath.NewPose(r3.Vector{}, &spatialmath.EulerAngles{Pitch: math.Pi, Yaw: 0.0486795}))
 	// GripperTCPPose is the follower gripper's tool center point: the grasp point between
 	// the tips of the two jaws, expressed in the same frame as the poses above (the arm's
-	// "tool" frame). Measured off the follower meshes as BuildGripperMeshes poses them, with
-	// the jaws closed (see TestGripperTCPLiesBetweenTheJawTips, which re-derives these bounds
-	// from the meshes so a mesh regeneration cannot silently strand the TCP inside a finger):
+	// "tool" frame). Measured off the follower meshes as BuildGripperMeshes poses them, jaws
+	// closed. TestGripperTCPLiesBetweenTheJawTips re-derives these bounds from the meshes, so a
+	// mesh regeneration cannot silently strand the TCP inside a finger:
 	//
 	//	static finger contact face  X = 7.67   -- the jaws meet at X = 6.8
 	//	moving jaw contact face     X = 5.92
 	//	contact pads span           Z = 94.4 .. 104.3, center 99.9
 	//
-	// It is a pure translation: the TCP keeps the tool frame's axes, so +Z remains the
-	// approach axis that the arm's goal-cloud orientation planning is built around.
+	// A pure translation: the TCP keeps the tool frame's axes, so +Z remains the approach axis
+	// the arm's goal-cloud orientation planning is built around.
 	GripperTCPPose = spatialmath.NewPoseFromPoint(r3.Vector{X: 6.835, Y: 0, Z: 99.9})
 )
 
@@ -118,25 +118,24 @@ func BuildGripperMeshes(gripperType, meshDetail string, jawAngle float64) ([]spa
 const gripperTCPFrame = "tcp"
 
 // BuildGripperModel builds the gripper's kinematic model: a zero-DoF chain of static links
-// carrying the gripper meshes, ending at GripperTCPPose. Two things hang off this:
+// carrying the gripper meshes, ending at GripperTCPPose.
 //
 //   - The model's leaf is what the frame system calls "the gripper", so GetPose and any motion
-//     request targeting the gripper resolve to the TCP between the jaw tips instead of the arm's
-//     wrist, where the meshes are anchored.
-//   - The frame system takes an arm/gantry/gripper part's collision geometry from its kinematic
-//     model and never calls Geometries() for those subtypes, so attaching the meshes here is what
-//     makes the gripper a real obstacle to motion planning. On viam-server >= 1.0.0 a gripper
-//     whose Kinematics() errors is dropped from the frame system outright, so returning a model
-//     is also what keeps the gripper on the robot at all.
+//     request targeting the gripper resolve to the TCP between the jaw tips, not the arm's
+//     wrist where the meshes are anchored.
+//   - The frame system reads an arm/gantry/gripper part's collision geometry from its kinematic
+//     model and never calls Geometries() for those subtypes, so the meshes become planning
+//     obstacles only by riding on this model. On viam-server >= 1.0.0 a gripper whose
+//     Kinematics() errors is dropped from the frame system outright.
 //
-// The model is static, so the meshes are frozen at the closed jaw pose (GripperJointMin). A DoF
-// here would instead become a variable the motion planner is free to drive, and freezing the jaw
-// open would inflate the swept volume enough to block otherwise-valid plans. Geometries() still
-// serves the live, articulating jaw for the 3D viewer.
+// Static on purpose, with the meshes frozen at the closed jaw pose (GripperJointMin): a DoF
+// would become a variable the motion planner is free to drive, and freezing the jaw open would
+// inflate the swept volume enough to block otherwise-valid plans. Geometries() still serves the
+// live, articulating jaw for the 3D viewer.
 //
-// The result is round-tripped through SVA JSON rather than assembled in memory: a component ships
-// its kinematics to viam-server as ModelConfig().OriginalFile.Bytes, and a model without those
-// bytes transmits as UNSPECIFIED (see TestGripperModelSurvivesSerialization). SVA JSON carries the
+// Round-tripped through SVA JSON rather than assembled in memory: a component ships its
+// kinematics to viam-server as ModelConfig().OriginalFile.Bytes, and a model without those bytes
+// transmits as UNSPECIFIED (see TestGripperModelSurvivesSerialization). SVA JSON carries the
 // meshes across the boundary in GeometryConfig.MeshData.
 func BuildGripperModel(gripperType, meshDetail, name string) (referenceframe.Model, error) {
 	meshes, err := BuildGripperMeshes(gripperType, meshDetail, GripperJointMin)

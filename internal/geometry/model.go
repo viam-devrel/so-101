@@ -129,20 +129,18 @@ const (
 // armModelURDF builds the SO-101 model from assets/urdf/so101.urdf. The URDF is authored so its
 // raw form is already a drop-in for so101.json: so101.json's frame names (base, shoulder,
 // upper_arm, lower_arm, wrist; joints 1-5) and its "tool" TCP (joint-5 output + 180deg flip),
-// with only the collision geometry differing (per-link meshes vs so101.json's primitives). This
-// correctness has to live in the file itself, not in an in-memory patch, because a component
-// ships its kinematics to viam-server as ModelConfig().OriginalFile.Bytes -- this raw URDF --
-// and in-memory edits would be lost across the module gRPC boundary (see the assets/urdf/so101.urdf
-// header and TestURDFModelSurvivesSerialization). Returning the parsed URDF lets it transmit AS
-// URDF, with meshes sent separately, which is a much smaller kinematics payload than embedding
-// them in SVA JSON.
+// with only the collision geometry differing (per-link meshes vs so101.json's primitives). That
+// correctness must live in the file itself, not an in-memory patch: a component ships its
+// kinematics to viam-server as ModelConfig().OriginalFile.Bytes -- this raw URDF -- so in-memory
+// edits are lost across the module gRPC boundary (see the assets/urdf/so101.urdf header and
+// TestURDFModelSurvivesSerialization). Returning the parsed URDF lets it transmit AS URDF, with
+// meshes sent separately: a much smaller payload than embedding them in SVA JSON.
 //
-// visualize_ee_frame is the one exception: it needs a placeholder geometry on the "tool" link so
+// visualize_ee_frame is the one exception. It needs a placeholder geometry on the "tool" link so
 // the 3D viewer draws that frame and Get3DModels' EE-marker mesh renders there. Baking that box
-// statically into the URDF would add a spurious collision volume for everyone, so instead it is
-// added in memory and the model re-serialized to SVA JSON -- which, unlike the URDF path, carries
-// the in-memory geometry (and the embedded meshes) across the gRPC boundary. That makes the
-// transmitted kinematics larger, so it is done only when the marker is enabled.
+// into the URDF would add a spurious collision volume for everyone, so it is added in memory and
+// the model re-serialized to SVA JSON, which (unlike the URDF path) carries in-memory geometry
+// and the embedded meshes across the boundary. That payload is larger, hence marker-only.
 func armModelURDF(ratios []float64, visualizeEE bool, name string) (referenceframe.Model, error) {
 	root := os.Getenv("VIAM_MODULE_ROOT")
 	if root == "" {

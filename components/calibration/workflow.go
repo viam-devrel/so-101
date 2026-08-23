@@ -79,7 +79,6 @@ func (cs *so101CalibrationSensor) setHomingPosition(ctx context.Context) (map[st
 
 	cs.logger.Info("Setting homing positions...")
 
-	// First, reset all calibration registers to factory defaults
 	cs.logger.Info("Resetting calibration registers to factory defaults...")
 	for _, servoID := range cs.cfg.ServoIDs {
 		if err := cs.resetCalibrationRegisters(ctx, servoID); err != nil {
@@ -115,7 +114,6 @@ func (cs *so101CalibrationSensor) setHomingPosition(ctx context.Context) (map[st
 			servoID, cs.joints[servoID].Name, currentRawPos, homingOffset)
 	}
 
-	// Write homing offsets to servo registers
 	cs.logger.Info("Writing homing offsets to servo registers...")
 	for _, servoID := range cs.cfg.ServoIDs {
 		homingOffset := homingOffsets[strconv.Itoa(servoID)]

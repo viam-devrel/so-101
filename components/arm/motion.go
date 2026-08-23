@@ -75,13 +75,13 @@ func (s *so101) EndPosition(ctx context.Context, extra map[string]interface{}) (
 
 // MoveToPosition moves the arm's end-effector to the target pose.
 //
-// The SO-101 is a 5-DOF arm, so most six-DOF pose targets are unreachable. Rather than
-// discard orientation wholesale, the planner is given an approach-axis cone (a
-// referenceframe.PoseCloud) around the goal orientation: the tool's pointing direction is
-// constrained to within orientation_tolerance_deg, while roll about that axis is free.
+// The SO-101 is a 5-DOF arm, so most six-DOF pose targets are unreachable. Rather than discard
+// orientation wholesale, the planner gets an approach-axis cone (a referenceframe.PoseCloud)
+// around the goal: the tool's pointing direction is held within orientation_tolerance_deg while
+// roll about that axis stays free.
 //
-// Callers may bypass the cone via extra: "goal_metric_type" restores the old
-// orientation-agnostic behavior, and "pose_cloud" supplies a raw cloud. See internal/planning.
+// Callers may bypass the cone via extra -- "goal_metric_type" restores the old
+// orientation-agnostic behavior, "pose_cloud" supplies a raw cloud. See internal/planning.
 //
 // Requires viam-server >= 0.127.0; older servers silently ignore goal clouds, which makes
 // planning revert to strict six-DOF scoring and fail.

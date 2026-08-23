@@ -76,9 +76,9 @@ type SO101ArmConfig struct {
 	// is NOT constrained. Valid range [0, 180]. Zero or unset means
 	// defaultOrientationToleranceDeg (30).
 	//
-	// The planner adds a 0.001 epsilon to the OZ leeway, so the cone actually enforced is
-	// acos(cos(tol) - 0.001): always slightly wider than requested (30 gives ~30.11) and
-	// never narrower than ~2.56. At or above 177.44 every orientation is accepted.
+	// The planner adds a 0.001 epsilon to the OZ leeway, so the cone enforced is
+	// acos(cos(tol) - 0.001): always slightly wider than requested (30 gives ~30.11), never
+	// narrower than ~2.56. At or above 177.44 every orientation is accepted.
 	//
 	// Requires viam-server >= 0.127.0; older servers silently ignore goal clouds.
 	OrientationToleranceDeg float64 `json:"orientation_tolerance_deg,omitempty"`

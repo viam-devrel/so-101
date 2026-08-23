@@ -91,16 +91,15 @@ func JointTravelsDeg(from, to []float64) (travels []float64, maxTravel float64) 
 // CoordinatedProfiles computes a profile per joint so that every joint finishes its travel
 // at the same moment.
 //
-// Each joint is scaled by its share of the longest travel, k = d/d_max, applied to BOTH
-// speed and acceleration. Scaling both makes each joint's profile a time-scaled copy of the
-// same shape, which yields equal durations whether the motion is acceleration-limited
-// (t = 2*sqrt(d/a); k cancels inside the radical) or speed-limited
-// (t = d/v + v/a; k cancels term by term). Scaling speed alone would coordinate only the
-// speed-limited case -- and at the defaults the crossover is 5 degrees, so most
-// motion-planner waypoints fall in the acceleration-limited regime.
+// Each joint scales by its share of the longest travel, k = d/d_max, applied to BOTH speed
+// and acceleration. That makes each profile a time-scaled copy of one shape, so durations
+// match whether the motion is acceleration-limited (t = 2*sqrt(d/a); k cancels inside the
+// radical) or speed-limited (t = d/v + v/a; k cancels term by term). Scaling speed alone
+// coordinates only the speed-limited case, and at the defaults the crossover is 5 degrees --
+// so most motion-planner waypoints fall in the acceleration-limited regime.
 //
-// travelsDeg may hold negative values; only magnitude matters. caps may be nil.
-// Returns nil when no joint moves, in which case the caller should command nothing.
+// travelsDeg may be negative (only magnitude matters); caps may be nil. Returns nil when no
+// joint moves, in which case the caller should command nothing.
 func CoordinatedProfiles(travelsDeg []float64, refSpeedDegsPerSec, refAccelDegsPerSecSq float64, caps []JointLimits) []JointProfile {
 	maxTravel := 0.0
 	for _, d := range travelsDeg {
@@ -137,15 +136,14 @@ type JointLimits struct {
 // reduceReference lowers the shared speed and acceleration reference until no per-joint cap
 // would be exceeded.
 //
-// Caps are constraints, not targets. Clamping one joint to its cap would leave it out of
-// step with the others and destroy the coordination; instead the most-constrained joint
-// sets the pace for everyone. Since joint i is commanded v_max*k_i, requiring
-// v_max <= cap_i/k_i for every moving joint guarantees every joint honors its own cap.
+// Caps are constraints, not targets. Clamping one joint to its cap would leave it out of step
+// with the others and destroy the coordination; instead the most-constrained joint sets the
+// pace. Since joint i is commanded v_max*k_i, requiring v_max <= cap_i/k_i for every moving
+// joint guarantees every joint honors its own cap.
 //
-// Stationary joints are excluded. Note this is defensive rather than load-bearing: Go yields
-// +Inf for c/0 with c > 0, and +Inf < speed is already false, so a stationary joint could
-// never bind even without the guard. It stays because the intent should be explicit -- but do
-// not assume removing it would fault.
+// The stationary-joint exclusion is defensive, not load-bearing: Go yields +Inf for c/0 with
+// c > 0, and +Inf < speed is already false, so a stationary joint could never bind without it.
+// It stays to make the intent explicit -- but do not assume removing it would fault.
 func reduceReference(travelsDeg []float64, maxTravel, speed, accel float64, caps []JointLimits) (float64, float64) {
 	for i, d := range travelsDeg {
 		if i >= len(caps) {

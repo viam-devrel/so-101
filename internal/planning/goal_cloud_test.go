@@ -224,18 +224,17 @@ func TestConePositionalBoxNotRadius(t *testing.T) {
 // TestRDKContractThetaReportsTiltAzimuth documents why coneToPoseCloud sets Theta: 180, by
 // pinning the mechanism directly: the relative Theta reports a tilt's AZIMUTH, not its roll.
 //
-// This is a characterization test for rdk's Theta semantics, not a guard on coneToPoseCloud
-// (it overwrites Theta, so a mutation there is a no-op here -- TestConeBoundsTiltIsotropically
-// is what guards the mapping end-to-end). It earns its place by pinning the underlying rdk
-// contract that nothing else asserts: ovX.Theta == 90 and ovY.Theta == 0. Were an rdk upgrade
-// to change those semantics, the acceptance tests would fail with vague mismatches while this
-// one names the broken contract outright.
+// A characterization test for rdk's Theta semantics, not a guard on coneToPoseCloud (which
+// overwrites Theta, so a mutation there is a no-op here -- TestConeBoundsTiltIsotropically
+// guards the mapping end-to-end). It earns its place by pinning the rdk contract nothing else
+// asserts: ovX.Theta == 90 and ovY.Theta == 0. Should an rdk upgrade change those semantics,
+// the acceptance tests would fail with vague mismatches while this one names the broken
+// contract outright.
 //
-// Note the tempting shorthand -- "a smaller Theta rejects tilts" -- is FALSE: Theta=0 below
-// rejects a tilt about X but would ACCEPT one about Y (azimuth 90 reports Theta=0). What a
-// smaller Theta actually does is carve out a wedge of tilt DIRECTIONS. Since reported Theta
-// sweeps the full [-180, 180] as azimuth goes around, only a leeway of 180 admits every
-// azimuth.
+// The tempting shorthand -- "a smaller Theta rejects tilts" -- is FALSE: Theta=0 below rejects
+// a tilt about X but would ACCEPT one about Y (azimuth 90 reports Theta=0). It actually carves
+// out a wedge of tilt DIRECTIONS, and since reported Theta sweeps the full [-180, 180] as
+// azimuth goes around, only a leeway of 180 admits every azimuth.
 func TestRDKContractThetaReportsTiltAzimuth(t *testing.T) {
 	broken := coneCloud(30)
 	broken.Theta = 0 // the "obvious simplification"
