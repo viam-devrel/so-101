@@ -9,43 +9,43 @@
       "api": "rdk:component:arm",
       "model": "devrel:so101:arm",
       "short_description": "Control the first 5 joints of the SO-101: base/pan, shoulder, elbow, wrist flex, and wrist roll",
-      "markdown_link": "README.md#model-devrelso101arm"
+      "markdown_link": "docs/arm.md"
     },
     {
       "api": "rdk:component:arm",
       "model": "devrel:so101:simulated",
       "short_description": "Hardware-free simulated SO-101 arm; emulates joint motion using the SO-101 kinematics",
-      "markdown_link": "README.md#model-devrelso101simulated"
+      "markdown_link": "docs/simulated.md"
     },
     {
       "api": "rdk:component:gripper",
       "model": "devrel:so101:gripper",
       "short_description": "Control the gripper joint of the SO-101 arm",
-      "markdown_link": "README.md#model-devrelso101gripper"
+      "markdown_link": "docs/gripper.md"
     },
     {
       "api": "rdk:component:gripper",
       "model": "devrel:so101:simulated-gripper",
       "short_description": "Hardware-free simulated SO-101 gripper that serves leader/follower meshes for the 3D viewer",
-      "markdown_link": "README.md#model-devrelso101simulated-gripper"
+      "markdown_link": "docs/simulated.md"
     },
     {
       "api": "rdk:component:sensor",
       "model": "devrel:so101:calibration",
       "short_description": "Calibrate the joints of the SO-101 arm",
-      "markdown_link": "README.md#model-devrelso101calibration"
+      "markdown_link": "docs/calibration.md"
     },
     {
       "api": "rdk:service:discovery",
       "model": "devrel:so101:discovery",
       "short_description": "Discover available arm, gripper, and calibration components related to SO101 ARM",
-      "markdown_link": "README.md#model-devrelso101discovery"
+      "markdown_link": "docs/discovery.md"
     },
     {
       "api": "rdk:service:generic",
       "model": "devrel:so101:teleop",
       "short_description": "Mirror a leader arm's joint positions and gripper onto a follower arm for hand-guided teleoperation",
-      "markdown_link": "README.md#model-devrelso101teleop"
+      "markdown_link": "docs/teleop.md"
     }
   ],
   "applications": [
