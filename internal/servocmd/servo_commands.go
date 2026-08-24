@@ -84,6 +84,21 @@ func ClampPercent(p float64) float64 {
 	return p
 }
 
+// ParseWaitExtra reads the optional "wait" bool from a DoCommand or extra map.
+// Absent or non-bool values default to true so the motion planner and every existing
+// caller keep the blocking behavior; a caller streaming setpoints faster than the
+// hardware can travel passes false. The arm reads it from its extra argument; the
+// gripper reads it from the command map itself, because Gripper.DoCommand has no
+// extra parameter.
+func ParseWaitExtra(extra map[string]any) bool {
+	if extra != nil {
+		if w, ok := extra["wait"].(bool); ok {
+			return w
+		}
+	}
+	return true
+}
+
 // availableServoIDs returns the servos on the bus that the arm does not drive itself, and
 // which are therefore available to a gripper. Deriving this from the arm's own servo set
 // (rather than hardcoding 6) is what lets a 4-DOF arm configured with servo_ids [1,2,3,4]
