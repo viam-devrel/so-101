@@ -1,11 +1,51 @@
 <script lang="ts">
 	import type { StepProps, CalibrationReadings } from '$lib/types';
+	import { ADVISORY_RANGE_TICKS, hasRecordedRange } from '$lib/constants';
+	import { canRun } from '$lib/calibrationCommands';
 
-	let { sensorReadings, sendCommand, setError, clearError, nextStep }: StepProps = $props();
+	let {
+		sensorReadings,
+		sendCommand,
+		setError,
+		clearError,
+		nextStep,
+		goToNamedStep,
+		markStepIncomplete,
+		setTorqueOutcome
+	}: StepProps = $props();
+
+	const CALIBRATION_STEPS = [
+		'calibration_start',
+		'calibration_homing',
+		'calibration_recording',
+		'calibration_save'
+	] as const;
 
 	// Component state
 	let isLoading = $state(false);
 	let recordingCompleted = $state(false);
+	// Which calibration_state an open abort confirmation belongs to. Scoping it to the state
+	// collapses the box as soon as the state changes underneath the user, so a live
+	// "Yes, Abort Calibration" can never sit over a panel they have since moved past.
+	let confirmStateFor = $state<string | null>(null);
+	// True only when THIS component drove the module to idle via abort -- distinguishes
+	// "you just aborted" from an idle module reached some other way (fresh load, a reset
+	// elsewhere, or a completed save, which unlike abort DOES re-enable torque).
+	let justAborted = $state(false);
+	// Captured from the state we aborted from: registers are known-wiped once setHomingPosition
+	// has run, i.e. every abortable state except 'started'. The two main branches here
+	// (homing_position, range_recording) are always past homing, but the unexpected-state branch
+	// below also offers abort and is reached at 'started', where homing has not run.
+	let justAbortedAfterHoming = $state(false);
+	// Deliberately NOT $state, and deliberately never read by the effect that writes the flag
+	// above: readings still report the pre-abort state for up to a poll interval after abort
+	// returns (sendCommand does not invalidate the query), so the flag has to survive that
+	// window and may only be cleared once the module has actually reported the idle it
+	// describes and then moved on.
+	let sawIdleSinceAbort = false;
+	// Deliberately NOT $state: the effect below reads it, so a reactive write would
+	// re-run the effect and its cleanup would clear the timer it just armed.
+	let hasAdvanced = false;
 
 	// Get current sensor readings
 	const readings = $derived(sensorReadings.current.data as CalibrationReadings | undefined);
@@ -13,12 +53,40 @@
 	const joints = $derived(readings?.joints || {});
 	const recordingTime = $derived(readings?.recording_time_seconds || 0);
 	const positionSamples = $derived(readings?.position_samples || 0);
+	// isPending, not isLoading: with refetchInterval both are false on background polls,
+	// but the query is disabled until the resource client resolves, and only isPending
+	// covers that window -- isLoading there is false, so the panel fell through to
+	// "Unexpected calibration state: unknown".
+	const isInitialLoad = $derived(sensorReadings.current.isPending);
+	const queryError = $derived(sensorReadings.current.error);
 
 	// Check states
-	const canStartRecording = $derived(calibrationState === 'homing_position');
+	const canStartRecording = $derived(canRun(readings, 'start_range_recording'));
 	const isRecording = $derived(calibrationState === 'range_recording');
 	const isCompleted = $derived(calibrationState === 'completed');
 	const isError = $derived(calibrationState === 'error');
+	const showAbortConfirm = $derived(confirmStateFor === calibrationState);
+
+	// Advance once polled readings confirm the state we caused, not on a blind timer.
+	$effect(() => {
+		if (recordingCompleted && calibrationState === 'completed' && !hasAdvanced) {
+			hasAdvanced = true;
+			const timer = setTimeout(() => nextStep(), 2000);
+			return () => clearTimeout(timer);
+		}
+	});
+
+	// Un-attribute a stale "you just aborted" once the module has reported that idle and then
+	// left it. Writes the flag without reading it, so there is no self-dependency.
+	$effect(() => {
+		if (calibrationState === 'idle') {
+			sawIdleSinceAbort = true;
+		} else if (sawIdleSinceAbort) {
+			sawIdleSinceAbort = false;
+			justAborted = false;
+			justAbortedAfterHoming = false;
+		}
+	});
 
 	// Calculate completion statistics
 	const totalJoints = $derived(Object.keys(joints).length);
@@ -56,13 +124,6 @@
 
 			await sendCommand({ command: 'stop_range_recording' });
 			recordingCompleted = true;
-
-			// Auto-advance to next step after a short delay if successful
-			setTimeout(() => {
-				if (calibrationState === 'completed') {
-					nextStep();
-				}
-			}, 2000);
 		} catch (error) {
 			setError(error instanceof Error ? error.message : 'Failed to stop recording');
 		} finally {
@@ -70,22 +131,64 @@
 		}
 	}
 
-	// Get joint progress bar width
-	function getJointProgressWidth(joint: any): number {
-		if (!joint.recorded_min || !joint.recorded_max) return 0;
-		const range = joint.recorded_max - joint.recorded_min;
-		// Consider it good progress if range is > 1000 (rough heuristic)
-		return Math.min(100, (range / 2000) * 100);
+	// Abort calibration. components/calibration/workflow.go's abortCalibration never re-enables
+	// torque -- it cancels the recording goroutine (if running) and sets the state to idle --
+	// so the arm stays limp and safe to keep holding; only the homing/recording work is discarded.
+	async function abortCalibration() {
+		const abortedFrom = confirmStateFor;
+		try {
+			isLoading = true;
+			clearError();
+
+			await sendCommand({ command: 'abort' });
+			recordingCompleted = false;
+			// abort/reset invalidate a prior run's save: torque is off again and the save
+			// step must re-earn its gate. See StepCalibrationSave.resetCalibration.
+			setTorqueOutcome(null);
+			for (const step of CALIBRATION_STEPS) markStepIncomplete(step);
+			hasAdvanced = false;
+			confirmStateFor = null;
+			justAborted = true;
+			justAbortedAfterHoming = abortedFrom !== 'started';
+		} catch (error) {
+			setError(error instanceof Error ? error.message : 'Failed to abort calibration');
+		} finally {
+			isLoading = false;
+		}
 	}
 
-	// Get joint status color
+	// Reset after an error
+	async function resetCalibration() {
+		try {
+			isLoading = true;
+			clearError();
+
+			await sendCommand({ command: 'reset' });
+			recordingCompleted = false;
+			// abort/reset invalidate a prior run's save: torque is off again and the save
+			// step must re-earn its gate. See StepCalibrationSave.resetCalibration.
+			setTorqueOutcome(null);
+			for (const step of CALIBRATION_STEPS) markStepIncomplete(step);
+			hasAdvanced = false;
+		} catch (error) {
+			setError(error instanceof Error ? error.message : 'Failed to reset calibration');
+		} finally {
+			isLoading = false;
+		}
+	}
+
+	// Get joint progress bar width
+	function getJointProgressWidth(joint: any): number {
+		if (joint.is_completed) return 100;
+		if (!hasRecordedRange(joint)) return 0;
+		const range = joint.recorded_max - joint.recorded_min;
+		return Math.min(100, (range / ADVISORY_RANGE_TICKS) * 100);
+	}
+
+	// Get joint status color: completed (module-decided), in progress, or no data yet
 	function getJointStatusColor(joint: any): string {
 		if (joint.is_completed) return 'bg-green-100 border-green-300 text-green-800';
-		if (joint.recorded_min !== undefined && joint.recorded_max !== undefined) {
-			const range = joint.recorded_max - joint.recorded_min;
-			if (range < 1000) return 'bg-yellow-100 border-yellow-300 text-yellow-800';
-			if (range > 500) return 'bg-blue-100 border-blue-300 text-blue-800';
-		}
+		if (hasRecordedRange(joint)) return 'bg-blue-100 border-blue-300 text-blue-800';
 		return 'bg-gray-100 border-gray-300 text-gray-600';
 	}
 </script>
@@ -211,7 +314,10 @@
 										/>
 									</svg>
 									<span class="text-xs font-medium">Complete</span>
-								{:else if range > 0}
+								{:else if hasRecordedRange(joint)}
+									<!-- Same predicate as getJointStatusColor's "in progress" tint, so a
+									     single-sample joint (span 0) can't be tinted blue and labelled
+									     "Waiting..." at the same time. -->
 									<span class="text-xs">Recording...</span>
 								{:else}
 									<span class="text-xs text-gray-500">Waiting...</span>
@@ -224,7 +330,7 @@
 								<span>Current:</span>
 								<span class="font-mono">{joint.current_position}</span>
 							</div>
-							{#if joint.recorded_min !== undefined && joint.recorded_max !== undefined}
+							{#if hasRecordedRange(joint)}
 								<div class="flex justify-between">
 									<span>Range:</span>
 									<span class="font-mono">{joint.recorded_min} - {joint.recorded_max}</span>
@@ -249,9 +355,75 @@
 		</div>
 	{/if}
 
+	<!-- Abort control: shared by every branch the module accepts 'abort' from. Two clicks
+	     required (reveal, then confirm) since it discards in-progress work. -->
+	{#snippet abortControl(message: string)}
+		<div class="mt-6 pt-4 border-t border-gray-200">
+			{#if showAbortConfirm}
+				<div class="bg-red-50 border border-red-200 rounded-lg p-4">
+					<p class="text-red-800 text-sm mb-2">{message}</p>
+					<p class="text-red-700 text-xs mb-3">
+						The arm stays limp -- holding torque stays off -- so it is safe to keep holding it. The
+						wizard stays on this step and then offers to start a new calibration; the step
+						navigation above also still works.
+					</p>
+					<div class="flex justify-center space-x-3">
+						<button
+							onclick={() => (confirmStateFor = null)}
+							disabled={isLoading}
+							class="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-gray-500 disabled:opacity-50"
+						>
+							Cancel
+						</button>
+						<button
+							onclick={abortCalibration}
+							disabled={isLoading}
+							class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-red-600 hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500 disabled:opacity-50"
+						>
+							{#if isLoading}
+								<div class="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
+								Aborting...
+							{:else}
+								Yes, Abort Calibration
+							{/if}
+						</button>
+					</div>
+				</div>
+			{:else}
+				<button
+					onclick={() => (confirmStateFor = calibrationState)}
+					class="text-sm text-gray-500 hover:text-red-600 underline"
+				>
+					Abort Calibration
+				</button>
+			{/if}
+		</div>
+	{/snippet}
+
 	<!-- Recording Controls -->
 	<div class="bg-white border border-gray-200 rounded-lg p-6 mb-6">
-		{#if canStartRecording}
+		{#if isInitialLoad}
+			<!-- First load: no readings yet -->
+			<div class="text-center">
+				<div
+					class="animate-spin rounded-full h-10 w-10 border-b-2 border-gray-400 mx-auto mb-4"
+				></div>
+				<p class="text-gray-600">Loading calibration status...</p>
+			</div>
+		{:else if queryError}
+			<!-- Connection error, distinct from an unexpected calibration state -->
+			<div class="text-center">
+				<p class="text-red-600 mb-4">
+					Unable to reach the calibration sensor: {queryError.message}
+				</p>
+				<button
+					onclick={() => sensorReadings.current.refetch()}
+					class="px-4 py-2 bg-gray-600 text-white rounded-md hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-gray-500"
+				>
+					Retry
+				</button>
+			</div>
+		{:else if canStartRecording}
 			<!-- Ready to start recording -->
 			<div class="text-center">
 				<h4 class="text-xl font-semibold text-gray-900 mb-4">Ready to Record Ranges</h4>
@@ -278,6 +450,10 @@
 						Start Recording
 					{/if}
 				</button>
+
+				{@render abortControl(
+					'Aborting discards the homing position set for this session and returns the machine to idle -- you will need to redo homing and range recording. Setting homing already cleared the position limits stored in the servos, so run a full calibration before relying on the arm.'
+				)}
 			</div>
 		{:else if isRecording}
 			<!-- Currently recording -->
@@ -302,7 +478,7 @@
 
 				<button
 					onclick={stopRecording}
-					disabled={isLoading}
+					disabled={isLoading || !canRun(readings, 'stop_range_recording')}
 					class="inline-flex items-center px-6 py-3 border border-transparent text-base font-medium rounded-md text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500 disabled:opacity-50 disabled:cursor-not-allowed"
 				>
 					{#if isLoading}
@@ -330,6 +506,10 @@
 						✅ All joints have sufficient range data! You can stop recording now.
 					</p>
 				{/if}
+
+				{@render abortControl(
+					'Aborting stops recording now, discards every range recorded so far, and returns the machine to idle -- you will need to redo homing and move the arm through its full range again. Setting homing already cleared the position limits stored in the servos, so run a full calibration before relying on the arm.'
+				)}
 			</div>
 		{:else if isCompleted}
 			<!-- Recording completed successfully -->
@@ -406,10 +586,8 @@
 
 				<div class="space-y-3">
 					<button
-						onclick={async () => {
-							await sendCommand({ command: 'reset' });
-						}}
-						disabled={isLoading}
+						onclick={resetCalibration}
+						disabled={isLoading || !canRun(readings, 'reset')}
 						class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-red-600 hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500 disabled:opacity-50"
 					>
 						{#if isLoading}
@@ -425,18 +603,68 @@
 					</p>
 				</div>
 			</div>
+		{:else if calibrationState === 'idle'}
+			<!-- Idle: reached by our own abort (justAborted) or independently (fresh load, a
+			     reset elsewhere). Only claim the abort happened when we caused it this session. -->
+			<div class="text-center">
+				<div
+					class="w-16 h-16 bg-gray-100 rounded-full flex items-center justify-center mx-auto mb-4"
+				>
+					<svg class="w-8 h-8 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						<path
+							stroke-linecap="round"
+							stroke-linejoin="round"
+							stroke-width="2"
+							d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+						></path>
+					</svg>
+				</div>
+				<h4 class="text-xl font-semibold text-gray-900 mb-4">
+					{justAborted ? 'Calibration Aborted' : 'Calibration Not Started'}
+				</h4>
+				<p class="text-gray-600 mb-6">
+					{#if justAborted}
+						Calibration was aborted. The arm is limp (holding torque is off) -- it's safe to keep
+						holding, but it will not hold its position on its own if you let go.
+						{#if justAbortedAfterHoming}
+							Setting the homing position already cleared the position limits stored in the servos,
+							so a full calibration is needed before relying on the arm.
+						{/if}
+					{:else}
+						No calibration is currently in progress. Start calibration from the previous step to
+						record joint ranges.
+					{/if}
+				</p>
+
+				<button
+					onclick={() => goToNamedStep('calibration_start')}
+					class="inline-flex items-center px-6 py-3 border border-transparent text-base font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+				>
+					Start New Calibration
+				</button>
+			</div>
 		{:else}
-			<!-- Unexpected state -->
+			<!-- Reached by walking back into this step while the module is still at 'started'
+			     (homing not done yet), or a truly unrecognized state. The status block above already
+			     renders the module's instruction, so point at it rather than repeating it, and
+			     offer abort when it's actually available. -->
 			<div class="text-center">
 				<p class="text-gray-600 mb-4">
-					Unexpected state: {calibrationState}
+					This step is not where the arm currently is — the calibration is at
+					<span class="font-mono">{calibrationState}</span>. See the status above for what the
+					module is waiting on.
 				</p>
 				<button
 					onclick={() => sensorReadings.current.refetch()}
-					class="px-4 py-2 bg-gray-600 text-white rounded-md hover:bg-gray-700"
+					class="px-4 py-2 bg-gray-600 text-white rounded-md hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-gray-500"
 				>
 					Refresh Status
 				</button>
+				{#if canRun(readings, 'abort')}
+					{@render abortControl(
+						'Aborting cancels the current calibration session and returns the machine to idle.'
+					)}
+				{/if}
 			</div>
 		{/if}
 	</div>

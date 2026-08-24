@@ -22,16 +22,49 @@
 	let isTestingConnection = $state(false);
 	let connectionStatus = $state<'idle' | 'testing' | 'success' | 'error'>('idle');
 	let connectionError = $state<string | null>(null);
-	let validationError = $state<string | null>(null);
 
 	// Form validation
-	const isFormValid = $derived(() => {
-		const validation = validateSensorConfig(partId.trim(), sensorName.trim());
-		validationError = validation.isValid ? null : validation.error!;
-		return validation.isValid;
-	});
+	const validation = $derived.by(() => validateSensorConfig(partId.trim(), sensorName.trim()));
+	const isFormValid = $derived(validation.isValid);
+
+	// Every value components/calibration/sensor.go's CalibrationState.String() can return,
+	// including its default 'unknown' branch. Keep in sync: a state added there but missing
+	// here would reject the real sensor.
+	const CALIBRATION_STATES = new Set([
+		'idle',
+		'started',
+		'homing_position',
+		'range_recording',
+		'completed',
+		'error',
+		'unknown'
+	]);
+
+	// Confirms a reading came from devrel:so101:calibration (components/calibration/sensor.go's
+	// Readings), not just "some sensor returned data". Any one of these fields could plausibly
+	// appear on an unrelated sensor; requiring all three together is what rules out a false
+	// positive.
+	function looksLikeCalibrationSensor(data: unknown): boolean {
+		if (!data || typeof data !== 'object') return false;
+		const d = data as Record<string, unknown>;
+		return (
+			typeof d.calibration_state === 'string' &&
+			CALIBRATION_STATES.has(d.calibration_state) &&
+			Array.isArray(d.available_commands) &&
+			typeof d.joints === 'object' &&
+			d.joints !== null
+		);
+	}
 
 	const resources = useResourceNames(() => partId, 'sensor');
+
+	// Auto-select the only available sensor
+	$effect(() => {
+		const names = resources.current;
+		if (!sensorName && names?.length === 1) {
+			sensorName = names[0].name;
+		}
+	});
 
 	// Create reactive sensor client that updates when form values change
 	const sensorClient = createResourceClient(
@@ -49,7 +82,6 @@
 	// Test sensor connection
 	async function testConnection() {
 		// Validate inputs first
-		const validation = validateSensorConfig(partId.trim(), sensorName.trim());
 		if (!validation.isValid) {
 			connectionError = validation.error!;
 			connectionStatus = 'error';
@@ -60,41 +92,33 @@
 		connectionStatus = 'testing';
 		connectionError = null;
 
+		let timeoutId: ReturnType<typeof setTimeout> | undefined;
 		try {
 			logger.info('Testing sensor connection', {
 				partId: partId.trim(),
 				sensorName: sensorName.trim()
 			});
 
-			// Manually trigger the query
-			const query = sensorQuery;
-			await query.current.refetch();
-
-			// Wait for the query to resolve or reject
-			await new Promise((resolve, reject) => {
-				// Check query result after refetch
-				setTimeout(() => {
-					const result = query.current;
-					if (result.data) {
-						logger.info('Connection test successful', result.data);
-						resolve(result.data);
-					} else if (result.error) {
-						logger.warn('Connection test error', result.error);
-						reject(result.error);
-					} else if (result.isLoading) {
-						// Still loading, reject with timeout
-						reject(new Error('Connection test timed out'));
-					} else {
-						reject(new Error('Connection test failed - no data received'));
-					}
-				}, 2000);
-
-				// Overall timeout after 5 seconds
-				setTimeout(() => {
-					reject(new Error('Connection test timed out'));
-				}, 5000);
+			const timeout = new Promise<never>((_, reject) => {
+				timeoutId = setTimeout(() => reject(new Error('Connection test timed out')), 5000);
 			});
 
+			const res = await Promise.race([sensorQuery.current.refetch(), timeout]);
+
+			if (res.error) {
+				throw res.error;
+			}
+			if (!res.data) {
+				throw new Error('Connection test failed - no data received');
+			}
+
+			if (!looksLikeCalibrationSensor(res.data)) {
+				throw new Error(
+					'That sensor responded, but it is not a devrel:so101:calibration component (unexpected reading shape).'
+				);
+			}
+
+			logger.info('Connection test successful', res.data);
 			connectionStatus = 'success';
 
 			// Auto-proceed after successful connection
@@ -108,6 +132,7 @@
 			connectionError = error instanceof Error ? error.message : 'Connection test failed';
 			logger.error('Connection test failed', error as Error);
 		} finally {
+			clearTimeout(timeoutId);
 			isTestingConnection = false;
 		}
 	}
@@ -130,7 +155,12 @@
 				app. Look for the sensor component with model "devrel:so101:calibration".
 			</p>
 			<p>
-				<strong>Common sensor names:</strong> "calibrator", "so101-calibration", "arm-calibrator"
+				<strong>Don't see any sensors?</strong> Add a component with model "devrel:so101:calibration"
+				to this machine's config in the Viam app, then reload this page.
+			</p>
+			<p>
+				<strong>Not sure which one is right?</strong> Pick a candidate and press "Test Connection" —
+				it checks the sensor's response shape and tells you if it isn't the calibration sensor.
 			</p>
 		</div>
 	</div>
@@ -146,18 +176,20 @@
 				<select
 					id="sensorName"
 					bind:value={sensorName}
-					placeholder="Select an available sensor component"
 					class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
 				>
+					<option value="" disabled selected={!sensorName}>
+						Select an available sensor component
+					</option>
 					{#if resources.current && resources.current.length > 0}
 						{#each resources.current as resource}
 							<option value={resource.name}>{resource.name}</option>
 						{/each}
 					{:else if resources.loading}
-						<option value="">Searching for possible resources...</option>
+						<option value="" disabled>Searching for possible resources...</option>
 					{/if}
 				</select>
-				{#if !resources.loading && resources.current.length == 0}
+				{#if !resources.loading && (resources.current?.length ?? 0) === 0}
 					<p class="mt-1 text-sm text-red-500">
 						No sensor components found on currently connected machine.
 					</p>
@@ -166,12 +198,15 @@
 						Select the name of your SO-101 calibration sensor component as configured in your robot
 					</p>
 				{/if}
+				{#if sensorName && validation.error}
+					<p class="mt-1 text-sm text-red-500">{validation.error}</p>
+				{/if}
 			</div>
 
 			<div>
 				<Button
 					onclick={testConnection}
-					disabled={!isFormValid || isTestingConnection}
+					disabled={!isFormValid || isTestingConnection || connectionStatus === 'success'}
 					variant="primary"
 					size="lg"
 					className="w-full"
@@ -216,6 +251,9 @@
 						<div class="mt-3">
 							<p class="font-medium mb-1">Please check:</p>
 							<ul class="list-disc list-inside space-y-1">
+								<li>
+									The selected component's model is "devrel:so101:calibration", not another sensor
+								</li>
 								<li>The calibration sensor component name matches your robot configuration</li>
 								<li>Your robot is running and accessible</li>
 								<li>The SO-101 arm is properly connected</li>

@@ -10,7 +10,7 @@
 	let { type, variant, title, dismissible = false, children }: Props = $props();
 
 	// Support both 'type' and 'variant' props for flexibility
-	const alertType = variant || type || 'info';
+	const alertType = $derived(variant || type || 'info');
 	let isVisible = $state(true);
 
 	const typeConfig = {
@@ -40,7 +40,7 @@
 		}
 	};
 
-	const config = typeConfig[alertType];
+	const config = $derived(typeConfig[alertType]);
 
 	function dismiss() {
 		isVisible = false;
@@ -66,7 +66,7 @@
 			{#if dismissible}
 				<button
 					onclick={dismiss}
-					class="ml-3 -mx-1.5 -my-1.5 rounded-md p-1.5 hover:bg-black hover:bg-opacity-10 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-transparent focus:ring-gray-600"
+					class="ml-3 -mx-1.5 -my-1.5 rounded-md p-1.5 hover:bg-black/10 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-transparent focus:ring-gray-600"
 				>
 					<span class="sr-only">Dismiss</span>
 					<svg class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">

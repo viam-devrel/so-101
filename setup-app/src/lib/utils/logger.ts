@@ -102,5 +102,11 @@ class LoggerService implements Logger {
 // Export singleton instance
 export const logger = new LoggerService();
 
+// The in-memory buffer is only reachable from a console in dev; getLogs()/exportLogs()
+// have no callers in app code.
+if (import.meta.env.DEV && typeof window !== 'undefined') {
+	(window as unknown as { __so101Logger: LoggerService }).__so101Logger = logger;
+}
+
 // Named export for specific use cases
 export { LoggerService };

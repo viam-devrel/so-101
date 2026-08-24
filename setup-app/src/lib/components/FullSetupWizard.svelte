@@ -9,18 +9,18 @@
 	import StepCalibrationRecording from './steps/StepCalibrationRecording.svelte';
 	import StepCalibrationSave from './steps/StepCalibrationSave.svelte';
 	import StepComplete from './steps/StepComplete.svelte';
-	import type { WorkflowStep, MotorSetupResult, SensorContext } from '$lib/types';
+	import type {
+		CalibrationReadings,
+		WorkflowStep,
+		MotorSetupResult,
+		SensorContext,
+		TorqueOutcome
+	} from '$lib/types';
 	import { logger } from '$lib/utils/logger';
+	import { canAdvanceFromStep } from '$lib/wizardProgress';
 
-	// Get sensor context - use $derived to ensure it's accessed during component lifecycle
-	const sensorContext = $derived(() => getContext('sensor') as SensorContext | null);
-	const sensorClient = $derived(() => sensorContext()?.sensorClient);
-	const sensorReadings = $derived(() => sensorContext()?.sensorReadings);
-	const doCommand = $derived(() => sensorContext()?.doCommand);
-	const sendCommand = $derived(() => sensorContext()?.sendCommand);
-
-	// Initialize component
-	logger.debug('FullSetupWizard initialized');
+	// getContext is only valid at component init, so call it once here (not inside $derived).
+	const sensorContext = getContext<SensorContext>('sensor');
 
 	// Full Setup Workflow Configuration (all 8 steps)
 	const WORKFLOW_STEPS: WorkflowStep[] = [
@@ -49,6 +49,20 @@
 	let currentStep = $state(0);
 	let error = $state<string | null>(null);
 	let motorSetupResults = $state<Record<string, MotorSetupResult>>({});
+	// Explicit per-step completion, independent of any readings-derived signal -- see
+	// wizardProgress.ts's canAdvanceFromStep.
+	let stepCompletion = $state<Record<WorkflowStep, boolean>>({
+		overview: false,
+		motor_setup: false,
+		motor_verify: false,
+		calibration_start: false,
+		calibration_homing: false,
+		calibration_recording: false,
+		calibration_save: false,
+		complete: false
+	});
+	// Outcome of the last save_calibration's torque re-enable. See types.ts's TorqueOutcome.
+	let torqueOutcome = $state<TorqueOutcome | null>(null);
 
 	// Navigation functions
 	function nextStep() {
@@ -70,6 +84,33 @@
 			currentStep = stepIndex;
 			clearError();
 		}
+	}
+
+	// Jump to a step by name within this workflow's own step list, so a step component never
+	// has to import WORKFLOW_STEPS itself. No-op if this workflow doesn't include that step.
+	function goToNamedStep(step: WorkflowStep) {
+		const index = WORKFLOW_STEPS.indexOf(step);
+		if (index >= 0) {
+			goToStep(index);
+		}
+	}
+
+	// A property write, NOT a whole-object reassign. StepMotorSetup calls this from inside an
+	// $effect: reassigning would read stepCompletion (the spread) inside that effect's
+	// reactive scope and then write it, which is a self-dependency Svelte 5 aborts with
+	// effect_update_depth_exceeded. A property write reads nothing, and writing the same
+	// boolean into a $state object property does not notify, so a re-run is a true no-op.
+	function markStepComplete(step: WorkflowStep) {
+		stepCompletion[step] = true;
+	}
+
+	// Same property-write rule as markStepComplete.
+	function markStepIncomplete(step: WorkflowStep) {
+		stepCompletion[step] = false;
+	}
+
+	function setTorqueOutcome(outcome: TorqueOutcome | null) {
+		torqueOutcome = outcome;
 	}
 
 	// Error handling
@@ -96,24 +137,48 @@
 		};
 	}
 
+	function clearMotorSetupResult(motorName: string) {
+		const { [motorName]: _removed, ...rest } = motorSetupResults;
+		motorSetupResults = rest;
+	}
+
 	// Step component props
 	const stepProps = $derived({
-		sensorClient: sensorClient()!,
-		sensorReadings: sensorReadings()!,
-		doCommand: doCommand()!,
-		sendCommand: sendCommand() || (() => Promise.reject(new Error('Send command not available'))),
+		sensorClient: sensorContext.sensorClient,
+		sensorReadings: sensorContext.sensorReadings,
+		doCommand: sensorContext.doCommand,
+		sendCommand:
+			sensorContext.sendCommand || (() => Promise.reject(new Error('Send command not available'))),
 		error,
 		setError,
 		clearError,
 		nextStep,
 		prevStep,
+		goToStep,
+		goToNamedStep,
 		motorSetupResults,
 		setMotorSetupResults,
-		updateMotorSetupResult
+		updateMotorSetupResult,
+		clearMotorSetupResult,
+		markStepComplete,
+		markStepIncomplete,
+		stepCompletion,
+		torqueOutcome,
+		setTorqueOutcome
 	});
 
 	// Current step name for rendering
 	const currentStepName = $derived(WORKFLOW_STEPS[currentStep]);
+
+	// Gates the footer "Next" button; see wizardProgress.ts for the per-step rules.
+	const canAdvance = $derived(
+		canAdvanceFromStep(
+			currentStepName,
+			sensorContext.sensorReadings.current.data as CalibrationReadings | undefined,
+			motorSetupResults,
+			stepCompletion
+		)
+	);
 </script>
 
 <BaseWizard
@@ -122,6 +187,7 @@
 	stepTitles={STEP_TITLES}
 	{currentStep}
 	{error}
+	{canAdvance}
 	onNextStep={nextStep}
 	onPrevStep={prevStep}
 	onGoToStep={goToStep}

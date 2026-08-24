@@ -25,8 +25,18 @@
 					color: 'orange'
 				}
 			],
+			// No calibration phase in this workflow -- keep this grounded in what actually
+			// happens (StepMotorSetup/StepMotorVerify), not calibration copy.
+			duringPhase: {
+				title: 'During Motor Setup:',
+				bullets: [
+					'Servo IDs and baudrates are set one motor at a time',
+					"You'll connect and disconnect servo cables as prompted",
+					'No manual arm movement is required'
+				]
+			},
 			duration: '5-10 minutes',
-			steps: '3 steps'
+			steps: '4 steps'
 		},
 		calibration: {
 			title: 'Calibration Wizard',
@@ -44,8 +54,16 @@
 					color: 'green'
 				}
 			],
+			duringPhase: {
+				title: 'During Calibration:',
+				bullets: [
+					'Motors will be disabled (no holding torque)',
+					"You'll manually move joints to their limits",
+					'Smooth, controlled movements are essential'
+				]
+			},
 			duration: '10-15 minutes',
-			steps: '5 steps'
+			steps: '6 steps'
 		},
 		'full-setup': {
 			title: 'Complete Setup Wizard',
@@ -73,12 +91,30 @@
 					color: 'blue'
 				}
 			],
+			// This workflow includes a calibration phase, so the same copy as calibration applies.
+			duringPhase: {
+				title: 'During Calibration:',
+				bullets: [
+					'Motors will be disabled (no holding torque)',
+					"You'll manually move joints to their limits",
+					'Smooth, controlled movements are essential'
+				]
+			},
 			duration: '15-25 minutes',
 			steps: '8 steps'
 		}
 	};
 
 	const content = workflowContent[workflowType];
+
+	// Static literal classes so Tailwind's scanner can find them (no dynamic bg-{color}-N).
+	const accomplishmentColors: Record<string, { bg: string; title: string; text: string }> = {
+		orange: { bg: 'bg-orange-50', title: 'text-orange-900', text: 'text-orange-800' },
+		green: { bg: 'bg-green-50', title: 'text-green-900', text: 'text-green-800' },
+		blue: { bg: 'bg-blue-50', title: 'text-blue-900', text: 'text-blue-800' }
+	};
+
+	const gridColsClass = content.accomplishments.length === 1 ? 'md:grid-cols-1' : 'md:grid-cols-2';
 </script>
 
 <div class="max-w-4xl mx-auto">
@@ -96,15 +132,12 @@
 	<!-- What You'll Do Section -->
 	<div class="mb-8">
 		<h4 class="text-xl font-semibold text-gray-900 mb-4">What You'll Accomplish:</h4>
-		<div
-			class="grid md:grid-cols-{content.accomplishments.length > 2
-				? '2'
-				: content.accomplishments.length} gap-6"
-		>
+		<div class="grid {gridColsClass} gap-6">
 			{#each content.accomplishments as accomplishment}
-				<div class="bg-{accomplishment.color}-50 p-6 rounded-lg">
-					<h5 class="font-semibold text-{accomplishment.color}-900 mb-3">{accomplishment.title}</h5>
-					<p class="text-{accomplishment.color}-800 text-sm">{accomplishment.description}</p>
+				{@const colors = accomplishmentColors[accomplishment.color]}
+				<div class="{colors.bg} p-6 rounded-lg">
+					<h5 class="font-semibold {colors.title} mb-3">{accomplishment.title}</h5>
+					<p class="{colors.text} text-sm">{accomplishment.description}</p>
 				</div>
 			{/each}
 		</div>
@@ -153,12 +186,12 @@
 			</div>
 
 			<div>
-				<h5 class="font-medium text-gray-800 mb-3">During Calibration:</h5>
+				<h5 class="font-medium text-gray-800 mb-3">{content.duringPhase.title}</h5>
 				<ul class="text-gray-700 space-y-1 text-sm">
-					<li>• Motors will be disabled (no holding torque)</li>
-					<li>• You'll manually move joints to their limits</li>
-					<li>• Process takes approximately 5-10 minutes</li>
-					<li>• Smooth, controlled movements are essential</li>
+					{#each content.duringPhase.bullets as bullet}
+						<li>• {bullet}</li>
+					{/each}
+					<li>• Process takes approximately {content.duration}</li>
 				</ul>
 			</div>
 		</div>
@@ -238,7 +271,9 @@
 					d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"
 				></path>
 			</svg>
-			<span class="text-blue-900 font-medium"> Estimated completion time: 15-20 minutes </span>
+			<span class="text-blue-900 font-medium">
+				Estimated completion time: {content.duration}
+			</span>
 		</div>
 	</div>
 

@@ -35,12 +35,16 @@ export function useWorkflowConfig() {
 	 * Only returns valid data that's less than 1 hour old
 	 */
 	function getSensorConfigFromSession(): SensorConfig | null {
-		const { machineId } = parseConnectionFromCookies();
-		const sessionKey = `so101-setup-state-${machineId}`;
+		// Declared out here so the catch below can still clear the entry.
+		let sessionKey = '';
 		try {
 			if (typeof window === 'undefined') {
 				return null; // SSR guard
 			}
+
+			// Inside the guard: parseConnectionFromCookies reads window.location.
+			const { machineId } = parseConnectionFromCookies();
+			sessionKey = `so101-setup-state-${machineId}`;
 
 			const stored = sessionStorage.getItem(sessionKey);
 			if (!stored) {
@@ -50,9 +54,16 @@ export function useWorkflowConfig() {
 
 			const sessionState: SessionState = JSON.parse(stored);
 
-			// Check if data is less than 1 hour old
+			// Check if data is less than 1 hour old. A missing or non-numeric timestamp counts
+			// as expired, not immortal: `Date.now() - <non-number>` is NaN, and every NaN
+			// comparison is false, so an age check alone would treat it as fresh forever.
 			const oneHourMs = 3600000;
-			const isExpired = sessionState.timestamp && Date.now() - sessionState.timestamp > oneHourMs;
+			const timestamp = sessionState.timestamp;
+			const isExpired =
+				typeof timestamp !== 'number' ||
+				!Number.isFinite(timestamp) ||
+				timestamp <= 0 ||
+				Date.now() - timestamp > oneHourMs;
 
 			if (isExpired) {
 				logger.debug('Session storage data expired, clearing');
@@ -68,7 +79,7 @@ export function useWorkflowConfig() {
 			return null;
 		} catch (error) {
 			logger.warn('Error parsing session storage data, clearing', error as Error);
-			if (typeof window !== 'undefined') {
+			if (typeof window !== 'undefined' && sessionKey) {
 				sessionStorage.removeItem(sessionKey);
 			}
 			return null;

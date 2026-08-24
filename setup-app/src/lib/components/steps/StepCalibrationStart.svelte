@@ -1,20 +1,54 @@
 <script lang="ts">
 	import type { StepProps, CalibrationReadings } from '$lib/types';
+	import { canRun } from '$lib/calibrationCommands';
 
-	let { sensorReadings, sendCommand, setError, clearError, nextStep }: StepProps = $props();
+	let {
+		sensorReadings,
+		sendCommand,
+		setError,
+		clearError,
+		nextStep,
+		markStepIncomplete,
+		setTorqueOutcome
+	}: StepProps = $props();
+
+	const CALIBRATION_STEPS = [
+		'calibration_start',
+		'calibration_homing',
+		'calibration_recording',
+		'calibration_save'
+	] as const;
 
 	// Component state
 	let isLoading = $state(false);
 	let calibrationStarted = $state(false);
+	// Deliberately NOT $state: the effect below reads it, so a reactive write would
+	// re-run the effect and its cleanup would clear the timer it just armed.
+	let hasAdvanced = false;
 
 	// Get current sensor readings
 	const readings = $derived(sensorReadings.current.data as CalibrationReadings | undefined);
 	const calibrationState = $derived(readings?.calibration_state || 'unknown');
+	// isPending, not isLoading: with refetchInterval both are false on background polls,
+	// but the query is disabled until the resource client resolves, and only isPending
+	// covers that window -- isLoading there is false, so the panel fell through to
+	// "Unexpected calibration state: unknown".
+	const isInitialLoad = $derived(sensorReadings.current.isPending);
+	const queryError = $derived(sensorReadings.current.error);
 
 	// Check if calibration has already been started
 	const alreadyStarted = $derived(
 		calibrationState === 'started' || calibrationState === 'homing_position'
 	);
+
+	// Advance once polled readings confirm the state we caused, not on a blind timer.
+	$effect(() => {
+		if (calibrationStarted && calibrationState === 'started' && !hasAdvanced) {
+			hasAdvanced = true;
+			const timer = setTimeout(() => nextStep(), 1500);
+			return () => clearTimeout(timer);
+		}
+	});
 
 	// Start calibration workflow
 	async function startCalibration() {
@@ -24,11 +58,6 @@
 
 			await sendCommand({ command: 'start' });
 			calibrationStarted = true;
-
-			// Auto-advance to next step after a short delay
-			setTimeout(() => {
-				nextStep();
-			}, 1500);
 		} catch (error) {
 			setError(error instanceof Error ? error.message : 'Failed to start calibration');
 		} finally {
@@ -44,8 +73,35 @@
 
 			await sendCommand({ command: 'abort' });
 			calibrationStarted = false;
+			// Re-arm the auto-advance for the next start attempt, same block as the flag it
+			// guards (cf. StepCalibrationHoming/Recording).
+			hasAdvanced = false;
+			// abort/reset invalidate a prior run's save: torque is off again and the save
+			// step must re-earn its gate. See StepCalibrationSave.resetCalibration.
+			setTorqueOutcome(null);
+			for (const step of CALIBRATION_STEPS) markStepIncomplete(step);
 		} catch (error) {
 			setError(error instanceof Error ? error.message : 'Failed to abort calibration');
+		} finally {
+			isLoading = false;
+		}
+	}
+
+	// Reset after an error
+	async function resetCalibration() {
+		try {
+			isLoading = true;
+			clearError();
+
+			await sendCommand({ command: 'reset' });
+			calibrationStarted = false;
+			hasAdvanced = false;
+			// abort/reset invalidate a prior run's save: torque is off again and the save
+			// step must re-earn its gate. See StepCalibrationSave.resetCalibration.
+			setTorqueOutcome(null);
+			for (const step of CALIBRATION_STEPS) markStepIncomplete(step);
+		} catch (error) {
+			setError(error instanceof Error ? error.message : 'Failed to reset calibration');
 		} finally {
 			isLoading = false;
 		}
@@ -144,7 +200,28 @@
 
 	<!-- Calibration Controls -->
 	<div class="bg-white border border-gray-200 rounded-lg p-6 mb-6">
-		{#if calibrationState === 'idle' || calibrationState === 'completed'}
+		{#if isInitialLoad}
+			<!-- First load: no readings yet -->
+			<div class="text-center">
+				<div
+					class="animate-spin rounded-full h-10 w-10 border-b-2 border-gray-400 mx-auto mb-4"
+				></div>
+				<p class="text-gray-600">Loading calibration status...</p>
+			</div>
+		{:else if queryError}
+			<!-- Connection error, distinct from an unexpected calibration state -->
+			<div class="text-center">
+				<p class="text-red-600 mb-4">
+					Unable to reach the calibration sensor: {queryError.message}
+				</p>
+				<button
+					onclick={() => sensorReadings.current.refetch()}
+					class="px-4 py-2 bg-gray-600 text-white rounded-md hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-gray-500"
+				>
+					Retry
+				</button>
+			</div>
+		{:else if calibrationState === 'idle' || calibrationState === 'completed'}
 			<!-- Ready to start calibration -->
 			<div class="text-center">
 				<h4 class="text-xl font-semibold text-gray-900 mb-4">Ready to Begin Calibration</h4>
@@ -155,7 +232,7 @@
 
 				<button
 					onclick={startCalibration}
-					disabled={isLoading}
+					disabled={isLoading || !canRun(readings, 'start')}
 					class="inline-flex items-center px-6 py-3 border border-transparent text-base font-medium rounded-md text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500 disabled:opacity-50 disabled:cursor-not-allowed"
 				>
 					{#if isLoading}
@@ -212,7 +289,7 @@
 
 					<button
 						onclick={abortCalibration}
-						disabled={isLoading}
+						disabled={isLoading || !canRun(readings, 'abort')}
 						class="inline-flex items-center px-4 py-2 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
 					>
 						{#if isLoading}
@@ -245,11 +322,8 @@
 				</p>
 
 				<button
-					onclick={async () => {
-						await sendCommand({ command: 'reset' });
-						calibrationStarted = false;
-					}}
-					disabled={isLoading}
+					onclick={resetCalibration}
+					disabled={isLoading || !canRun(readings, 'reset')}
 					class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-red-600 hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500 disabled:opacity-50"
 				>
 					{#if isLoading}
@@ -261,9 +335,16 @@
 				</button>
 			</div>
 		{:else}
-			<!-- Unknown state -->
+			<!-- Reached when the module has moved past this step (e.g. range recording), or a
+			     truly unrecognized state. The status block above already renders the module's
+			     instruction, so point at it rather than repeating it. Worded to match the
+			     equivalent branch in StepCalibrationHoming/Recording. -->
 			<div class="text-center">
-				<p class="text-gray-600 mb-4">Current calibration state: {calibrationState}</p>
+				<p class="text-gray-600 mb-4">
+					This step is not where the arm currently is — the calibration is at
+					<span class="font-mono">{calibrationState}</span>. See the status above for what the
+					module is waiting on.
+				</p>
 				<button
 					onclick={() => sensorReadings.current.refetch()}
 					class="px-4 py-2 bg-gray-600 text-white rounded-md hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-gray-500"

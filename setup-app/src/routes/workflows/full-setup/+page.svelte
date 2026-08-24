@@ -15,7 +15,7 @@
 	const { initializeSensorConfig } = useWorkflowConfig();
 
 	function initConfig() {
-		logger.info('Initializing calibration workflow configuration');
+		logger.info('Initializing full setup workflow configuration');
 		const { sensorConfig: config, source } = initializeSensorConfig();
 
 		if (config) {

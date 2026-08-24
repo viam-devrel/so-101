@@ -16,8 +16,8 @@
 			description:
 				'Configure servo motor IDs and verify communication. Choose this if your motors need to be set up or reconfigured.',
 			duration: '~5-10 minutes',
-			steps: 3,
-			stepNames: '3 steps: Overview → Motor Setup → Verification'
+			steps: 4,
+			stepNames: '4 steps: Overview → Motor Setup → Verification → Complete'
 		},
 		{
 			id: 'calibration',
@@ -25,8 +25,8 @@
 			description:
 				'Set homing positions and record joint ranges. Choose this if your motors are already configured.',
 			duration: '~10-15 minutes',
-			steps: 5,
-			stepNames: '5 steps: Overview → Start → Homing → Recording → Save'
+			steps: 6,
+			stepNames: '6 steps: Overview → Start → Homing → Recording → Save → Complete'
 		},
 		{
 			id: 'full-setup',
@@ -90,11 +90,9 @@
 				class="bg-white rounded-xl shadow-lg hover:shadow-xl transition-shadow duration-300 overflow-hidden border border-gray-200"
 			>
 				<!-- Gradient Header -->
-				<div class="bg-gradient-to-r {getWorkflowColor(workflow.id)} p-6 text-black">
+				<div class="bg-gradient-to-r {getWorkflowColor(workflow.id)} p-6 text-gray-900">
 					<div class="flex items-center mb-4">
-						<div
-							class="w-12 h-12 bg-white bg-opacity-20 rounded-lg flex items-center justify-center mr-4"
-						>
+						<div class="w-12 h-12 bg-white/20 rounded-lg flex items-center justify-center mr-4">
 							<svg class="w-6 h-6" fill="currentColor" viewBox="0 0 24 24">
 								<path fill-rule="evenodd" d={getWorkflowIcon(workflow.id)} clip-rule="evenodd"
 								></path>
@@ -102,7 +100,7 @@
 						</div>
 						<div>
 							<h3 class="text-xl font-bold">{workflow.title}</h3>
-							<p class="text-white text-opacity-90 text-sm">{workflow.duration}</p>
+							<p class="text-gray-950 text-sm font-medium">{workflow.duration}</p>
 						</div>
 					</div>
 				</div>

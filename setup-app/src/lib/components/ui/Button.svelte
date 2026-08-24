@@ -42,9 +42,11 @@
 		lg: 'px-6 py-3 text-base'
 	};
 
-	const buttonClass = `${baseClasses} ${variantClasses[variant]} ${sizeClasses[size]} ${fullWidth ? 'w-full' : ''} ${className}`;
+	const buttonClass = $derived(
+		`${baseClasses} ${variantClasses[variant]} ${sizeClasses[size]} ${fullWidth ? 'w-full' : ''} ${className}`
+	);
 
-	const isDisabled = disabled || loading;
+	const isDisabled = $derived(disabled || loading);
 
 	function handleClick() {
 		if (!isDisabled && onclick) {

@@ -7,6 +7,7 @@
 		stepTitles: Record<string, string>;
 		currentStep: number;
 		error: string | null;
+		canAdvance: boolean;
 		onNextStep: () => void;
 		onPrevStep: () => void;
 		onGoToStep: (stepIndex: number) => void;
@@ -20,6 +21,7 @@
 		stepTitles,
 		currentStep,
 		error,
+		canAdvance,
 		onNextStep,
 		onPrevStep,
 		onGoToStep,
@@ -27,10 +29,17 @@
 		children
 	}: Props = $props();
 
+	// Unique per instance: two wizards mounted at once must not share the hint's id.
+	// ($props.id() has to be its own declaration's whole initializer.)
+	const uid = $props.id();
+	const hintId = `${uid}-next-step-hint`;
+
 	// Computed values
 	const currentStepName = $derived(steps[currentStep]);
 	const totalSteps = steps.length;
 	const progressPercentage = $derived(Math.round(((currentStep + 1) / totalSteps) * 100));
+	const isLastStep = $derived(currentStep === steps.length - 1);
+	const nextDisabled = $derived(isLastStep || !canAdvance);
 
 	// Workflow type display names
 	const workflowDisplayNames = {
@@ -130,13 +139,20 @@
 			← Previous
 		</button>
 
-		<div class="text-sm text-gray-600">
-			{currentStep + 1} / {totalSteps}
+		<div class="flex flex-col items-end">
+			<div class="text-sm text-gray-600">
+				{currentStep + 1} / {totalSteps}
+			</div>
+			{#if !isLastStep && !canAdvance}
+				<p id={hintId} class="mt-1 text-xs text-gray-500">Finish this step to continue</p>
+			{/if}
 		</div>
 
 		<button
 			onclick={onNextStep}
-			disabled={currentStep === steps.length - 1}
+			disabled={nextDisabled}
+			title={nextDisabled && !isLastStep ? 'Finish this step to continue' : undefined}
+			aria-describedby={nextDisabled && !isLastStep ? hintId : undefined}
 			class="px-4 py-2 text-sm font-medium text-white bg-blue-600 border border-transparent rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
 		>
 			Next →
