@@ -273,15 +273,37 @@ func TestArticulatedGripperModelShape(t *testing.T) {
 					"TCP moved to %v at jaw=%.4f rad; it must be invariant", p.Point(), theta)
 			}
 
-			// The jaw mesh, by contrast, must move.
+			// The jaw mesh, by contrast, must move. Note WHAT is asserted here:
+			// gripperMovingVisualPose is a pure +Z translation and the joint rotates about
+			// local +Z, so Rz(theta) leaves the mesh's pose ORIGIN exactly where it was --
+			// comparing Pose().Point() would compare two identical points and can never pass.
+			// The jaw swings because the mesh VERTICES are offset from that origin, so compare
+			// the transformed vertices (and the orientation, which does change).
 			closed, err := m.Geometries([]referenceframe.Input{GripperJointMin})
 			require.NoError(t, err)
-			open, err := m.Geometries([]referenceframe.Input{GripperJointMax})
+			opened, err := m.Geometries([]referenceframe.Input{GripperJointMax})
 			require.NoError(t, err)
-			assert.Greaterf(t,
-				closed.GeometryByName("gripper:gripper_moving").Pose().Point().
-					Sub(open.GeometryByName("gripper:gripper_moving").Pose().Point()).Norm(),
-				1.0, "the jaw mesh did not move between the closed and open limits")
+			cg := closed.GeometryByName("gripper:gripper_moving")
+			og := opened.GeometryByName("gripper:gripper_moving")
+			require.NotNil(t, cg)
+			require.NotNil(t, og)
+
+			oriD := spatialmath.QuatToR3AA(
+				spatialmath.OrientationBetween(cg.Pose().Orientation(), og.Pose().Orientation()).Quaternion()).Norm()
+			assert.InDeltaf(t, GripperJointMax-GripperJointMin, oriD, 1e-6,
+				"jaw rotated %.4f rad between the limits, want the full %.4f rad range",
+				oriD, GripperJointMax-GripperJointMin)
+
+			// meshWorldPoints already exists at gripper_frame_test.go:17.
+			cp := meshWorldPoints(cg.(*spatialmath.Mesh))
+			op := meshWorldPoints(og.(*spatialmath.Mesh))
+			require.Equal(t, len(cp), len(op))
+			var maxMoved float64
+			for i := range cp {
+				maxMoved = math.Max(maxMoved, cp[i].Sub(op[i]).Norm())
+			}
+			assert.Greaterf(t, maxMoved, 1.0,
+				"no jaw vertex moved more than %.4fmm between the closed and open limits", maxMoved)
 		})
 	}
 }
@@ -544,7 +566,7 @@ func TestModelGeometriesMatchBuiltMeshes(t *testing.T) {
 - [ ] **Step 2: Run it**
 
 Run: `go test ./internal/geometry/ -run TestModelGeometriesMatchBuiltMeshes -v`
-Expected: PASS. **If it fails**, the jaw-branch composition in Task 3 is wrong — most likely `jaw_mount`'s orientation, or the geometry offset being measured from the wrong frame. Do not "fix" it by changing the test.
+Expected: PASS. **If it fails**, the jaw-branch composition in Task 3 is wrong — most likely `jaw_mount`'s orientation, or the geometry offset being measured from the wrong frame. Do not "fix" it by changing the test. (Reference: this was verified to hold to 7e-15 mm and 0 rad during plan review, so a real failure means a real bug.)
 
 - [ ] **Step 3: Commit**
 
@@ -664,7 +686,7 @@ func TestArticulatedJawConfig(t *testing.T) {
 }
 ```
 
-Note `gripper.Gripper` does not itself declare `CurrentInputs`/`GoToInputs`; the concrete type does. Assert against the concrete `*simulatedSO101Gripper` (the constructor's return can be type-asserted) or change `newGripper` to return the concrete type.
+`gripper.Gripper` embeds `framesystem.InputEnabled` (rdk `components/gripper/gripper.go:79-83`), so `CurrentInputs`/`GoToInputs`/`Kinematics` are all on the interface — no type assertion is needed here.
 
 - [ ] **Step 2: Run it and watch it fail**
 
@@ -717,9 +739,10 @@ func TestSetPositionStaysNonBlocking(t *testing.T) {
 	ctx := context.Background()
 	g := newTestSimGripper(t, geometry.FollowerGripper, geometry.LowDetail)
 
-	require.NoError(t, g.Grab2(ctx)) // start closed; see helper note below
+	_, err := g.Grab(ctx, nil) // start closed
+	require.NoError(t, err)
 	start := time.Now()
-	_, err := g.DoCommand(ctx, map[string]interface{}{
+	_, err = g.DoCommand(ctx, map[string]interface{}{
 		"command": "set_position", "percentage": 100.0,
 	})
 	require.NoError(t, err)
@@ -736,7 +759,7 @@ func TestSetPositionStaysNonBlocking(t *testing.T) {
 }
 ```
 
-Use the existing `newTestSimGripper` helper (`simulated_gripper_test.go:38`) and whatever close/grab call matches its returned interface — replace the `Grab2` placeholder with the real call.
+Uses the existing `newTestSimGripper` helper (`simulated_gripper_test.go:39`). While you are there: that helper never `Close`s the gripper, so its interpolator goroutine leaks across the whole package. Add `t.Cleanup(func() { require.NoError(t, g.Close(context.Background())) })` to it.
 
 - [ ] **Step 2: Run it and watch it fail (or pass)**
 
@@ -1043,7 +1066,29 @@ func (g *simulatedSO101Gripper) recordJawTrajectory(steps [][]referenceframe.Inp
 }
 ```
 
-Add the `get_jaw_trajectory` DoCommand branch returning `map[string]interface{}{"batches": [...]}` where each entry has `step_count` (int), `total_travel_rad` (float64), `offset_ms` (float64) and `steps` (`[][]float64`). Extend `get_position` with `jaw_angle_rad` and `dof`.
+Add the `get_jaw_trajectory` DoCommand branch. Build the value as a **`[]map[string]interface{}`** (the test type-asserts exactly that, so an `[]interface{}` will fail):
+
+```go
+	case "get_jaw_trajectory":
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		out := make([]map[string]interface{}, 0, len(g.jawBatches))
+		for _, b := range g.jawBatches {
+			steps := make([][]float64, len(b.steps))
+			for i, s := range b.steps {
+				steps[i] = append([]float64(nil), s...)
+			}
+			out = append(out, map[string]interface{}{
+				"step_count":       len(b.steps),
+				"total_travel_rad": b.totalTravelRad,
+				"offset_ms":        float64(b.offset.Milliseconds()),
+				"steps":            steps,
+			})
+		}
+		return map[string]interface{}{"batches": out}, nil
+```
+
+Extend `get_position` with `jaw_angle_rad` (float64) and `dof` (int, `len(g.model.DoF())`).
 
 Remove the `// omit for now` note from Task 8's `recordJawTrajectory` call.
 
@@ -1116,16 +1161,42 @@ git commit -m "test(simulated): document the execute-epsilon hazard for a moving
 
 This is the deliverable. It **reports** rather than asserts magnitudes — the magnitude is the unknown.
 
+Two things about this task were established empirically during plan review; do not re-derive them:
+
+1. **The goal must be derived from forward kinematics.** Hand-picked poses do not work. `testGoal()`
+   from `internal/planning` — `(300, 0, 200)` with `OZ: -1` — is **physically unreachable** by this
+   arm and returns "zero IK solutions" for every seed. (It is used elsewhere only with an *injected*
+   motion service that never plans, so nothing ever caught it.) At zero configuration the TCP sits at
+   `(393, 0, 228)` with the tool pointing along **+Y**, not down. Taking the goal from FK of a real
+   joint configuration makes it reachable by construction.
+2. **Two scenarios are needed, because they measure different things.** With no obstacle the planner
+   returns a **2-step** trajectory (start and goal only) — that measures whether *IK and seeding*
+   choose a non-start jaw angle. With an obstacle in the path it returns **~150-230 steps** — that
+   measures whether the *RRT* drives the jaw while searching. Only running the first would look like
+   a result while exercising no sampling at all.
+
 **Files:**
 - Create: `internal/geometry/planner_jaw_test.go`
+- Modify: `go.mod`, `go.sum`
 
-- [ ] **Step 1: Write the test**
+- [ ] **Step 1: Tidy first — the new import is not in go.mod yet**
+
+`internal/geometry` does not currently import `motionplan/armplanning`, so `go test` fails
+*before compiling anything* with `go: updates to go.mod needed`. Run this first so a real
+compile error is not mistaken for a module error:
+
+Run: `go mod tidy`
+Expected: `go.mod` gains ~8 lines and `go.sum` ~5 (new indirect deps: `go-nlopt/nlopt`,
+`go-ole`, `lufia/plan9stats`, `yusufpapurcu/wmi`, …). This is normal.
+
+- [ ] **Step 2: Write the test**
 
 ```go
 package geometry
 
 import (
 	"context"
+	"math"
 	"testing"
 
 	"github.com/golang/geo/r3"
@@ -1137,10 +1208,15 @@ import (
 	"go.viam.com/rdk/spatialmath"
 )
 
+// jawGoalConfig is the arm configuration whose forward kinematics defines the planning goal.
+// Deriving the goal from FK guarantees it is reachable; hand-picked poses are not (see the task
+// notes -- internal/planning's testGoal is unreachable by this arm).
+var jawGoalConfig = []float64{0.8, -1.0, 1.0, 0.6, 0.3}
+
 // TestPlannerJawTravel is the experiment this whole change exists to run.
 //
 // The jaw is a DoF that changes collision geometry but has NO effect on the TCP, so nothing in
-// the goal metric constrains it. Reading armplanning suggests the planner hands it FULL range:
+// the goal metric constrains it. Reading armplanning predicts the planner hands it FULL range:
 // computeJointSensitivities (linearized_frame_system.go:78) computes
 //
 //	thisRatio := startDistance / math.Abs(myDistance-startDistance)
@@ -1175,80 +1251,103 @@ func TestPlannerJawTravel(t *testing.T) {
 	}, nil)
 	require.NoError(t, err)
 
-	goal := referenceframe.NewPoseInFrame(referenceframe.World, spatialmath.NewPose(
-		r3.Vector{X: 300, Y: 0, Z: 200},
-		&spatialmath.OrientationVectorDegrees{OZ: -1},
-	))
+	// Goal by forward kinematics, so it is reachable by construction.
+	fkInputs := referenceframe.NewZeroInputs(fs)
+	fkInputs["arm"] = jawGoalConfig
+	tf, err := fs.Transform(fkInputs.ToLinearInputs(),
+		referenceframe.NewPoseInFrame("gripper", spatialmath.NewZeroPose()), referenceframe.World)
+	require.NoError(t, err)
+	goal := referenceframe.NewPoseInFrame(referenceframe.World, tf.(*referenceframe.PoseInFrame).Pose())
+	t.Logf("FK-derived goal: %v", goal.Pose().Point())
 
-	for seed := 0; seed < 10; seed++ {
-		start := referenceframe.NewZeroInputs(fs)
-		opts := armplanning.NewBasicPlannerOptions()
-		opts.RandomSeed = seed
+	// A slab across the direct path, forcing the RRT to actually search.
+	wall, err := spatialmath.NewBox(
+		spatialmath.NewPoseFromPoint(r3.Vector{X: 290, Y: -78, Z: 169}),
+		r3.Vector{X: 90, Y: 90, Z: 260}, "wall")
+	require.NoError(t, err)
 
-		plan, _, err := armplanning.PlanMotion(ctx, logger, &armplanning.PlanRequest{
-			FrameSystem: fs,
-			StartState:  armplanning.NewPlanState(nil, start),
-			Goals: []*armplanning.PlanState{armplanning.NewPlanState(
-				referenceframe.FrameSystemPoses{"gripper": goal}, nil)},
-			PlannerOptions: opts,
-		})
-		if err != nil {
-			t.Logf("seed %d: planning failed: %v", seed, err)
-			continue
-		}
+	fullRange := GripperJointMax - GripperJointMin
 
-		traj := plan.Trajectory()
-		require.NotEmpty(t, traj)
+	for _, sc := range []struct {
+		name      string
+		obstacles *referenceframe.GeometriesInFrame
+	}{
+		{"direct", nil},
+		{"obstructed", referenceframe.NewGeometriesInFrame(
+			referenceframe.World, []spatialmath.Geometry{wall})},
+	} {
+		t.Run(sc.name, func(t *testing.T) {
+			planned := 0
+			for seed := 0; seed < 10; seed++ {
+				opts := armplanning.NewBasicPlannerOptions()
+				opts.RandomSeed = seed
 
-		var travel, minT, maxT float64
-		var prev float64
-		for i, step := range traj {
-			jaw, ok := step["gripper"]
-			require.Truef(t, ok, "seed %d step %d: the trajectory has no gripper column", seed, i)
-			require.Len(t, jaw, 1)
+				plan, _, err := armplanning.PlanMotion(ctx, logger, &armplanning.PlanRequest{
+					FrameSystem:           fs,
+					StartState:            armplanning.NewPlanState(nil, referenceframe.NewZeroInputs(fs)),
+					Goals:                 []*armplanning.PlanState{armplanning.NewPlanState(referenceframe.FrameSystemPoses{"gripper": goal}, nil)},
+					ObstaclesInWorldFrame: sc.obstacles,
+					PlannerOptions:        opts,
+				})
+				if err != nil {
+					t.Logf("seed %d: planning failed: %v", seed, err)
+					continue
+				}
+				planned++
 
-			// Structural assertion: the planner must respect the joint limits.
-			assert.GreaterOrEqualf(t, jaw[0], GripperJointMin, "seed %d step %d below the jaw limit", seed, i)
-			assert.LessOrEqualf(t, jaw[0], GripperJointMax, "seed %d step %d above the jaw limit", seed, i)
+				traj := plan.Trajectory()
+				require.NotEmpty(t, traj)
 
-			if i == 0 {
-				prev, minT, maxT = jaw[0], jaw[0], jaw[0]
-				continue
+				var travel, prev, minT, maxT float64
+				for i, step := range traj {
+					jaw, ok := step["gripper"]
+					require.Truef(t, ok, "seed %d step %d: the trajectory has no gripper column", seed, i)
+					require.Len(t, jaw, 1)
+
+					// Structural assertion: the planner must respect the joint limits.
+					assert.GreaterOrEqualf(t, jaw[0], GripperJointMin, "seed %d step %d below the jaw limit", seed, i)
+					assert.LessOrEqualf(t, jaw[0], GripperJointMax, "seed %d step %d above the jaw limit", seed, i)
+
+					if i == 0 {
+						prev, minT, maxT = jaw[0], jaw[0], jaw[0]
+						continue
+					}
+					travel += math.Abs(jaw[0] - prev)
+					prev = jaw[0]
+					minT, maxT = math.Min(minT, jaw[0]), math.Max(maxT, jaw[0])
+				}
+
+				t.Logf("seed %2d: %3d steps | jaw travel %.4f rad (%.1f%% of range) | span [%.4f, %.4f] | net %.4f",
+					seed, len(traj), travel, 100*travel/fullRange, minT, maxT, traj[len(traj)-1]["gripper"][0]-traj[0]["gripper"][0])
 			}
-			travel += abs(jaw[0] - prev)
-			prev = jaw[0]
-			minT, maxT = min(minT, jaw[0]), max(maxT, jaw[0])
-		}
 
-		fullRange := GripperJointMax - GripperJointMin
-		t.Logf("seed %2d: %2d steps | jaw travel %.4f rad (%.1f%% of range) | span [%.4f, %.4f]",
-			seed, len(traj), travel, 100*travel/fullRange, minT, maxT)
+			// Without this the whole experiment can pass green having measured nothing.
+			require.Positivef(t, planned, "no seed produced a trajectory in the %q scenario", sc.name)
+		})
 	}
-}
-
-func abs(f float64) float64 {
-	if f < 0 {
-		return -f
-	}
-	return f
 }
 ```
 
-- [ ] **Step 2: Run it and read the output**
+- [ ] **Step 3: Run it and read the output**
 
-Run: `go test ./internal/geometry/ -run TestPlannerJawTravel -v 2>&1 | tail -30`
-Expected: PASS, with ten `seed NN: ...` lines.
+Run: `go test ./internal/geometry/ -run TestPlannerJawTravel -v 2>&1 | grep -E "seed|goal|PASS|FAIL"`
+Expected: PASS, with `seed NN:` lines under both `direct` and `obstructed`. Reference from plan
+review: `direct` plans in 2 steps, `obstructed` in roughly 148-229 steps.
 
-**Check the API shapes against RDK v1.0.0 before assuming a compile error is your bug** — `armplanning.NewPlanState`'s argument order, `NewBasicPlannerOptions`, and `plan.Trajectory()`'s element type are all worth confirming in `$(go env GOMODCACHE)/go.viam.com/rdk@v1.0.0/motionplan/armplanning/`. Adjust the call, not the intent.
+If a scenario reports zero successful seeds the `require.Positivef` fails loudly — that is the
+guard against a silently empty result. Re-derive `jawGoalConfig` from a configuration you have
+confirmed with FK rather than loosening the assertion.
 
-- [ ] **Step 3: Record the finding**
+- [ ] **Step 4: Record the finding**
 
-Paste the ten log lines into the spec under a new `## Result` heading, and state plainly whether the full-range prediction held.
+Add a `## Result` section to the spec with the log lines from both scenarios, and state plainly
+whether the full-range prediction held — separately for IK/seeding (`direct`) and for RRT search
+(`obstructed`). A null result is a real result; write it down either way.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-git add internal/geometry/planner_jaw_test.go docs/superpowers/specs/2026-08-23-articulated-gripper-jaw-design.md
+git add internal/geometry/planner_jaw_test.go go.mod go.sum docs/superpowers/specs/2026-08-23-articulated-gripper-jaw-design.md
 git commit -m "test(geometry): measure planner jaw travel across seeds"
 ```
 
