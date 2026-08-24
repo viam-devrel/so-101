@@ -314,3 +314,60 @@ func TestGoToInputsValidation(t *testing.T) {
 		assert.InDelta(t, geometry.GripperJointMin, in[0], 1e-9)
 	})
 }
+
+// TestGoToInputsAbortsOnStop is a regression guard: Stop() sets targetPct = currentPct, which
+// without an explicit stopped flag makes an in-flight awaitArrival indistinguishable from
+// "arrived". GoToInputs must report the stop as an error and must not silently carry on to
+// (or land on) the batch's final target.
+func TestGoToInputsAbortsOnStop(t *testing.T) {
+	ctx := context.Background()
+	g := newArticulatedTestGripper(t)
+	require.NoError(t, g.GoToInputs(ctx, []referenceframe.Input{geometry.GripperJointMin})) // start closed
+
+	stopErr := make(chan error, 1)
+	go func() {
+		time.Sleep(60 * time.Millisecond)
+		stopErr <- g.Stop(ctx, nil)
+	}()
+
+	mid := (geometry.GripperJointMin + geometry.GripperJointMax) / 2
+	err := g.GoToInputs(ctx,
+		[]referenceframe.Input{mid},
+		[]referenceframe.Input{geometry.GripperJointMax},
+	)
+	require.NoError(t, <-stopErr)
+	require.Error(t, err, "GoToInputs should report the stop rather than silently succeeding")
+
+	in, err := g.CurrentInputs(ctx)
+	require.NoError(t, err)
+	assert.Greaterf(t, math.Abs(in[0]-geometry.GripperJointMax), 1e-6,
+		"batch should not have reached its final target (%v) after Stop, got %v",
+		geometry.GripperJointMax, in[0])
+}
+
+// TestGoToInputsAwaitsOnlyFinalStep pins the per-batch latency fix: intermediate steps must not
+// each pay a full gripperUpdateInterval tick just to set an in-between waypoint. 50 microsteps
+// covering a negligible total angle should complete far faster than 50*gripperUpdateInterval,
+// which is what per-step blocking would cost.
+func TestGoToInputsAwaitsOnlyFinalStep(t *testing.T) {
+	ctx := context.Background()
+	g := newArticulatedTestGripper(t)
+	require.NoError(t, g.GoToInputs(ctx, []referenceframe.Input{geometry.GripperJointMin}))
+
+	const steps = 50
+	const totalRad = 0.0005 // negligible total motion
+	batch := make([][]referenceframe.Input, steps)
+	for i := range steps {
+		batch[i] = []referenceframe.Input{geometry.GripperJointMin + totalRad*float64(i+1)/float64(steps)}
+	}
+
+	start := time.Now()
+	require.NoError(t, g.GoToInputs(ctx, batch...))
+	elapsed := time.Since(start)
+	t.Logf("50-step batch of negligible motion took %v (per-step blocking would cost ~%v)",
+		elapsed, steps*gripperUpdateInterval)
+
+	assert.Lessf(t, elapsed, steps*gripperUpdateInterval/2,
+		"50-step batch of negligible motion took %v; per-step blocking would cost ~%v",
+		elapsed, steps*gripperUpdateInterval)
+}

@@ -92,6 +92,10 @@ type simulatedSO101Gripper struct {
 	currentPct  float64
 	targetPct   float64
 	lastUpdated time.Time
+	// stopped mirrors the arm's simOperation.stopped (simulated.go). Without it, Stop()'s
+	// targetPct = currentPct makes an in-flight awaitArrival see "arrived" rather than
+	// "stopped", so GoToInputs would silently carry on to the next batch step.
+	stopped bool
 }
 
 func newSimulatedSO101Gripper(
@@ -180,7 +184,9 @@ func (g *simulatedSO101Gripper) setTarget(pct float64) {
 	g.targetPct = pct
 }
 
-// awaitArrival blocks until the jaw reaches its target, the gripper is closed, or ctx is done.
+// awaitArrival blocks until the jaw reaches its target, is stopped, or ctx is done. stopped is
+// checked before the arrival comparison: Stop() sets targetPct = currentPct, which would
+// otherwise make a stop indistinguishable from arrival.
 func (g *simulatedSO101Gripper) awaitArrival(ctx context.Context) error {
 	for {
 		select {
@@ -190,8 +196,12 @@ func (g *simulatedSO101Gripper) awaitArrival(ctx context.Context) error {
 			return g.cancelCtx.Err()
 		default:
 			g.mu.Lock()
+			stopped := g.stopped
 			done := g.currentPct == g.targetPct
 			g.mu.Unlock()
+			if stopped {
+				return errors.New("stopped before reaching target")
+			}
 			if done {
 				return nil
 			}
@@ -200,8 +210,19 @@ func (g *simulatedSO101Gripper) awaitArrival(ctx context.Context) error {
 	}
 }
 
-// moveTo sets the target and blocks until the jaw reaches it. Open, Grab and GoToInputs use it.
+// clearStopped resets the stop flag at the start of a newly commanded move (Open, Grab, or a
+// GoToInputs batch), so a Stop() from a previous move does not leak into this one.
+func (g *simulatedSO101Gripper) clearStopped() {
+	g.mu.Lock()
+	g.stopped = false
+	g.mu.Unlock()
+}
+
+// moveTo sets the target and blocks until the jaw reaches it. Open and Grab use it directly;
+// GoToInputs clears stopped itself once per batch and calls setTarget/awaitArrival separately
+// (see GoToInputs) so intermediate steps aren't each treated as a fresh move.
 func (g *simulatedSO101Gripper) moveTo(ctx context.Context, pct float64) error {
+	g.clearStopped()
 	g.setTarget(pct)
 	return g.awaitArrival(ctx)
 }
@@ -225,6 +246,12 @@ func (g *simulatedSO101Gripper) Grab(ctx context.Context, extra map[string]inter
 func (g *simulatedSO101Gripper) Stop(ctx context.Context, extra map[string]interface{}) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	// Only set stopped while moving, otherwise the distinction between "reached the target"
+	// and "was stopped" is lost for whoever is awaiting arrival (mirrors simOperation in
+	// simulated.go).
+	if g.currentPct != g.targetPct {
+		g.stopped = true
+	}
 	g.targetPct = g.currentPct
 	return nil
 }
@@ -290,13 +317,16 @@ func (g *simulatedSO101Gripper) Kinematics(ctx context.Context) (referenceframe.
 	return g.model, nil
 }
 
-// jawLimitEpsilon tolerates a planner-issued input that overshoots a joint limit by a few ULP.
-// rdk's frame system rejects an input outside its limit by even 1 ULP ("input out of bounds"),
-// but a trajectory riding a limit can legitimately land a couple ULP past it via left-associative
-// float math (see internal/geometry's angle-sweep gotcha). We validate against limit+/-epsilon,
-// then let geometry.JawPctFromRadians (which already saturates to 0/100) absorb the tiny
-// overshoot when converting -- so a value that passes validation can never drive the jaw past its
-// physical stop.
+// jawLimitEpsilon tolerates a planner-issued input that lands just outside a joint limit due to
+// float rounding (e.g. left-associative (range*i)/steps in internal/geometry's angle sweep,
+// which overshoots by ~2.22e-16 -- one ULP -- at i==steps). rdk's frame system rejects an input
+// outside its limit by even that 1 ULP.
+//
+// 1e-6 is deliberately far wider than a ULP (about 4.5e9 ULP at GripperJointMax) -- it exists to
+// absorb ordinary float rounding, not to approximate machine precision, so do not "tighten" it
+// toward a literal ULP. What actually bounds the jaw is geometry.JawPctFromRadians's saturation
+// to 0/100 on conversion, not this epsilon's width: even a value at the edge of the tolerated
+// band converts to a fully-saturated percentage.
 const jawLimitEpsilon = 1e-6
 
 // CurrentInputs reports the jaw angle in radians. It is an error rather than a zero value when
@@ -316,23 +346,44 @@ func (g *simulatedSO101Gripper) CurrentInputs(ctx context.Context) ([]referencef
 // trajectory steps for one component into a single variadic call, so a batch is the normal case.
 // Every step is validated before any of them is applied: a batch that fails halfway would
 // otherwise leave the jaw somewhere the planner did not intend.
+//
+// Only the final step's arrival is awaited. Intermediate targets are waypoints the interpolator
+// passes through on the way to the last one; awaiting each of them individually would cost a
+// full gripperUpdateInterval tick per step for no benefit (a 100-step trajectory of negligible
+// per-step motion would otherwise cost >=1s of wall time).
 func (g *simulatedSO101Gripper) GoToInputs(ctx context.Context, inputSteps ...[]referenceframe.Input) error {
 	if !g.articulatedJaw {
 		return errors.ErrUnsupported
 	}
 	limits := g.model.DoF()
+	if len(limits) != 1 {
+		// Unreachable while articulatedJaw implies exactly 1 DoF, but the len(step) arity check
+		// below only protects against a mismatched step -- it does not protect indexing
+		// limits[0] when limits itself is empty (0 != 0 passes the arity check).
+		return fmt.Errorf("gripper jaw model has %d DoF, want exactly 1", len(limits))
+	}
+	jawLimits := limits[0]
 	for i, step := range inputSteps {
-		if len(step) != len(limits) {
-			return fmt.Errorf("step %d: got %d inputs, the jaw takes %d", i, len(step), len(limits))
+		if len(step) != 1 {
+			return fmt.Errorf("step %d: got %d inputs, the jaw takes 1", i, len(step))
 		}
-		if step[0] < limits[0].Min-jawLimitEpsilon || step[0] > limits[0].Max+jawLimitEpsilon {
+		if step[0] < jawLimits.Min-jawLimitEpsilon || step[0] > jawLimits.Max+jawLimitEpsilon {
 			return fmt.Errorf("step %d: jaw angle %.6f rad is outside [%.6f, %.6f]",
-				i, step[0], limits[0].Min, limits[0].Max)
+				i, step[0], jawLimits.Min, jawLimits.Max)
 		}
 	}
-	for _, step := range inputSteps {
-		if err := g.moveTo(ctx, geometry.JawPctFromRadians(step[0])); err != nil {
-			return err
+
+	g.clearStopped()
+	for i, step := range inputSteps {
+		g.setTarget(geometry.JawPctFromRadians(step[0]))
+		if i == len(inputSteps)-1 {
+			return g.awaitArrival(ctx)
+		}
+		g.mu.Lock()
+		stopped := g.stopped
+		g.mu.Unlock()
+		if stopped {
+			return errors.New("stopped before reaching target")
 		}
 	}
 	return nil
