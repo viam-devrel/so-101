@@ -16,10 +16,10 @@ import (
 const (
 	CmdServoCapabilities = "servo_capabilities"
 	CmdServoMove         = "servo_move"
+	CmdServoMoving       = "servo_moving"
 	CmdServoPosition     = "servo_position"
 	CmdServoStop         = "servo_stop"
 	CmdServoWaitStop     = "servo_wait_stop"
-	CmdServoMoving       = "servo_moving"
 )
 
 // ServoOps is the single-servo surface HandleServoCommand needs. Keeping dispatch behind
@@ -31,7 +31,7 @@ type ServoOps interface {
 	ServoPositionPercent(ctx context.Context, id int) (percent float64, raw int, err error)
 	StopServo(ctx context.Context, id int) error
 	WaitForServosToStop(ctx context.Context, ids []int, timeoutMs int) error
-	ServosMoving(ctx context.Context, ids []int) (bool, error)
+	AnyServoMoving(ctx context.Context, ids []int) (bool, error)
 }
 
 // IsServoCommand reports whether a DoCommand belongs to this family, so the arm can route
@@ -174,7 +174,7 @@ func HandleServoCommand(
 		return map[string]any{}, nil
 
 	case CmdServoMoving:
-		moving, err := ops.ServosMoving(ctx, []int{id})
+		moving, err := ops.AnyServoMoving(ctx, []int{id})
 		if err != nil {
 			return nil, err
 		}

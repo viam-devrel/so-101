@@ -385,7 +385,7 @@ func (h *ControllerHandle) Stop(ctx context.Context) error {
 // move).
 //
 // Scoped to the requested servos so an in-flight gripper move on the shared bus cannot block
-// an arm move's completion wait. Each poll goes through ServosMoving: one SyncRead of the
+// an arm move's completion wait. Each poll goes through AnyServoMoving: one SyncRead of the
 // Moving register instead of a read per servo.
 func (h *ControllerHandle) WaitForServosToStop(ctx context.Context, servoIDs []int, timeoutMs int) error {
 	sess := h.entry.session.Load()
@@ -393,21 +393,19 @@ func (h *ControllerHandle) WaitForServosToStop(ctx context.Context, servoIDs []i
 		return fmt.Errorf("%w: %s", ErrPortDisconnected, h.entry.port)
 	}
 
-	h.entry.busMu.RLock()
 	ids := make([]int, 0, len(servoIDs))
 	for _, id := range servoIDs {
 		if _, ok := sess.servos[id]; ok {
 			ids = append(ids, id)
 		}
 	}
-	h.entry.busMu.RUnlock()
 
 	deadline := time.Now().Add(time.Duration(timeoutMs) * time.Millisecond)
 	ticker := time.NewTicker(50 * time.Millisecond)
 	defer ticker.Stop()
 
 	for {
-		moving, err := h.ServosMoving(ctx, ids)
+		moving, err := h.AnyServoMoving(ctx, ids)
 		if err != nil {
 			return fmt.Errorf("failed to read moving state for servos %v: %w", ids, err)
 		}
@@ -624,11 +622,11 @@ func (h *ControllerHandle) SyncReadPositions(ctx context.Context, ids []int) (ou
 	return out, err
 }
 
-// ServosMoving reports whether any of the given servos is still executing a move,
+// AnyServoMoving reports whether any of the given servos is still executing a move,
 // in one SyncRead of the Moving register rather than a read per servo.
-func (h *ControllerHandle) ServosMoving(ctx context.Context, ids []int) (moving bool, err error) {
+func (h *ControllerHandle) AnyServoMoving(ctx context.Context, ids []int) (moving bool, err error) {
 	err = h.withSessionRead(func(sess *busSession) error {
-		data, err := sess.bus.SyncRead(ctx, feetech.RegMoving.Address, 1, ids)
+		data, err := sess.bus.SyncRead(ctx, feetech.RegMoving.Address, int(feetech.RegMoving.Size), ids)
 		if err != nil {
 			return err
 		}

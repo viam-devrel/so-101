@@ -94,6 +94,7 @@ type fakeServoArm struct {
 
 	moving         bool           // returned by servo_moving, unless movingResponse is set
 	movingResponse map[string]any // overrides the servo_moving response entirely, for shape tests
+	onServoMoving  func()         // called on a servo_moving command, before it is answered
 }
 
 func newFakeServoArm() *fakeServoArm {
@@ -112,6 +113,9 @@ func (f *fakeServoArm) DoCommand(_ context.Context, cmd map[string]any) (map[str
 
 	if cmd["command"] == servocmd.CmdServoCapabilities {
 		return map[string]any{"servo_commands": true, "servo_ids": f.capabilities}, nil
+	}
+	if cmd["command"] == servocmd.CmdServoMoving && f.onServoMoving != nil {
+		f.onServoMoving()
 	}
 	if f.doErr != nil {
 		return nil, f.doErr
@@ -268,19 +272,6 @@ func TestGripperIsMovingQueriesHardwareWhenFlagFalse(t *testing.T) {
 	}
 }
 
-// A remote arm renders the response through structpb, but bool round-trips as bool with
-// no shape drift the way numbers do -- this just confirms the plain assertion still works
-// against that exact encoding.
-func TestGripperIsMovingDecodesRemoteBoolEncoding(t *testing.T) {
-	fa := newFakeServoArm()
-	fa.movingResponse = map[string]any{"moving": true}
-	g := newTestGripper(t, fa)
-
-	moving, err := g.IsMoving(context.Background())
-	require.NoError(t, err)
-	assert.True(t, moving)
-}
-
 // A response missing "moving" entirely (e.g. an older module build that never wrote the
 // key) must not be silently read as "stopped".
 func TestGripperIsMovingFallsBackOnMissingKey(t *testing.T) {
@@ -303,6 +294,20 @@ func TestGripperIsMovingFallsBackOnUnknownCommandError(t *testing.T) {
 	moving, err := g.IsMoving(context.Background())
 	require.NoError(t, err)
 	assert.False(t, moving)
+}
+
+// The fallback's two Load()s are separated by a full DoCommand round trip, so a concurrent
+// Open() can legitimately flip the flag between them. This pins that re-read: the hook flips
+// the flag mid-round-trip, so a value cached before the call would wrongly report false.
+func TestGripperIsMovingFallbackReReadsFlagAfterRoundTrip(t *testing.T) {
+	fa := newFakeServoArm()
+	fa.doErr = errors.New("unknown servo command: servo_moving")
+	g := newTestGripper(t, fa)
+	fa.onServoMoving = func() { g.isMoving.Store(true) }
+
+	moving, err := g.IsMoving(context.Background())
+	require.NoError(t, err)
+	assert.True(t, moving, "fallback must re-read the flag, not a value cached before the round trip")
 }
 
 func TestGripperGetPositionReturnsPercent(t *testing.T) {

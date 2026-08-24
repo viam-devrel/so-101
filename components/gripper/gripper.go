@@ -319,7 +319,7 @@ func (g *so101Gripper) IsMoving(ctx context.Context) (bool, error) {
 	}
 	moving, ok := res["moving"].(bool)
 	if !ok {
-		g.logger.Debugf("servo_moving response missing 'moving', falling back to intent flag")
+		g.logger.Debug("servo_moving response missing 'moving', falling back to intent flag")
 		return g.isMoving.Load(), nil
 	}
 	return moving, nil

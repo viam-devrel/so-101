@@ -53,7 +53,7 @@ func (f *FakeServoOps) WaitForServosToStop(_ context.Context, ids []int, timeout
 	return nil
 }
 
-func (f *FakeServoOps) ServosMoving(_ context.Context, ids []int) (bool, error) {
+func (f *FakeServoOps) AnyServoMoving(_ context.Context, ids []int) (bool, error) {
 	f.MovingIDs = ids
 	return f.Moving, f.MovingErr
 }

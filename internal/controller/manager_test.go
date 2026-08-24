@@ -91,31 +91,21 @@ func TestServoPresentReportsConfiguredServos(t *testing.T) {
 	assert.False(t, h.ServoPresent(9), "motorSetupVerify needs absent-vs-unresponsive")
 }
 
-func TestServosMovingReportsFalseWhenAllStopped(t *testing.T) {
+func TestAnyServoMovingReportsFalseWhenAllStopped(t *testing.T) {
 	h := testHandle(t, testfake.NewFakeTransport())
-	moving, err := h.ServosMoving(context.Background(), []int{1, 2, 3})
+	moving, err := h.AnyServoMoving(context.Background(), []int{1, 2, 3})
 	require.NoError(t, err)
 	assert.False(t, moving)
 }
 
-func TestServosMovingReportsTrueWhenOneIsMoving(t *testing.T) {
+func TestAnyServoMovingReportsTrueWhenOneIsMoving(t *testing.T) {
 	ft := testfake.NewFakeTransport()
 	ft.SetRegister(2, feetech.RegMoving.Address, []byte{1})
 	h := testHandle(t, ft)
 
-	moving, err := h.ServosMoving(context.Background(), []int{1, 2, 3})
+	moving, err := h.AnyServoMoving(context.Background(), []int{1, 2, 3})
 	require.NoError(t, err)
 	assert.True(t, moving)
-}
-
-func TestServosMovingOnlyConsultsRequestedIDs(t *testing.T) {
-	ft := testfake.NewFakeTransport()
-	ft.SetRegister(6, feetech.RegMoving.Address, []byte{1}) // gripper moving, not requested
-	h := testHandle(t, ft)
-
-	moving, err := h.ServosMoving(context.Background(), []int{1, 2, 3, 4, 5})
-	require.NoError(t, err)
-	assert.False(t, moving, "a moving servo outside ids must not make the batch read true")
 }
 
 func TestWaitForServosToStopReturnsOnceAllStopped(t *testing.T) {

@@ -415,5 +415,5 @@ func (s *so101) IsMoving(ctx context.Context) (bool, error) {
 	if s.isMoving.Load() {
 		return true, nil
 	}
-	return s.controller.ServosMoving(ctx, s.armServoIDs)
+	return s.controller.AnyServoMoving(ctx, s.armServoIDs)
 }

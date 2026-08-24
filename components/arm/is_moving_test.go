@@ -36,10 +36,13 @@ func testArmHandle(t *testing.T, ft feetech.Transport) *controller.ControllerHan
 }
 
 // The atomic intent flag is a fast path: when set, IsMoving must return true without any
-// bus traffic.
+// bus traffic. Unplugging the transport turns any bus traffic into an EIO failure, so a
+// passing call here is a genuine no-traffic assertion, not just a return-value check.
 func TestHardwareArmIsMovingFastPathShortCircuits(t *testing.T) {
-	s := &so101{controller: testArmHandle(t, testfake.NewFakeTransport()), armServoIDs: []int{1, 2, 3, 4, 5}}
+	ft := testfake.NewFakeTransport()
+	s := &so101{controller: testArmHandle(t, ft), armServoIDs: []int{1, 2, 3, 4, 5}}
 	s.isMoving.Store(true)
+	ft.Unplug()
 
 	moving, err := s.IsMoving(context.Background())
 	require.NoError(t, err)

@@ -16,7 +16,7 @@ import (
 	"so_arm/internal/testfake"
 )
 
-// This file answers a concrete question: does polling ServosMoving (the hardware IsMoving
+// This file answers a concrete question: does polling AnyServoMoving (the hardware IsMoving
 // path, one SyncRead of feetech.RegMoving batched across servos) disrupt the position
 // reads/writes that share the same serial bus?
 //
@@ -109,13 +109,13 @@ func trackedTestHandle(t *testing.T, ft *testfake.FakeTransport) (*ControllerHan
 	return h, tracker
 }
 
-// TestConcurrentServosMovingDoesNotInterleaveOrCorruptPositionReads is the correctness
+// TestConcurrentAnyServoMovingDoesNotInterleaveOrCorruptPositionReads is the correctness
 // contract: hammer position reads and Moving polls concurrently (no cadence limiter -- this
 // is a stress test, not a cadence simulation) and confirm two things that must hold
 // regardless of timing: every position read still returns exactly its seeded value, and the
 // tracker never observes one transaction's request bytes sent before a prior transaction's
 // response bytes were fully drained.
-func TestConcurrentServosMovingDoesNotInterleaveOrCorruptPositionReads(t *testing.T) {
+func TestConcurrentAnyServoMovingDoesNotInterleaveOrCorruptPositionReads(t *testing.T) {
 	ft := testfake.NewFakeTransport()
 	armIDs := []int{1, 2, 3, 4, 5}
 	seeded := map[int]int{1: 1000, 2: 1500, 3: 2000, 4: 2500, 5: 3000}
@@ -138,7 +138,7 @@ func TestConcurrentServosMovingDoesNotInterleaveOrCorruptPositionReads(t *testin
 				return
 			default:
 			}
-			_, err := h.ServosMoving(ctx, armIDs)
+			_, err := h.AnyServoMoving(ctx, armIDs)
 			assert.NoError(t, err)
 		}
 	}()
@@ -148,14 +148,14 @@ func TestConcurrentServosMovingDoesNotInterleaveOrCorruptPositionReads(t *testin
 		require.NoError(t, err)
 		for id, want := range seeded {
 			assert.Equal(t, want, positions[id],
-				"position read must return the seeded value even under a concurrent ServosMoving poll")
+				"position read must return the seeded value even under a concurrent AnyServoMoving poll")
 		}
 	}
 	close(pollerDone)
 	wg.Wait()
 
 	assert.Empty(t, tracker.Violations(),
-		"a position SyncRead's request/response must never be split by a ServosMoving SyncRead's bytes")
+		"a position SyncRead's request/response must never be split by a AnyServoMoving SyncRead's bytes")
 }
 
 // latencyStats returns the mean and median of a set of durations.
@@ -172,7 +172,7 @@ func latencyStats(samples []time.Duration) (mean, median time.Duration) {
 	return total / time.Duration(len(sorted)), sorted[len(sorted)/2]
 }
 
-// TestBusContentionTiming measures, rather than asserts, the cost a concurrent ServosMoving
+// TestBusContentionTiming measures, rather than asserts, the cost a concurrent AnyServoMoving
 // poll adds to position reads on the shared bus. It logs raw numbers instead of asserting
 // wall-clock thresholds, since those are inherently noisy in CI; the only assertions here are
 // that every call still succeeds. See the file doc comment for the mechanism (feetech.Bus's
@@ -215,7 +215,7 @@ func TestBusContentionTiming(t *testing.T) {
 			case <-stop:
 				return
 			case <-ticker.C:
-				_, _ = h.ServosMoving(ctx, armIDs)
+				_, _ = h.AnyServoMoving(ctx, armIDs)
 			}
 		}
 	}()
@@ -226,7 +226,7 @@ func TestBusContentionTiming(t *testing.T) {
 	movingAlone := make([]time.Duration, 50)
 	for i := range movingAlone {
 		start := time.Now()
-		_, err := h.ServosMoving(ctx, armIDs)
+		_, err := h.AnyServoMoving(ctx, armIDs)
 		movingAlone[i] = time.Since(start)
 		require.NoError(t, err)
 	}
@@ -236,7 +236,7 @@ func TestBusContentionTiming(t *testing.T) {
 	movMean, movMedian := latencyStats(movingAlone)
 
 	t.Logf("SyncReadPositions baseline (n=%d, no concurrent poll):        mean=%v median=%v", n, baseMean, baseMedian)
-	t.Logf("SyncReadPositions under ServosMoving poll (n=%d, every %v):   mean=%v median=%v", n, pollInterval, contMean, contMedian)
+	t.Logf("SyncReadPositions under AnyServoMoving poll (n=%d, every %v):   mean=%v median=%v", n, pollInterval, contMean, contMedian)
 	t.Logf("Contention delta:                                             mean=%v median=%v", contMean-baseMean, contMedian-baseMedian)
-	t.Logf("ServosMoving alone (n=%d):                                    mean=%v median=%v", len(movingAlone), movMean, movMedian)
+	t.Logf("AnyServoMoving alone (n=%d):                                    mean=%v median=%v", len(movingAlone), movMean, movMedian)
 }
