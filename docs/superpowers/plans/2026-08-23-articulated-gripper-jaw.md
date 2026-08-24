@@ -146,6 +146,14 @@ git commit -m "refactor(geometry): share the jaw percent<->angle bijection"
 
 Thread the parameter through without changing any behaviour yet. This isolates the call-site churn from the topology change.
 
+> **Outcome note (post-review).** `TestZeroDoFModelUnchanged` below was TDD scaffolding — it
+> had to fail to compile against the old signature — but review found it a strict subset of
+> `TestBuildGripperModelPlacesFrameAtTCP` and `TestBuildGripperModelCarriesMeshes`, which
+> (once updated to pass `false`) already *are* the `jawDoF: false` contract and assert it more
+> strongly. It was deleted after the task, and `TestBuildGripperModelPlacesFrameAtTCP`'s doc
+> comment now records that it carries that guarantee. Write it, use it to drive the change,
+> then delete it — do not leave it behind.
+
 **Files:**
 - Modify: `internal/geometry/gripper.go:140`
 - Modify: `components/simulated/simulated_gripper.go:107`
