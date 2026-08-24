@@ -1171,7 +1171,7 @@ Two things about this task were established empirically during plan review; do n
    joint configuration makes it reachable by construction.
 2. **Two scenarios are needed, because they measure different things.** With no obstacle the planner
    returns a **2-step** trajectory (start and goal only) — that measures whether *IK and seeding*
-   choose a non-start jaw angle. With an obstacle in the path it returns **~150-230 steps** — that
+   choose a non-start jaw angle. With an obstacle in the path it returns **~300-420 steps** — that
    measures whether the *RRT* drives the jaw while searching. Only running the first would look like
    a result while exercising no sampling at all.
 
@@ -1331,8 +1331,11 @@ func TestPlannerJawTravel(t *testing.T) {
 - [ ] **Step 3: Run it and read the output**
 
 Run: `go test ./internal/geometry/ -run TestPlannerJawTravel -v 2>&1 | grep -E "seed|goal|PASS|FAIL"`
-Expected: PASS, with `seed NN:` lines under both `direct` and `obstructed`. Reference from plan
-review: `direct` plans in 2 steps, `obstructed` in roughly 148-229 steps.
+Expected: PASS, with `seed NN:` lines under both `direct` and `obstructed`. Reference, measured during plan review
+with the articulated model: `direct` plans in 2 steps with jaw travel 0.0000 on every seed;
+`obstructed` plans in ~300-420 steps with jaw travel 0.083-0.383 rad (4.3%-19.9% of range),
+spanning both signs. The obstructed subtest takes ~35s, so it lands on every later
+`go test ./...` — that is expected, and why the `testing.Short()` skip is there.
 
 If a scenario reports zero successful seeds the `require.Positivef` fails loudly — that is the
 guard against a silently empty result. Re-derive `jawGoalConfig` from a configuration you have
