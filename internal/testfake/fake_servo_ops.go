@@ -1,0 +1,50 @@
+package testfake
+
+import "context"
+
+// FakeServoOps records the single-servo operations servocmd.HandleServoCommand dispatches, so
+// the servo_* DoCommand protocol can be tested without a serial bus. It implements
+// servocmd.ServoOps.
+type FakeServoOps struct {
+	MovedID      int
+	MovedPercent float64
+	MovedSpeed   int
+	MovedRaw     int
+	StoppedID    int
+	WaitedIDs    []int
+	WaitedMs     int
+
+	Percent  float64
+	Raw      int
+	MoveErr  error
+	PosErr   error
+	MoveRaws []int
+}
+
+func (f *FakeServoOps) MoveServoPercent(_ context.Context, id int, percent float64, speed int) error {
+	f.MovedID, f.MovedPercent, f.MovedSpeed = id, percent, speed
+	return f.MoveErr
+}
+
+func (f *FakeServoOps) MoveServoRaw(_ context.Context, id, raw int) error {
+	f.MovedID, f.MovedRaw = id, raw
+	f.MoveRaws = append(f.MoveRaws, raw)
+	return f.MoveErr
+}
+
+func (f *FakeServoOps) ServoPositionPercent(_ context.Context, id int) (float64, int, error) {
+	if f.PosErr != nil {
+		return 0, 0, f.PosErr
+	}
+	return f.Percent, f.Raw, nil
+}
+
+func (f *FakeServoOps) StopServo(_ context.Context, id int) error {
+	f.StoppedID = id
+	return nil
+}
+
+func (f *FakeServoOps) WaitForServosToStop(_ context.Context, ids []int, timeoutMs int) error {
+	f.WaitedIDs, f.WaitedMs = ids, timeoutMs
+	return nil
+}
