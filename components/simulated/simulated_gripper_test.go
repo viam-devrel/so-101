@@ -419,3 +419,31 @@ func TestGetPositionReportsJaw(t *testing.T) {
 	assert.Equal(t, 1, resp["dof"])
 	assert.InDelta(t, geometry.GripperJointMax, resp["jaw_angle_rad"].(float64), 1e-9)
 }
+
+// TestExecuteEpsilonTripsOnMovingJaw documents the sharpest practical consequence of making the
+// gripper InputEnabled. services/motion/builtin/builtin.go:633 rejects a plan whose FIRST
+// trajectory step differs from CurrentInputs by more than defaultExecuteEpsilon (0.01), and
+// aborts the whole move -- the ARM's move -- when it does. A jaw still travelling from an
+// earlier Open() is enough to trip it.
+func TestExecuteEpsilonTripsOnMovingJaw(t *testing.T) {
+	const defaultExecuteEpsilon = 0.01 // services/motion/builtin/builtin.go:77
+
+	ctx := context.Background()
+	g := newArticulatedTestGripper(t)
+
+	// Close, then start opening without waiting: the jaw is now mid-travel.
+	_, err := g.Grab(ctx, nil)
+	require.NoError(t, err)
+	g.setTarget(100)
+	time.Sleep(50 * time.Millisecond)
+
+	current, err := g.CurrentInputs(ctx)
+	require.NoError(t, err)
+
+	// A plan seeded a moment earlier would start from the closed jaw.
+	planStart := []referenceframe.Input{geometry.GripperJointMin}
+	assert.Greaterf(t,
+		referenceframe.InputsLinfDistance(current, planStart), defaultExecuteEpsilon,
+		"a mid-travel jaw (%v) should exceed the execute epsilon against the plan start %v",
+		current, planStart)
+}
