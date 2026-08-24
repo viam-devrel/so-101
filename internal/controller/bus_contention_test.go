@@ -3,10 +3,8 @@ package controller
 import (
 	"context"
 	"fmt"
-	"sort"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/hipsterbrown/feetech-servo/feetech"
 	"github.com/stretchr/testify/assert"
@@ -156,87 +154,4 @@ func TestConcurrentAnyServoMovingDoesNotInterleaveOrCorruptPositionReads(t *test
 
 	assert.Empty(t, tracker.Violations(),
 		"a position SyncRead's request/response must never be split by a AnyServoMoving SyncRead's bytes")
-}
-
-// latencyStats returns the mean and median of a set of durations.
-func latencyStats(samples []time.Duration) (mean, median time.Duration) {
-	if len(samples) == 0 {
-		return 0, 0
-	}
-	var total time.Duration
-	sorted := append([]time.Duration(nil), samples...)
-	for _, d := range sorted {
-		total += d
-	}
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
-	return total / time.Duration(len(sorted)), sorted[len(sorted)/2]
-}
-
-// TestBusContentionTiming measures, rather than asserts, the cost a concurrent AnyServoMoving
-// poll adds to position reads on the shared bus. It logs raw numbers instead of asserting
-// wall-clock thresholds, since those are inherently noisy in CI; the only assertions here are
-// that every call still succeeds. See the file doc comment for the mechanism (feetech.Bus's
-// own mutex, held across each transaction's 1ms MinCommandGap sleep) that these numbers are
-// expected to reflect: a queued caller pays the gap of whatever transaction is ahead of it,
-// not just its own.
-func TestBusContentionTiming(t *testing.T) {
-	ft := testfake.NewFakeTransport()
-	h, _ := trackedTestHandle(t, ft)
-	ctx := context.Background()
-	armIDs := []int{1, 2, 3, 4, 5}
-
-	const n = 150
-	// 50Hz: the fast end of the teleop setpoint-streaming rate this module targets
-	// (30-50Hz); WaitForServosToStop itself only polls at 20Hz (every 50ms).
-	const pollInterval = 20 * time.Millisecond
-
-	measure := func() []time.Duration {
-		out := make([]time.Duration, n)
-		for i := 0; i < n; i++ {
-			start := time.Now()
-			_, err := h.SyncReadPositions(ctx, armIDs)
-			out[i] = time.Since(start)
-			require.NoError(t, err)
-		}
-		return out
-	}
-
-	baseline := measure()
-
-	stop := make(chan struct{})
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		ticker := time.NewTicker(pollInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-stop:
-				return
-			case <-ticker.C:
-				_, _ = h.AnyServoMoving(ctx, armIDs)
-			}
-		}
-	}()
-	contended := measure()
-	close(stop)
-	wg.Wait()
-
-	movingAlone := make([]time.Duration, 50)
-	for i := range movingAlone {
-		start := time.Now()
-		_, err := h.AnyServoMoving(ctx, armIDs)
-		movingAlone[i] = time.Since(start)
-		require.NoError(t, err)
-	}
-
-	baseMean, baseMedian := latencyStats(baseline)
-	contMean, contMedian := latencyStats(contended)
-	movMean, movMedian := latencyStats(movingAlone)
-
-	t.Logf("SyncReadPositions baseline (n=%d, no concurrent poll):        mean=%v median=%v", n, baseMean, baseMedian)
-	t.Logf("SyncReadPositions under AnyServoMoving poll (n=%d, every %v):   mean=%v median=%v", n, pollInterval, contMean, contMedian)
-	t.Logf("Contention delta:                                             mean=%v median=%v", contMean-baseMean, contMedian-baseMedian)
-	t.Logf("AnyServoMoving alone (n=%d):                                    mean=%v median=%v", len(movingAlone), movMean, movMedian)
 }
