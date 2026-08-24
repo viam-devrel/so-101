@@ -232,7 +232,7 @@ func (g *simulatedSO101Gripper) Geometries(
 	g.mu.Lock()
 	pct := g.currentPct
 	g.mu.Unlock()
-	return geometry.BuildGripperMeshes(g.gripperType, g.meshDetail, geometry.JawAngleFromPct(pct))
+	return geometry.BuildGripperMeshes(g.gripperType, g.meshDetail, geometry.JawRadiansFromPct(pct))
 }
 
 // Status returns the current status of the resource as a map of key-value pairs.

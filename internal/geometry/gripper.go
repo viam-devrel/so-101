@@ -63,16 +63,18 @@ const (
 	GripperJointMax = 1.74533
 )
 
-// JawAngleFromPct maps a gripper opening percentage (0 closed, 100 open) onto the jaw
-// joint angle in radians, clamping out-of-range input. Shared by both gripper components,
-// the articulated kinematic model, and GoToInputs so the mapping cannot drift between them.
-func JawAngleFromPct(pct float64) float64 {
+// JawRadiansFromPct maps a gripper opening percentage (0 closed, 100 open) onto the jaw
+// joint angle in radians, clamping out-of-range input. The single definition of the jaw
+// mapping; both directions live here.
+func JawRadiansFromPct(pct float64) float64 {
 	p := math.Max(0, math.Min(100, pct)) / 100.0
 	return GripperJointMin + p*(GripperJointMax-GripperJointMin)
 }
 
-// JawPctFromAngle is the inverse of JawAngleFromPct, clamped to [0, 100].
-func JawPctFromAngle(rad float64) float64 {
+// JawPctFromRadians is the inverse of JawRadiansFromPct. It saturates an out-of-range
+// angle to 0/100 rather than rejecting it, so a caller needing limit enforcement must
+// validate before converting.
+func JawPctFromRadians(rad float64) float64 {
 	pct := 100.0 * (rad - GripperJointMin) / (GripperJointMax - GripperJointMin)
 	return math.Max(0, math.Min(100, pct))
 }

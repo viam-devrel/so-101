@@ -61,42 +61,44 @@ Append to `internal/geometry/gripper_frame_test.go`:
 // TestJawAngleBijection pins the percent<->radian mapping shared by the model builder, both
 // gripper components, and GoToInputs. A drift here silently rescales every jaw command.
 func TestJawAngleBijection(t *testing.T) {
-	assert.InDelta(t, GripperJointMin, JawAngleFromPct(0), 1e-12)
-	assert.InDelta(t, GripperJointMax, JawAngleFromPct(100), 1e-12)
+	assert.InDelta(t, GripperJointMin, JawRadiansFromPct(0), 1e-12)
+	assert.InDelta(t, GripperJointMax, JawRadiansFromPct(100), 1e-12)
 
 	for _, pct := range []float64{0, 12.5, 50, 87.3, 100} {
-		back := JawPctFromAngle(JawAngleFromPct(pct))
+		back := JawPctFromRadians(JawRadiansFromPct(pct))
 		assert.InDeltaf(t, pct, back, 1e-9, "round trip lost %v", pct)
 	}
 
 	// Out-of-range inputs clamp rather than extrapolating into the servo stops.
-	assert.InDelta(t, GripperJointMin, JawAngleFromPct(-25), 1e-12)
-	assert.InDelta(t, GripperJointMax, JawAngleFromPct(150), 1e-12)
-	assert.InDelta(t, 0.0, JawPctFromAngle(GripperJointMin-1), 1e-12)
-	assert.InDelta(t, 100.0, JawPctFromAngle(GripperJointMax+1), 1e-12)
+	assert.InDelta(t, GripperJointMin, JawRadiansFromPct(-25), 1e-12)
+	assert.InDelta(t, GripperJointMax, JawRadiansFromPct(150), 1e-12)
+	assert.InDelta(t, 0.0, JawPctFromRadians(GripperJointMin-1), 1e-12)
+	assert.InDelta(t, 100.0, JawPctFromRadians(GripperJointMax+1), 1e-12)
 }
 ```
 
 - [ ] **Step 2: Run it and watch it fail**
 
 Run: `go test ./internal/geometry/ -run TestJawAngleBijection`
-Expected: FAIL — `undefined: JawAngleFromPct`
+Expected: FAIL — `undefined: JawRadiansFromPct`
 
 - [ ] **Step 3: Implement**
 
 In `internal/geometry/gripper.go`, after the `GripperJointMin`/`GripperJointMax` const block:
 
 ```go
-// JawAngleFromPct maps a gripper opening percentage (0 closed, 100 open) onto the jaw
-// joint angle in radians, clamping out-of-range input. Shared by both gripper components,
-// the articulated kinematic model, and GoToInputs so the mapping cannot drift between them.
-func JawAngleFromPct(pct float64) float64 {
+// JawRadiansFromPct maps a gripper opening percentage (0 closed, 100 open) onto the jaw
+// joint angle in radians, clamping out-of-range input. This and its inverse are the single
+// definition of the jaw mapping. Named for radians because gripper.go carries a second,
+// unrelated percent->radian mapping over the servo shaft's +/-pi.
+func JawRadiansFromPct(pct float64) float64 {
 	p := math.Max(0, math.Min(100, pct)) / 100.0
 	return GripperJointMin + p*(GripperJointMax-GripperJointMin)
 }
 
-// JawPctFromAngle is the inverse of JawAngleFromPct, clamped to [0, 100].
-func JawPctFromAngle(rad float64) float64 {
+// JawPctFromRadians is the inverse of JawRadiansFromPct. It SATURATES out-of-range angles to
+// 0/100 rather than rejecting them, so callers needing limit enforcement must validate first.
+func JawPctFromRadians(rad float64) float64 {
 	pct := 100.0 * (rad - GripperJointMin) / (GripperJointMax - GripperJointMin)
 	return math.Max(0, math.Min(100, pct))
 }
@@ -115,13 +117,13 @@ Expected: PASS
 	g.mu.Lock()
 	pct := g.currentPct
 	g.mu.Unlock()
-	return geometry.BuildGripperMeshes(g.gripperType, g.meshDetail, geometry.JawAngleFromPct(pct))
+	return geometry.BuildGripperMeshes(g.gripperType, g.meshDetail, geometry.JawRadiansFromPct(pct))
 ```
 
 `components/gripper/gripper.go` — in `jawAngle`, replace the final two lines:
 
 ```go
-	return geometry.JawAngleFromPct(percent)
+	return geometry.JawRadiansFromPct(percent)
 ```
 
 (Keep the existing early `return geometry.GripperJointMin` on the error path. Drop the now-unused `math` import from `gripper.go` **only if** nothing else in the file uses it — check with `go build ./...`.)
@@ -915,7 +917,7 @@ func (g *simulatedSO101Gripper) CurrentInputs(ctx context.Context) ([]referencef
 	g.mu.Lock()
 	pct := g.currentPct
 	g.mu.Unlock()
-	return []referenceframe.Input{geometry.JawAngleFromPct(pct)}, nil
+	return []referenceframe.Input{geometry.JawRadiansFromPct(pct)}, nil
 }
 
 // GoToInputs drives the jaw through each step in turn. The motion service batches consecutive
@@ -936,7 +938,7 @@ func (g *simulatedSO101Gripper) GoToInputs(ctx context.Context, inputSteps ...[]
 	}
 	g.recordJawTrajectory(inputSteps)  // added in Task 9; omit for now
 	for _, step := range inputSteps {
-		if err := g.moveTo(ctx, geometry.JawPctFromAngle(step[0])); err != nil {
+		if err := g.moveTo(ctx, geometry.JawPctFromRadians(step[0])); err != nil {
 			return err
 		}
 	}
@@ -1043,7 +1045,7 @@ func (g *simulatedSO101Gripper) recordJawTrajectory(steps [][]referenceframe.Inp
 	}
 	var travel float64
 	g.mu.Lock()
-	prev := geometry.JawAngleFromPct(g.currentPct)
+	prev := geometry.JawRadiansFromPct(g.currentPct)
 	g.mu.Unlock()
 	first := prev
 	for _, s := range steps {

@@ -180,14 +180,14 @@ The percent-to-angle bijection moves to `internal/geometry` so every call site s
 definition:
 
 ```go
-func JawAngleFromPct(pct float64) float64  // GripperJointMin + pct/100*(Max-Min)
-func JawPctFromAngle(rad float64) float64  // inverse, clamped to [0, 100]
+func JawRadiansFromPct(pct float64) float64  // GripperJointMin + pct/100*(Max-Min)
+func JawPctFromRadians(rad float64) float64  // inverse, clamped to [0, 100]
 ```
 
 It is currently inlined **twice** — `simulated_gripper.go:235` and the hardware gripper's
 `jawAngle` at `components/gripper/gripper.go:318-319`. Both call sites adopt the helper.
 
-- **`CurrentInputs`** — `[]Input{JawAngleFromPct(currentPct)}`, read under `g.mu`. Returns
+- **`CurrentInputs`** — `[]Input{JawRadiansFromPct(currentPct)}`, read under `g.mu`. Returns
   `errors.ErrUnsupported` when the flag is off.
 - **`GoToInputs(steps...)`** — validates each step is length 1 and within
   `model.DoF()[0]`, converts to percent, and walks the steps sequentially through
@@ -238,7 +238,7 @@ reverse edge is forbidden by CLAUDE.md's dependency rule.
 | `TestZeroDoFModelUnchanged` | `jawDoF=false` produces a model identical to today's — no DoF, same links, same TCP |
 | `TestArticulatedModelSurvivesSerialization` | DoF and joint limits survive the real gRPC round trip |
 | `TestModelGeometriesMatchBuiltMeshes` | joint-frame pose and `Compose`-chain pose agree to 1e-9 across the θ range |
-| `TestJawAngleBijection` | `JawPctFromAngle(JawAngleFromPct(p)) == p`; clamping at both ends; endpoints map to `GripperJointMin`/`Max` |
+| `TestJawAngleBijection` | `JawPctFromRadians(JawRadiansFromPct(p)) == p`; clamping at both ends; endpoints map to `GripperJointMin`/`Max` |
 | `TestPlannerJawTravel` | the experiment — structural facts only, magnitudes reported |
 
 **`components/simulated`**:
