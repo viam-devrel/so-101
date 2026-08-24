@@ -273,10 +273,10 @@ func (s *so101) MoveToJointPositions(ctx context.Context, positions []referencef
 			"uniform speed: %v", err)
 		// No arm.MoveOptions here, so caps is always nil -- kept for symmetry with
 		// MoveThroughJointPositions' fallback.
-		return s.moveJointsUniform(ctx, clamped, servo.UniformSpeedUnderCaps(speed, nil), accel, servocmd.ParseWaitExtra(extra))
+		return s.moveJointsUniform(ctx, clamped, servo.UniformSpeedUnderCaps(speed, nil), accel, servocmd.WaitArg(extra))
 	}
 
-	return s.moveJoints(ctx, current, clamped, speed, accel, nil, servocmd.ParseWaitExtra(extra))
+	return s.moveJoints(ctx, current, clamped, speed, accel, nil, servocmd.WaitArg(extra))
 }
 
 func (s *so101) MoveThroughJointPositions(ctx context.Context, positions [][]referenceframe.Input, options *arm.MoveOptions, extra map[string]interface{}) error {

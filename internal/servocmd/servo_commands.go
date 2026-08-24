@@ -84,15 +84,11 @@ func ClampPercent(p float64) float64 {
 	return p
 }
 
-// ParseWaitExtra reads the optional "wait" bool from a DoCommand or extra map.
-// Absent or non-bool values default to true so the motion planner and every existing
-// caller keep the blocking behavior; a caller streaming setpoints faster than the
-// hardware can travel passes false. The arm reads it from its extra argument; the
-// gripper reads it from the command map itself, because Gripper.DoCommand has no
-// extra parameter.
-func ParseWaitExtra(extra map[string]any) bool {
-	if extra != nil {
-		if w, ok := extra["wait"].(bool); ok {
+// WaitArg reads the optional "wait" bool from a command or extra map. Absent or
+// non-bool values default to true, so every existing caller keeps blocking.
+func WaitArg(cmd map[string]any) bool {
+	if cmd != nil {
+		if w, ok := cmd["wait"].(bool); ok {
 			return w
 		}
 	}
