@@ -408,30 +408,75 @@ func TestGrabReportsHeldWhenTheJawStopsShortOfClosed(t *testing.T) {
 	assert.True(t, grabbed, "a jaw held open by an object is holding something")
 }
 
-// Open and Grab are one-shot typed API calls whose contract is "the jaw is now open" /
-// "did I grab something". Grab in particular reads the position back to decide its
-// boolean return, so without the settle wait it samples a jaw still in flight. Assert on
-// the emitted command: the grab-classification tests cannot catch a missing wait, because
-// fakeServoArm returns a static f.percent that CmdServoMove never changes.
-func TestOpenAndGrabAlwaysWaitForTheJawToSettle(t *testing.T) {
-	t.Run("Open", func(t *testing.T) {
-		fa := newFakeServoArm()
-		g := newTestGripper(t, fa)
+// Grab reads the position back to decide its boolean return, so without the settle wait it
+// samples a jaw still in flight. Assert on the emitted command: the grab-classification
+// tests cannot catch a missing wait, because fakeServoArm returns a static f.percent that
+// CmdServoMove never changes. Open's wait is already covered by the ordered-slice
+// assertion in TestGripperOpenCommandsServoAndWaits.
+func TestGrabWaitsForTheJawToSettle(t *testing.T) {
+	fa := newFakeServoArm()
+	g := newTestGripper(t, fa)
 
-		require.NoError(t, g.Open(context.Background(), nil))
+	_, err := g.Grab(context.Background(), nil)
+	require.NoError(t, err)
 
-		assert.NotNil(t, fa.lastCommand(servocmd.CmdServoWaitStop),
-			"Open must wait for the jaw to settle")
-	})
+	assert.NotNil(t, fa.lastCommand(servocmd.CmdServoWaitStop),
+		"Grab reads the position back, so its wait is load-bearing")
+}
 
-	t.Run("Grab", func(t *testing.T) {
-		fa := newFakeServoArm()
-		g := newTestGripper(t, fa)
+// A caller streaming setpoints faster than the jaw travels passes "wait": false, and gets
+// the move commanded with no settle wait behind it. The flag rides in the command map
+// rather than an extra argument because Gripper.DoCommand has no extra parameter.
+func TestGripperWriteCommandsHonorTheWaitFlag(t *testing.T) {
+	cases := []struct {
+		name     string
+		cmd      map[string]any
+		wantWait bool
+	}{
+		{
+			name:     "set shorthand with wait false skips the settle wait",
+			cmd:      map[string]any{"set": 42.0, "wait": false},
+			wantWait: false,
+		},
+		{
+			name:     "set shorthand without the flag still waits",
+			cmd:      map[string]any{"set": 42.0},
+			wantWait: true,
+		},
+		{
+			name:     "set_position with wait false skips the settle wait",
+			cmd:      map[string]any{"command": "set_position", "percentage": 42.0, "wait": false},
+			wantWait: false,
+		},
+		{
+			name:     "set_position without the flag still waits",
+			cmd:      map[string]any{"command": "set_position", "percentage": 42.0},
+			wantWait: true,
+		},
+		{
+			// A JSON string sneaking through must not silently disable the wait on the
+			// paths that need it, so a non-bool falls back to waiting.
+			name:     "a non-bool wait falls back to waiting",
+			cmd:      map[string]any{"set": 42.0, "wait": "false"},
+			wantWait: true,
+		},
+	}
 
-		_, err := g.Grab(context.Background(), nil)
-		require.NoError(t, err)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fa := newFakeServoArm()
+			g := newTestGripper(t, fa)
 
-		assert.NotNil(t, fa.lastCommand(servocmd.CmdServoWaitStop),
-			"Grab reads the position back, so its wait is load-bearing")
-	})
+			_, err := g.DoCommand(context.Background(), tc.cmd)
+			require.NoError(t, err)
+
+			move := fa.lastCommand(servocmd.CmdServoMove)
+			require.NotNil(t, move, "the move must be commanded either way")
+			assert.Equal(t, 42.0, move["percent"])
+
+			waited := fa.lastCommand(servocmd.CmdServoWaitStop) != nil
+			assert.Equal(t, tc.wantWait, waited,
+				"issued commands: %v", fa.issued())
+		})
+	}
 }
