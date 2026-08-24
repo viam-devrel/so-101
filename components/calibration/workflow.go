@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"time"
 
+	feetech "github.com/hipsterbrown/feetech-servo/feetech"
+
 	"so_arm/internal/controller"
 	"so_arm/internal/servo"
 )
@@ -46,7 +48,6 @@ func (cs *so101CalibrationSensor) startCalibration(ctx context.Context) (map[str
 	}, nil
 }
 
-// Add new method to reset calibration registers to factory defaults
 // resetCalibrationRegisters resets servo calibration registers to factory defaults
 func (cs *so101CalibrationSensor) resetCalibrationRegisters(ctx context.Context, servoID int) error {
 	// Reset homing offset to 0
@@ -105,6 +106,15 @@ func (cs *so101CalibrationSensor) setHomingPosition(ctx context.Context) (map[st
 		// Calculate offset to make current position the center (2047.5 for 12-bit encoder)
 		targetCenter := 2047
 		homingOffset := currentRawPos - targetCenter
+		// currentRawPos == 4095 (a joint parked at the top of the encoder) yields 2048, which
+		// collides with position_offset's sign bit and would decode back as 0. Trim that one
+		// tick instead of failing the whole workflow; encodePositionOffset still rejects
+		// anything wider, so a genuinely impossible offset is still an error.
+		if clamped := clampHomingOffset(homingOffset); clamped != homingOffset {
+			cs.logger.Warnf("Servo %d: homing offset %d is not encodable in position_offset; using %d",
+				servoID, homingOffset, clamped)
+			homingOffset = clamped
+		}
 
 		homingOffsets[strconv.Itoa(servoID)] = homingOffset
 		cs.joints[servoID].HomingOffset = homingOffset
@@ -344,13 +354,22 @@ func (cs *so101CalibrationSensor) saveCalibration(ctx context.Context) (map[stri
 		}
 	}
 
-	// Save calibration to file
+	// INVARIANT: a save failure below keeps the state at StateCompleted, not StateError, so
+	// save_calibration stays retryable (see sensor.go's Readings). Safe only because this
+	// function is idempotent from cs.joints -- it never consults what a prior attempt wrote,
+	// so a retry just redoes everything.
+	//
+	// The file is written BEFORE the servo registers, deliberately: it is the only durable
+	// record of the recording session, so persisting it first means a mid-loop bus failure
+	// cannot cost the recording if the module restarts before the retry. Nothing requires the
+	// two to agree -- the file is the module's normalization source and the registers are only
+	// the fallback read when no file exists (controller.LoadCalibration).
 	if err := controller.SaveFullCalibrationToFile(cs.cfg.CalibrationFile, fullCalibration); err != nil {
-		cs.setState(StateError, fmt.Sprintf("Failed to save calibration file: %v", err))
+		cs.setState(StateCompleted, fmt.Sprintf(
+			"Failed to save calibration file: %v. Recorded ranges are unaffected -- retry save_calibration.", err))
 		return map[string]any{"success": false}, err
 	}
 
-	// Apply calibration to servos (write to registers)
 	cs.logger.Info("Writing calibration data to servo registers...")
 	for servoID, joint := range cs.joints {
 		cs.logger.Infof("Writing to servo %d (%s): min_limit=%d, max_limit=%d",
@@ -358,32 +377,96 @@ func (cs *so101CalibrationSensor) saveCalibration(ctx context.Context) (map[stri
 
 		// Write min position limit
 		if err := cs.writeMinPositionLimit(ctx, servoID, joint.RangeMin); err != nil {
-			cs.setState(StateError, fmt.Sprintf("Failed to write min position limit to servo %d: %v", servoID, err))
+			cs.setState(StateCompleted, fmt.Sprintf(
+				"Failed to write min position limit to servo %d: %v. The calibration file is already saved -- retry save_calibration to finish the servo registers.",
+				servoID, err))
 			return map[string]any{"success": false}, err
 		}
 
 		// Write max position limit
 		if err := cs.writeMaxPositionLimit(ctx, servoID, joint.RangeMax); err != nil {
-			cs.setState(StateError, fmt.Sprintf("Failed to write max position limit to servo %d: %v", servoID, err))
+			cs.setState(StateCompleted, fmt.Sprintf(
+				"Failed to write max position limit to servo %d: %v. The calibration file is already saved -- retry save_calibration to finish the servo registers.",
+				servoID, err))
 			return map[string]any{"success": false}, err
 		}
 
 		cs.logger.Debugf("Successfully wrote position limits to servo %d", servoID)
 	}
 
-	cs.setState(StateIdle, "Calibration completed and saved successfully. Ready for new calibration.")
+	// Re-enable torque only now that every write above has landed, and only after seeding each
+	// servo's Goal_Position with where it physically is. Torque enable is a bare SyncWrite to
+	// RegTorqueEnable (ServoGroup.EnableAll), so the firmware resumes driving toward whatever
+	// goal it still holds -- stale after a hand-moved calibration, and reinterpreted through the
+	// position_offset set_homing wrote, so the arm can snap across its whole calibrated travel.
+	// If the seed fails, torque stays OFF rather than shipping that jerk.
+	//
+	// A failure here does NOT revert to StateCompleted: the calibration is already durably
+	// saved (file + registers), so there is nothing left to retry -- reverting would resurrect
+	// the save-retry deadlock this state machine was fixed to avoid. Instead it is reported via
+	// torque_enabled / torque_enable_error so the caller can warn the user the arm is limp.
+	torqueEnabled := true
+	var torqueErr string
+	if err := cs.seedGoalPositions(ctx); err != nil {
+		torqueEnabled = false
+		torqueErr = err.Error()
+		cs.logger.Errorf("Leaving torque disabled: %v", err)
+	} else if err := cs.controller.SetTorqueEnable(ctx, true); err != nil {
+		torqueEnabled = false
+		torqueErr = err.Error()
+		cs.logger.Errorf("Failed to re-enable torque after save: %v", err)
+	}
 
-	return map[string]any{
+	message := "Calibration completed and saved successfully. Torque re-enabled -- ready for new calibration."
+	if !torqueEnabled {
+		// Deliberately not "retry save_calibration": the state below is StateIdle, whose only
+		// available command is "start", so a retry would be rejected. The calibration itself is
+		// saved; only holding torque is missing.
+		message = fmt.Sprintf(
+			"Calibration saved successfully, but torque was left disabled: %s. The arm is limp -- support it before letting go, then power-cycle the servos or restart the machine to restore holding torque.",
+			torqueErr)
+	}
+	cs.setState(StateIdle, message)
+
+	result := map[string]any{
 		"success":           true,
 		"state":             cs.state.String(),
 		"calibration_file":  cs.cfg.CalibrationFile,
 		"joints_calibrated": len(cs.joints),
+		"torque_enabled":    torqueEnabled,
 		"message":           cs.lastInstruction,
-	}, nil
+	}
+	if !torqueEnabled {
+		result["torque_enable_error"] = torqueErr
+	}
+	return result, nil
 }
 
 // abortCalibration cancels the current calibration process
+// Torque intentionally stays disabled here. It could be re-enabled safely -- seedGoalPositions
+// exists for exactly that -- but abort is reached with the servos' registers half-written
+// (resetCalibrationRegisters may have wiped the position limits) and with the user's hands on
+// the arm, so an abort deliberately performs no motion-capable operation. resetCalibration
+// leaves torque alone for the same reason.
 func (cs *so101CalibrationSensor) abortCalibration(_ context.Context) (map[string]any, error) {
+	// StateCompleted holds a finished recording session waiting on save_calibration --
+	// minutes of hand-moving the arm. Aborting there would silently discard it, so reject
+	// rather than let an unadvertised path do what the UI already refuses to expose.
+	if cs.state == StateCompleted {
+		return map[string]any{"success": false},
+			fmt.Errorf("cannot abort: a completed recording is waiting to be saved (current state: %s); use save_calibration or reset instead", cs.state.String())
+	}
+
+	// StateIdle has nothing to abort. A no-op success (rather than an error) matches the
+	// "abort is always safe" spirit, but the message must not claim it did something.
+	if cs.state == StateIdle {
+		return map[string]any{
+			"success": true,
+			"state":   cs.state.String(),
+			"message": "Already idle; nothing to abort.",
+		}, nil
+	}
+
 	cs.logger.Info("Aborting calibration...")
 
 	// Stop any active recording
@@ -406,7 +489,9 @@ func (cs *so101CalibrationSensor) abortCalibration(_ context.Context) (map[strin
 func (cs *so101CalibrationSensor) resetCalibration(_ context.Context) (map[string]any, error) {
 	cs.logger.Info("Resetting calibration sensor...")
 
-	// Stop any active recording
+	// Stop any active recording. Cancel only -- never join: the caller (DoCommand) holds
+	// cs.mu, which recordPositions needs every tick, so waiting here would deadlock. Safe
+	// because the port stays open; only Close, which drops the lock first, must join.
 	if cs.recordingCancel != nil {
 		cs.recordingCancel()
 		cs.recordingCancel = nil
@@ -462,9 +547,83 @@ func (cs *so101CalibrationSensor) getCurrentPositions(ctx context.Context) (map[
 	}, nil
 }
 
-// writeHomingOffset writes the homing offset to a servo's register
+// writeHomingOffset writes the homing offset to a servo's position_offset register,
+// sign-magnitude encoded (see feetech.RegPositionOffset.SignBit). Previously wrote the
+// constant 128 to torque_enable, ignoring homingOffset entirely -- see the SO-101
+// remediation design spec's PR2 for why that was wrong.
 func (cs *so101CalibrationSensor) writeHomingOffset(ctx context.Context, servoID, homingOffset int) error {
-	return cs.controller.WriteServoRegister(ctx, servoID, "torque_enable", []byte{(byte(128))})
+	data, err := encodePositionOffset(homingOffset)
+	if err != nil {
+		return err
+	}
+	return cs.controller.WriteServoRegister(ctx, servoID, "position_offset", data)
+}
+
+// clampHomingOffset trims an offset to the largest magnitude position_offset can represent
+// without colliding with its sign bit.
+func clampHomingOffset(offset int) int {
+	maxMagnitude := (1 << feetech.RegPositionOffset.SignBit) - 1
+	if offset > maxMagnitude {
+		return maxMagnitude
+	}
+	if offset < -maxMagnitude {
+		return -maxMagnitude
+	}
+	return offset
+}
+
+// encodePositionOffset sign-magnitude-encodes value at feetech.RegPositionOffset's sign bit
+// into little-endian protocol bytes, mirroring the feetech package's unexported
+// encodeSignMagnitude (used for RegGoalPosition/RegPresentPosition et al).
+func encodePositionOffset(value int) ([]byte, error) {
+	signBit := feetech.RegPositionOffset.SignBit
+	maxMagnitude := (1 << signBit) - 1
+	if value < -maxMagnitude || value > maxMagnitude {
+		return nil, fmt.Errorf("homing offset %d out of range [%d, %d]", value, -maxMagnitude, maxMagnitude)
+	}
+	raw := uint16(value)
+	if value < 0 {
+		raw = uint16(-value) | (1 << uint(signBit))
+	}
+	return []byte{byte(raw & 0xFF), byte((raw >> 8) & 0xFF)}, nil
+}
+
+// seedGoalPositions writes each configured servo's live position into its Goal_Position, so a
+// following torque enable holds the arm where it is instead of chasing a stale goal. Read and
+// write share the post-set_homing frame (the firmware applies position_offset to both), so
+// this is a fixed point.
+//
+// Scoped to cs.cfg.ServoIDs like every other loop here; SetTorqueEnable is group-wide, so a
+// servo left out of servo_ids is still enabled without a fresh goal.
+func (cs *so101CalibrationSensor) seedGoalPositions(ctx context.Context) error {
+	positions, err := cs.controller.SyncReadPositions(ctx, cs.cfg.ServoIDs)
+	if err != nil {
+		return fmt.Errorf("failed to read positions before enabling torque: %w", err)
+	}
+	for _, servoID := range cs.cfg.ServoIDs {
+		raw, ok := positions[servoID]
+		if !ok {
+			return fmt.Errorf("servo %d reported no position before enabling torque", servoID)
+		}
+		if err := cs.writeGoalPosition(ctx, servoID, raw); err != nil {
+			return fmt.Errorf("failed to hold servo %d at its current position: %w", servoID, err)
+		}
+	}
+	return nil
+}
+
+// writeGoalPosition writes a raw tick value to a servo's goal_position register. Values
+// outside the encoder range are rejected rather than encoded: goal_position is sign-magnitude
+// at bit 15, so a garbled read must never reach the firmware as a negative multi-turn target.
+func (cs *so101CalibrationSensor) writeGoalPosition(ctx context.Context, servoID, raw int) error {
+	if raw < 0 || raw > feetech.ModelSTS3215.MaxPosition {
+		return fmt.Errorf("position %d out of range [0, %d]", raw, feetech.ModelSTS3215.MaxPosition)
+	}
+	data := []byte{
+		byte(raw & 0xFF),
+		byte((raw >> 8) & 0xFF),
+	}
+	return cs.controller.WriteServoRegister(ctx, servoID, "goal_position", data)
 }
 
 // writeMinPositionLimit writes the minimum position limit to a servo's register

@@ -654,24 +654,6 @@ func (h *ControllerHandle) PingServo(ctx context.Context, id int) (model int, er
 	return model, err
 }
 
-// DetectServoModel runs the servo's model auto-detection and returns the detected name.
-func (h *ControllerHandle) DetectServoModel(ctx context.Context, id int) (name string, err error) {
-	err = h.withSessionRead(func(sess *busSession) error {
-		cs, ok := sess.servos[id]
-		if !ok {
-			return fmt.Errorf("servo %d not available", id)
-		}
-		if err := cs.DetectModel(ctx); err != nil {
-			return err
-		}
-		if m := cs.Model(); m != nil {
-			name = m.Name
-		}
-		return nil
-	})
-	return name, err
-}
-
 // ServoPresent reports whether the session has a servo with this ID. No bus traffic.
 // motorSetupVerify needs "absent" and "did not answer" to be different answers.
 func (h *ControllerHandle) ServoPresent(id int) bool {
