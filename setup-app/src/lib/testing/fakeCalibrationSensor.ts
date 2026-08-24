@@ -232,7 +232,7 @@ export class FakeCalibrationSensor {
 		for (const id of this.servoIds) this.resetJoint(id);
 		this.transition(
 			'started',
-			"Calibration started. Manually move the robot to the middle of its range of motion, then use 'set_homing' command."
+			'Calibration started. Torque is off -- move every joint to the middle of its range of motion, then set the homing position.'
 		);
 		return { success: true, state: this.state, message: this.instruction };
 	}
@@ -251,7 +251,7 @@ export class FakeCalibrationSensor {
 		}
 		this.transition(
 			'homing_position',
-			"Homing positions set. Now use 'start_range_recording' command, then move all joints through their entire ranges of motion."
+			'Homing positions set. Start range recording, then move every joint through its entire range of motion.'
 		);
 		return { success: true, state: this.state, message: this.instruction };
 	}
@@ -265,7 +265,7 @@ export class FakeCalibrationSensor {
 		this.positionSamples = 0;
 		this.transition(
 			'range_recording',
-			"Recording range of motion. Move all joints through their full ranges. Use 'stop_range_recording' when complete."
+			'Recording range of motion. Move every joint through its full range, then stop recording.'
 		);
 		return { success: true, state: this.state, message: this.instruction };
 	}
@@ -295,7 +295,7 @@ export class FakeCalibrationSensor {
 		}
 		this.transition(
 			'completed',
-			"Range recording completed. Use 'save_calibration' to write calibration to servos and save to file."
+			'Range recording complete. Save the calibration to write it to the servos and to file.'
 		);
 		return { success: true, state: this.state, message: this.instruction };
 	}

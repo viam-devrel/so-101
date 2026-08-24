@@ -39,7 +39,7 @@ func (cs *so101CalibrationSensor) startCalibration(ctx context.Context) (map[str
 	}
 
 	cs.setState(StateStarted,
-		"Calibration started. Manually move the robot to the middle of its range of motion, then use 'set_homing' command.")
+		"Calibration started. Torque is off -- move every joint to the middle of its range of motion, then set the homing position.")
 
 	return map[string]any{
 		"success": true,
@@ -135,7 +135,7 @@ func (cs *so101CalibrationSensor) setHomingPosition(ctx context.Context) (map[st
 	}
 
 	cs.setState(StateHomingPosition,
-		"Homing positions set. Now use 'start_range_recording' command, then move all joints through their entire ranges of motion.")
+		"Homing positions set. Start range recording, then move every joint through its entire range of motion.")
 
 	return map[string]any{
 		"success":        true,
@@ -174,7 +174,7 @@ func (cs *so101CalibrationSensor) startRangeRecording(_ context.Context) (map[st
 	cs.positionHistory = []map[int]int{}
 
 	cs.setState(StateRangeRecording,
-		"Recording range of motion. Move all joints through their full ranges. Use 'stop_range_recording' when complete.")
+		"Recording range of motion. Move every joint through its full range, then stop recording.")
 
 	// Start background recording goroutine with dedicated context
 	go cs.recordPositions(cs.recordingCtx, cs.recordingDone)
@@ -298,7 +298,7 @@ func (cs *so101CalibrationSensor) stopRangeRecording(_ context.Context) (map[str
 	}
 
 	cs.setState(StateCompleted,
-		"Range recording completed. Use 'save_calibration' to write calibration to servos and save to file.")
+		"Range recording complete. Save the calibration to write it to the servos and to file.")
 
 	return map[string]any{
 		"success":            true,

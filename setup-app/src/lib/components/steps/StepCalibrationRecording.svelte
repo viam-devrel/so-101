@@ -1,6 +1,6 @@
 <script lang="ts">
 	import type { StepProps, CalibrationReadings } from '$lib/types';
-	import { ADVISORY_RANGE_TICKS, hasRecordedRange, sortedJoints } from '$lib/constants';
+	import { FULL_TRAVEL_TICKS, hasRecordedRange, sortedJoints } from '$lib/constants';
 	import { canRun } from '$lib/calibrationCommands';
 	import { resetCalibrationProgress } from '$lib/calibrationSession';
 	import { Icon, InfoPanel, Button } from '$lib/components/ui';
@@ -166,7 +166,7 @@
 		if (joint.is_completed) return 100;
 		if (!hasRecordedRange(joint)) return 0;
 		const range = joint.recorded_max - joint.recorded_min;
-		return Math.min(100, (range / ADVISORY_RANGE_TICKS) * 100);
+		return Math.min(100, (range / FULL_TRAVEL_TICKS) * 100);
 	}
 
 	// Get joint status color: completed (module-decided), in progress, or no data yet

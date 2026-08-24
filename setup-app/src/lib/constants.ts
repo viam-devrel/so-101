@@ -19,6 +19,12 @@ export const MOTOR_SETUP_NAMES = MOTOR_SETUP_ORDER.map((motor) => motor.name);
 // fails safe, never blocks a save the module would allow.
 export const ADVISORY_RANGE_TICKS = 1000;
 
+// Full-scale denominator for the live range-recording progress bar. The arm joints' default
+// travel is 500..3500 ticks (internal/controller/config.go), so a joint swung from centre to
+// one end covers about half of this. ADVISORY_RANGE_TICKS is a "is this range too narrow"
+// threshold, not a full span -- using it here filled the bar at half travel.
+export const FULL_TRAVEL_TICKS = 3000;
+
 // "No data" is min > max, not a nullish value: the module seeds recorded_min/recorded_max
 // with math.MaxInt32/math.MinInt32 and always emits them, so a null check never fires and
 // the raw sentinels would reach the screen.

@@ -74,7 +74,7 @@ Example output:
 ```json
 {
   "calibration_state": "range_recording",
-  "instruction": "Recording range of motion. Move all joints through their full ranges.",
+  "instruction": "Recording range of motion. Move every joint through its full range, then stop recording.",
   "available_commands": ["stop_range_recording", "abort", "reset"],
   "servo_count": 5,
   "recording_time_seconds": 15.3,
@@ -118,7 +118,7 @@ Each returns `success`, the resulting `state`, and a `message` carrying the next
 { "command": "start" }
 ```
 ```json
-{ "success": true, "state": "started", "message": "Move each joint to the middle of its range of motion, then call set_homing." }
+{ "success": true, "state": "started", "message": "Calibration started. Torque is off -- move every joint to the middle of its range of motion, then set the homing position." }
 ```
 
 ```json
@@ -132,7 +132,7 @@ Each returns `success`, the resulting `state`, and a `message` carrying the next
 { "command": "start_range_recording" }
 ```
 ```json
-{ "success": true, "state": "range_recording", "message": "Recording. Move all joints through their full ranges." }
+{ "success": true, "state": "range_recording", "message": "Recording range of motion. Move every joint through its full range, then stop recording." }
 ```
 
 ```json

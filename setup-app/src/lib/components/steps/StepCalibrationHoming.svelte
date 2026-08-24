@@ -149,7 +149,7 @@
 				<h5 class="font-medium text-blue-800 mb-3">What is "Center Position"?</h5>
 				<ul class="text-blue-700 text-sm space-y-2">
 					<li>• <strong>Shoulder Pan:</strong> Facing straight forward (not rotated left/right)</li>
-					<li>• <strong>Shoulder Lift:</strong> Horizontal or slightly elevated</li>
+					<li>• <strong>Shoulder Lift:</strong> Upper arm straight up, completely vertical</li>
 					<li>• <strong>Elbow:</strong> Bent approximately 90 degrees</li>
 					<li>• <strong>Wrist Flex:</strong> Neutral, not bent up or down</li>
 					<li>• <strong>Wrist Roll:</strong> Neutral rotation</li>
