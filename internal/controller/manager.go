@@ -385,12 +385,8 @@ func (h *ControllerHandle) Stop(ctx context.Context) error {
 // move).
 //
 // Scoped to the requested servos so an in-flight gripper move on the shared bus cannot block
-// an arm move's completion wait. Polls lock-free after capturing servo references under a
-// brief read lock, so a concurrent Stop is not blocked.
-//
-// Each cycle issues one Moving read per servo, serializing at the feetech bus mutex alongside
-// in-flight motion writes. Negligible at the 50ms cadence, but they could be batched into a
-// single SyncRead of the Moving register.
+// an arm move's completion wait. Each poll goes through ServosMoving: one SyncRead of the
+// Moving register instead of a read per servo.
 func (h *ControllerHandle) WaitForServosToStop(ctx context.Context, servoIDs []int, timeoutMs int) error {
 	sess := h.entry.session.Load()
 	if sess == nil {
@@ -399,11 +395,9 @@ func (h *ControllerHandle) WaitForServosToStop(ctx context.Context, servoIDs []i
 
 	h.entry.busMu.RLock()
 	ids := make([]int, 0, len(servoIDs))
-	servos := make([]*servo.CalibratedServo, 0, len(servoIDs))
 	for _, id := range servoIDs {
-		if cs, ok := sess.servos[id]; ok {
+		if _, ok := sess.servos[id]; ok {
 			ids = append(ids, id)
-			servos = append(servos, cs)
 		}
 	}
 	h.entry.busMu.RUnlock()
@@ -413,18 +407,11 @@ func (h *ControllerHandle) WaitForServosToStop(ctx context.Context, servoIDs []i
 	defer ticker.Stop()
 
 	for {
-		allStopped := true
-		for i, cs := range servos {
-			moving, err := cs.Moving(ctx)
-			if err != nil {
-				return fmt.Errorf("failed to read moving state for servo %d: %w", ids[i], err)
-			}
-			if moving {
-				allStopped = false
-				break
-			}
+		moving, err := h.ServosMoving(ctx, ids)
+		if err != nil {
+			return fmt.Errorf("failed to read moving state for servos %v: %w", ids, err)
 		}
-		if allStopped {
+		if !moving {
 			return nil
 		}
 		if time.Now().After(deadline) {
@@ -635,6 +622,25 @@ func (h *ControllerHandle) SyncReadPositions(ctx context.Context, ids []int) (ou
 		return nil
 	})
 	return out, err
+}
+
+// ServosMoving reports whether any of the given servos is still executing a move,
+// in one SyncRead of the Moving register rather than a read per servo.
+func (h *ControllerHandle) ServosMoving(ctx context.Context, ids []int) (moving bool, err error) {
+	err = h.withSessionRead(func(sess *busSession) error {
+		data, err := sess.bus.SyncRead(ctx, feetech.RegMoving.Address, 1, ids)
+		if err != nil {
+			return err
+		}
+		for _, id := range ids {
+			if d, ok := data[id]; ok && len(d) > 0 && d[0] != 0 {
+				moving = true
+				break
+			}
+		}
+		return nil
+	})
+	return moving, err
 }
 
 // PingServo pings one servo and returns its model number.
