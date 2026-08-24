@@ -115,29 +115,16 @@ export interface SensorContext {
 }
 
 export interface StepProps {
-	sensorClient: { current: SensorClient };
 	sensorReadings: { current: QueryObserverResult<Record<string, JsonValue>> };
-	doCommand: {
-		current: CreateBaseMutationResult<
-			JsonValue,
-			Error,
-			[command: Struct, callOptions?: CallOptions | undefined],
-			unknown
-		>;
-	};
 	sendCommand: (cmd: Record<string, any>) => Promise<DoCommandResponse>;
 	error: string | null;
 	setError: (error: string | null) => void;
 	clearError: () => void;
 	nextStep: () => void;
-	prevStep: () => void;
-	// Jump to an arbitrary step index within the current workflow.
-	goToStep: (stepIndex: number) => void;
 	// Jump to the step named `step` in the current workflow's own step list, without the step
 	// component needing to import that list. A no-op if the current workflow doesn't have it.
 	goToNamedStep: (step: WorkflowStep) => void;
 	motorSetupResults: Record<string, MotorSetupResult>;
-	setMotorSetupResults: (results: Record<string, MotorSetupResult>) => void;
 	updateMotorSetupResult: (motorName: string, result: MotorSetupResult) => void;
 	// Deletes a motor's stored result entirely (e.g. "Rediscover"), rather than overwriting it.
 	clearMotorSetupResult: (motorName: string) => void;

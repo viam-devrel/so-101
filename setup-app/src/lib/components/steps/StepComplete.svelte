@@ -176,7 +176,7 @@
 	// two, substitute the real torque outcome for the placeholder -- and, when it failed, the
 	// surrounding copy too. Default to the FAILED (cautious) copy on a still-null outcome rather
 	// than assuming success, since this step is only reachable after calibration_save reports
-	// success (see wizardProgress.ts / CalibrationWizard's stepCompletion), at which point
+	// success (see wizardProgress.ts / Wizard's stepCompletion), at which point
 	// torqueOutcome is always already set.
 	const content = $derived.by(() => {
 		const base = WORKFLOW_CONTENT[workflowType];

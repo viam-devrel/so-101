@@ -1,9 +1,8 @@
 import { MOTOR_SETUP_NAMES } from './constants';
 import type { CalibrationReadings, MotorSetupResult, WorkflowStep, WorkflowType } from './types';
 
-// Per-workflow step list + display titles, one place for what used to be duplicated
-// (byte-for-byte, apart from these two tables) across CalibrationWizard/MotorSetupWizard/
-// FullSetupWizard. Lives here rather than in a new file because this module is already the
+// Per-workflow step list + display titles, read by Wizard.svelte. Lives here rather than in
+// a new file because this module is already the
 // per-step source of truth (canAdvanceFromStep below) -- a step name that isn't in a
 // workflow's list can't be reached, and stepTitles is a straight lookup keyed by the same
 // WorkflowStep names CAN_ADVANCE is keyed by.

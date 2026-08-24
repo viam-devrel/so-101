@@ -38,19 +38,14 @@ function readingsResult(
 function makeProps(overrides: Record<string, unknown> = {}): StepProps {
 	const fake = new FakeCalibrationSensor();
 	const base = {
-		sensorClient: { current: undefined },
 		sensorReadings: readingsResult(fake.getReadings()),
-		doCommand: { current: undefined },
 		sendCommand: fake.sendCommand.bind(fake),
 		error: null,
 		setError: vi.fn(),
 		clearError: vi.fn(),
 		nextStep: vi.fn(),
-		prevStep: vi.fn(),
-		goToStep: vi.fn(),
 		goToNamedStep: vi.fn(),
 		motorSetupResults: {},
-		setMotorSetupResults: vi.fn(),
 		updateMotorSetupResult: vi.fn(),
 		clearMotorSetupResult: vi.fn(),
 		markStepComplete: vi.fn(),

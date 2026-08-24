@@ -136,19 +136,14 @@
 
 	// Step component props
 	const stepProps = $derived({
-		sensorClient: sensorContext.sensorClient,
 		sensorReadings: sensorContext.sensorReadings,
-		doCommand: sensorContext.doCommand,
 		sendCommand: sensorContext.sendCommand,
 		error,
 		setError,
 		clearError,
 		nextStep,
-		prevStep,
-		goToStep,
 		goToNamedStep,
 		motorSetupResults,
-		setMotorSetupResults,
 		updateMotorSetupResult,
 		clearMotorSetupResult,
 		markStepComplete,

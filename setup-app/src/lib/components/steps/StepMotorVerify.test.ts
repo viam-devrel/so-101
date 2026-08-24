@@ -10,19 +10,14 @@ import type { StepProps } from '$lib/types';
 // stubbed and cast rather than fully constructed.
 function makeProps(overrides: Partial<StepProps> = {}): StepProps {
 	const base = {
-		sensorClient: { current: undefined },
 		sensorReadings: { current: undefined },
-		doCommand: { current: undefined },
 		sendCommand: vi.fn(),
 		error: null,
 		setError: vi.fn(),
 		clearError: vi.fn(),
 		nextStep: vi.fn(),
-		prevStep: vi.fn(),
-		goToStep: vi.fn(),
 		goToNamedStep: vi.fn(),
 		motorSetupResults: {},
-		setMotorSetupResults: vi.fn(),
 		updateMotorSetupResult: vi.fn(),
 		clearMotorSetupResult: vi.fn(),
 		markStepComplete: vi.fn(),
