@@ -233,7 +233,9 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
   jaw the full 110° between `Grab` and `Open`, while the viewer does not move at all. The viewer
   renders a gripper from `Kinematics()` (`robot/impl/local_robot.go:1362` takes the kinematics
   branch and `continue`s, never calling `Geometries()`), so a 0-DoF model renders frozen no matter
-  what `Geometries()` reports.
+  what `Geometries()` reports. The viewer *does* poll `GetCurrentInputs` and animate a jointed
+  gripper — confirmed on a live machine — so `articulated_jaw` animates on Open/Grab while the
+  default 0-DoF model never will.
   `TestGripperFrameResolvesToTCPInFrameSystem` asserts the end-to-end contract, which is also
   why users must **not** add a compensating `translation` to the gripper's `frame`. The simulated
   gripper's `articulated_jaw` config attribute opts into the 1-DoF version to measure exactly
@@ -460,6 +462,12 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
   plans and only 4%-20% of its range under obstruction, usually returning near its start
   (`TestPlannerJawTravel`). Do not assume an unconstrained joint will swing to its limits — and do
   not assume it will stay put either.
+- **A gripper's `CurrentInputs`/`GoToInputs` are JOINT RADIANS, not a normalized position.**
+  `[-0.174533, 1.74533]` (-10deg..100deg) for the SO-101 jaw — the frame system requires the same
+  units and range as the model's `DoF()` limits. There is no 0-1 or 0-100 form on that API; the
+  percentage lives on the `get_position`/`set_position` DoCommands, and
+  `geometry.JawRadiansFromPct`/`JawPctFromRadians` convert. Note the gripper API ships raw float64
+  with **no** degree conversion, unlike the arm API's `Frame.ProtobufFromInput` round trip.
 - **The 3D viewer only renders `euler_angles` link orientations correctly.** `spatialmath.Compose`
   returns a `*Quaternion`, so `NewOrientationConfig` emits `"type":"quaternion"` — which rdk parses
   identically to euler, but which the viewer rendered wrong (the gripper's jaw branch splayed off
