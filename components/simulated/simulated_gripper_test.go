@@ -153,3 +153,24 @@ func TestSimulatedGripperArticulates(t *testing.T) {
 		spatialmath.PoseAlmostEqual(closedGeoms[1].Pose(), openGeoms[1].Pose()),
 		"the moving part should be posed differently when open vs closed")
 }
+
+// TestSimulatedGripperOpenReachesMaxAngle pins the magnitude of a fully-open pose, not just its
+// direction. A wrong percent<->radian mapping (e.g. leaving the percent as a 0..1 fraction) still
+// produces a pose distinct from closed, so TestSimulatedGripperArticulates's "not equal" check
+// alone would not have caught it.
+func TestSimulatedGripperOpenReachesMaxAngle(t *testing.T) {
+	ctx := context.Background()
+	g := newTestSimGripper(t, geometry.FollowerGripper, "")
+	defer func() { require.NoError(t, g.Close(ctx)) }()
+
+	require.NoError(t, g.Open(ctx, nil))
+
+	openGeoms, err := g.Geometries(ctx, nil)
+	require.NoError(t, err)
+
+	wantGeoms, err := geometry.BuildGripperMeshes(geometry.FollowerGripper, geometry.LowDetail, geometry.GripperJointMax)
+	require.NoError(t, err)
+
+	assert.True(t, spatialmath.PoseAlmostEqual(openGeoms[1].Pose(), wantGeoms[1].Pose()),
+		"open moving-part pose %v, want %v (fully open)", openGeoms[1].Pose(), wantGeoms[1].Pose())
+}

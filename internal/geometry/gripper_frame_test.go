@@ -206,20 +206,23 @@ func TestGripperFrameResolvesToTCPInFrameSystem(t *testing.T) {
 	assert.Len(t, gif.Geometries(), 2, "gripper meshes missing from frame-system geometry")
 }
 
-// TestJawAngleBijection pins the percent<->radian mapping shared by the model builder, both
-// gripper components, and GoToInputs. A drift here silently rescales every jaw command.
+// TestJawAngleBijection pins the percent<->radian mapping: the single definition both
+// directions live in. A drift here silently rescales every jaw command.
 func TestJawAngleBijection(t *testing.T) {
-	assert.InDelta(t, GripperJointMin, JawAngleFromPct(0), 1e-12)
-	assert.InDelta(t, GripperJointMax, JawAngleFromPct(100), 1e-12)
+	require.Greater(t, GripperJointMax, GripperJointMin, "zero-range joint makes the mapping divide by zero")
+
+	assert.InDelta(t, GripperJointMin, JawRadiansFromPct(0), 1e-12)
+	assert.InDelta(t, GripperJointMax, JawRadiansFromPct(100), 1e-12)
+	assert.InDelta(t, 50.0, JawPctFromRadians((GripperJointMin+GripperJointMax)/2), 1e-9)
 
 	for _, pct := range []float64{0, 12.5, 50, 87.3, 100} {
-		back := JawPctFromAngle(JawAngleFromPct(pct))
+		back := JawPctFromRadians(JawRadiansFromPct(pct))
 		assert.InDeltaf(t, pct, back, 1e-9, "round trip lost %v", pct)
 	}
 
-	// Out-of-range inputs clamp rather than extrapolating into the servo stops.
-	assert.InDelta(t, GripperJointMin, JawAngleFromPct(-25), 1e-12)
-	assert.InDelta(t, GripperJointMax, JawAngleFromPct(150), 1e-12)
-	assert.InDelta(t, 0.0, JawPctFromAngle(GripperJointMin-1), 1e-12)
-	assert.InDelta(t, 100.0, JawPctFromAngle(GripperJointMax+1), 1e-12)
+	// Out-of-range inputs saturate rather than extrapolating into the servo stops.
+	assert.InDelta(t, GripperJointMin, JawRadiansFromPct(-25), 1e-12)
+	assert.InDelta(t, GripperJointMax, JawRadiansFromPct(150), 1e-12)
+	assert.InDelta(t, 0.0, JawPctFromRadians(GripperJointMin-1e-6), 1e-12)
+	assert.InDelta(t, 100.0, JawPctFromRadians(GripperJointMax+1e-6), 1e-12)
 }
