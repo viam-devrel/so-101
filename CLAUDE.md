@@ -250,8 +250,9 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
   package within their scope (`config.go` uses `dev` where it needs `servo.X`). Harmless today;
   an edit inside one of those scopes that needs `servo.X` must rename the local first.
 - **`referenceframe.PoseCloud` semantics are counterintuitive and were established
-  empirically** (see `docs/superpowers/specs/2026-07-15-pose-cloud-orientation-design.md`;
-  `internal/planning` depends on all of it):
+  empirically** against rdk's behavior. `internal/planning` depends on all of it, and the
+  `TestCone*` / `TestRDKContract*` cases in `internal/planning/goal_cloud_test.go` pin each
+  claim below:
   - `PoseInCloud` compares the *relative* pose `PoseBetween(goal, candidate)`, where zero
     deviation is the orientation vector `(0,0,1)`.
   - **`Theta` encodes the AZIMUTH of a tilt, not roll.** Measured exactly:

@@ -94,8 +94,9 @@ func ValidateGoalCloudTolerances(tolDeg, posTolMM float64) error {
 
 // coneToPoseCloud converts an approach-axis cone half-angle into a PoseCloud.
 //
-// Every field is load-bearing and was established empirically; see
-// docs/superpowers/specs/2026-07-15-pose-cloud-orientation-design.md before changing any:
+// Every field is load-bearing and was established empirically against rdk's behavior. The
+// TestCone* and TestRDKContract* cases in goal_cloud_test.go pin each claim below; read them
+// before changing any field here:
 //
 //   - X/Y/Z must be > 0. PoseInCloud adds a 0.001 epsilon to each leeway, so a zero leeway
 //     demands a match within 1 micron -- which no IK solution will realistically achieve,
