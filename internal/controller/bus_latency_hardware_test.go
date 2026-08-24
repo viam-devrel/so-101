@@ -2,6 +2,7 @@ package controller_test
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"sort"
 	"testing"
@@ -30,6 +31,8 @@ const (
 
 type latencyStats struct {
 	mean, median, p95, max time.Duration
+	errs                   int
+	lastErr                error
 }
 
 func summarize(samples []time.Duration) latencyStats {
@@ -48,23 +51,41 @@ func summarize(samples []time.Duration) latencyStats {
 }
 
 func (s latencyStats) String() string {
-	return "mean=" + s.mean.String() + " median=" + s.median.String() +
+	out := "mean=" + s.mean.String() + " median=" + s.median.String() +
 		" p95=" + s.p95.String() + " max=" + s.max.String()
+	if s.errs > 0 {
+		out += fmt.Sprintf("  ERRORS=%d/%d (%.1f%%) last=%v",
+			s.errs, latencySamples, 100*float64(s.errs)/float64(latencySamples), s.lastErr)
+	}
+	return out
 }
 
-// timeCalls runs f latencySamples times and returns the per-call durations.
-func timeCalls(t *testing.T, f func() error) []time.Duration {
+// timeCalls runs f latencySamples times, timing the calls that succeed and counting the
+// ones that do not. Read failures are the measurement here, not a reason to abort: under
+// heavy bus contention they are exactly what we are trying to quantify. Warmup still
+// requires success, so a disconnected arm fails loudly instead of reporting 100% errors.
+func timeCalls(t *testing.T, f func() error) latencyStats {
 	t.Helper()
 	for i := 0; i < latencyWarmup; i++ {
 		require.NoError(t, f())
 	}
 	samples := make([]time.Duration, 0, latencySamples)
+	errs, lastErr := 0, error(nil)
 	for i := 0; i < latencySamples; i++ {
 		start := time.Now()
-		require.NoError(t, f())
-		samples = append(samples, time.Since(start))
+		err := f()
+		elapsed := time.Since(start)
+		if err != nil {
+			errs++
+			lastErr = err
+			continue
+		}
+		samples = append(samples, elapsed)
 	}
-	return samples
+	require.NotEmpty(t, samples, "every call failed: %v", lastErr)
+	stats := summarize(samples)
+	stats.errs, stats.lastErr = errs, lastErr
+	return stats
 }
 
 func TestHardwareBusLatency(t *testing.T) {
@@ -96,60 +117,63 @@ func TestHardwareBusLatency(t *testing.T) {
 	t.Logf("servos answering: %d of %d, ticks=%v", len(positions), len(allIDs), positions)
 
 	// 1. Position SyncRead alone -- the transaction every move and every JointPositions does.
-	posAlone := summarize(timeCalls(t, func() error {
+	posAlone := timeCalls(t, func() error {
 		_, err := h.SyncReadPositions(ctx, allIDs)
 		return err
-	}))
+	})
 	t.Logf("SyncReadPositions(6) alone:            %s", posAlone)
 
 	// 2. AnyServoMoving alone -- the new IsMoving transaction.
-	movingAlone := summarize(timeCalls(t, func() error {
+	movingAlone := timeCalls(t, func() error {
 		_, err := h.AnyServoMoving(ctx, armIDs)
 		return err
-	}))
+	})
 	t.Logf("AnyServoMoving(5) alone:               %s", movingAlone)
 
 	// 3. The pre-batching cost: one Moving read per servo, as WaitForServosToStop used to do.
-	perServo := summarize(timeCalls(t, func() error {
+	perServo := timeCalls(t, func() error {
 		for _, id := range armIDs {
 			if _, err := h.ReadServoRegister(ctx, id, "moving"); err != nil {
 				return err
 			}
 		}
 		return nil
-	}))
+	})
 	t.Logf("per-servo Moving reads (5, old path):  %s", perServo)
 
-	// 4. Position reads with a concurrent Moving poller at the teleop setpoint rate.
-	posUnder50Hz := summarize(timeCalls(t, withPoller(t, h, armIDs, teleopCadence, func() error {
+	readPositions := func() error {
 		_, err := h.SyncReadPositions(ctx, allIDs)
 		return err
-	})))
+	}
+
+	// 4. Position reads with a concurrent Moving poller at the teleop setpoint rate.
+	stop := startPoller(t, h, armIDs, teleopCadence)
+	posUnder50Hz := timeCalls(t, readPositions)
+	stop()
 	t.Logf("SyncReadPositions(6) under 50Hz poll:  %s  (delta mean %s)",
 		posUnder50Hz, posUnder50Hz.mean-posAlone.mean)
 
 	// 5. Worst case: a poller with no cadence at all, i.e. permanent bus contention.
-	posUnhinged := summarize(timeCalls(t, withPoller(t, h, armIDs, 0, func() error {
-		_, err := h.SyncReadPositions(ctx, allIDs)
-		return err
-	})))
+	stop = startPoller(t, h, armIDs, 0)
+	posUnhinged := timeCalls(t, readPositions)
+	stop()
 	t.Logf("SyncReadPositions(6) under max poll:   %s  (delta mean %s)",
 		posUnhinged, posUnhinged.mean-posAlone.mean)
 }
 
-// withPoller wraps f so it runs with a background AnyServoMoving poller on the same bus,
-// at the given cadence (0 = as fast as the bus allows). The poller is stopped when the
-// returned func's test step finishes.
-func withPoller(t *testing.T, h *controller.ControllerHandle, ids []int, cadence time.Duration, f func() error) func() error {
+// startPoller runs a background AnyServoMoving poller on the same bus at the given cadence
+// (0 = as fast as the bus allows). Call the returned stop func before the next measurement:
+// a poller left running would contaminate every step after its own.
+func startPoller(t *testing.T, h *controller.ControllerHandle, ids []int, cadence time.Duration) func() {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		for ctx.Err() == nil {
-			if _, err := h.AnyServoMoving(ctx, ids); err != nil {
-				return
-			}
+			// Keep polling through errors: bailing here would silently remove the very
+			// contention this poller exists to apply.
+			_, _ = h.AnyServoMoving(ctx, ids)
 			if cadence > 0 {
 				select {
 				case <-ctx.Done():
@@ -158,9 +182,15 @@ func withPoller(t *testing.T, h *controller.ControllerHandle, ids []int, cadence
 			}
 		}
 	}()
-	t.Cleanup(func() {
+	stopped := false
+	stop := func() {
+		if stopped {
+			return
+		}
+		stopped = true
 		cancel()
 		<-done
-	})
-	return f
+	}
+	t.Cleanup(stop)
+	return stop
 }
