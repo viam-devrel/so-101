@@ -407,3 +407,31 @@ func TestGrabReportsHeldWhenTheJawStopsShortOfClosed(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, grabbed, "a jaw held open by an object is holding something")
 }
+
+// Open and Grab are one-shot typed API calls whose contract is "the jaw is now open" /
+// "did I grab something". Grab in particular reads the position back to decide its
+// boolean return, so without the settle wait it samples a jaw still in flight. Assert on
+// the emitted command: the grab-classification tests cannot catch a missing wait, because
+// fakeServoArm returns a static f.percent that CmdServoMove never changes.
+func TestOpenAndGrabAlwaysWaitForTheJawToSettle(t *testing.T) {
+	t.Run("Open", func(t *testing.T) {
+		fa := newFakeServoArm()
+		g := newTestGripper(t, fa)
+
+		require.NoError(t, g.Open(context.Background(), nil))
+
+		assert.NotNil(t, fa.lastCommand(servocmd.CmdServoWaitStop),
+			"Open must wait for the jaw to settle")
+	})
+
+	t.Run("Grab", func(t *testing.T) {
+		fa := newFakeServoArm()
+		g := newTestGripper(t, fa)
+
+		_, err := g.Grab(context.Background(), nil)
+		require.NoError(t, err)
+
+		assert.NotNil(t, fa.lastCommand(servocmd.CmdServoWaitStop),
+			"Grab reads the position back, so its wait is load-bearing")
+	})
+}

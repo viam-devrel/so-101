@@ -217,11 +217,17 @@ func (g *so101Gripper) servoDo(
 	return g.arm.DoCommand(ctx, cmd)
 }
 
-// moveToPercent commands the servo and waits for it to settle.
-func (g *so101Gripper) moveToPercent(ctx context.Context, percent float64) error {
+// moveToPercent commands the servo. When wait is true it blocks until the servo settles;
+// a false wait returns as soon as the move is commanded, for callers issuing setpoints
+// faster than the jaw can travel (a VLA control loop at 10 fps, for instance), where
+// waiting for a setpoint that is about to be superseded is pure latency.
+func (g *so101Gripper) moveToPercent(ctx context.Context, percent float64, wait bool) error {
 	if _, err := g.servoDo(ctx, servocmd.CmdServoMove,
 		map[string]interface{}{"percent": servocmd.ClampPercent(percent)}); err != nil {
 		return err
+	}
+	if !wait {
+		return nil
 	}
 	_, err := g.servoDo(ctx, servocmd.CmdServoWaitStop,
 		map[string]interface{}{"timeout_ms": gripperSettleTimeoutMs})
@@ -254,7 +260,7 @@ func (g *so101Gripper) Open(ctx context.Context, extra map[string]interface{}) e
 
 	g.logger.Debug("Opening gripper")
 
-	if err := g.moveToPercent(ctx, g.openPosition); err != nil {
+	if err := g.moveToPercent(ctx, g.openPosition, true); err != nil {
 		return fmt.Errorf("failed to open gripper: %w", err)
 	}
 
@@ -271,7 +277,7 @@ func (g *so101Gripper) Grab(ctx context.Context, extra map[string]interface{}) (
 
 	g.logger.Debug("Attempting to grab with gripper")
 
-	if err := g.moveToPercent(ctx, g.closedPosition); err != nil {
+	if err := g.moveToPercent(ctx, g.closedPosition, true); err != nil {
 		return false, fmt.Errorf("failed to close gripper: %w", err)
 	}
 
@@ -380,7 +386,7 @@ func (g *so101Gripper) DoCommand(ctx context.Context, cmd map[string]interface{}
 		g.isMoving.Store(true)
 		defer g.isMoving.Store(false)
 
-		if err := g.moveToPercent(ctx, percentPos); err != nil {
+		if err := g.moveToPercent(ctx, percentPos, true); err != nil {
 			return nil, err
 		}
 		return map[string]interface{}{"position": percentPos}, nil
@@ -421,7 +427,7 @@ func (g *so101Gripper) DoCommand(ctx context.Context, cmd map[string]interface{}
 			return nil, fmt.Errorf("set_position command requires 'percentage', 'position_percentage', or 'servo_position' parameter")
 		}
 
-		err := g.moveToPercent(ctx, targetPercent)
+		err := g.moveToPercent(ctx, targetPercent, true)
 		return map[string]interface{}{"success": err == nil}, err
 
 	case "controller_status":
