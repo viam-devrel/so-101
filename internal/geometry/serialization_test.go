@@ -3,6 +3,7 @@ package geometry
 import (
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.viam.com/rdk/referenceframe"
 	"go.viam.com/rdk/spatialmath"
@@ -74,4 +75,35 @@ func TestURDFModelSurvivesSerialization(t *testing.T) {
 	gEE, err := tEE.Geometries(make([]referenceframe.Input, len(tEE.DoF())))
 	require.NoError(t, err)
 	require.Equal(t, 6, len(gEE.Geometries()), "transmitted model lost the visualize_ee_frame marker geometry")
+}
+
+// TestArticulatedModelSurvivesSerialization extends the module-boundary guard to the jaw joint.
+// A component ships its kinematics as ModelConfig().OriginalFile.Bytes, so a joint that exists
+// only in the in-memory model transmits as a 0-DoF gripper: viam-server would then never ask for
+// jaw inputs, the planner would never see the DoF, and every in-process test here would still
+// pass. Do NOT weaken this to an in-process DoF check.
+func TestArticulatedModelSurvivesSerialization(t *testing.T) {
+	m, err := BuildGripperModel(FollowerGripper, LowDetail, "sim-gripper", true)
+	require.NoError(t, err)
+
+	resp := referenceframe.KinematicModelToProtobuf(m)
+	out, err := referenceframe.KinematicModelFromProtobuf("sim-gripper", resp)
+	require.NoError(t, err, "server-side reconstruction from transmitted kinematics")
+
+	dof := out.DoF()
+	require.Len(t, dof, 1, "the jaw joint was lost across the gRPC boundary")
+	assert.InDelta(t, GripperJointMin, dof[0].Min, 1e-9, "jaw lower limit did not survive")
+	assert.InDelta(t, GripperJointMax, dof[0].Max, 1e-9, "jaw upper limit did not survive")
+
+	// The TCP must still be the output frame, and still invariant, on the server's copy.
+	for _, theta := range []float64{GripperJointMin, GripperJointMax} {
+		p, err := out.Transform([]referenceframe.Input{theta})
+		require.NoError(t, err)
+		assert.Lessf(t, p.Point().Sub(GripperTCPPose.Point()).Norm(), 1e-6,
+			"transmitted TCP at %v (jaw=%.3f), want %v", p.Point(), theta, GripperTCPPose.Point())
+	}
+
+	gif, err := out.Geometries([]referenceframe.Input{GripperJointMin})
+	require.NoError(t, err)
+	assert.Len(t, gif.Geometries(), 2, "transmitted model lost its gripper meshes")
 }
