@@ -104,7 +104,7 @@ func newSimulatedSO101Gripper(
 		meshDetail = geometry.LowDetail
 	}
 
-	model, err := geometry.BuildGripperModel(gripperType, meshDetail, rawConf.ResourceName().ShortName())
+	model, err := geometry.BuildGripperModel(gripperType, meshDetail, rawConf.ResourceName().ShortName(), false)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build gripper kinematic model: %w", err)
 	}

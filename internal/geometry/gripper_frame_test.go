@@ -89,7 +89,7 @@ func TestGripperTCPLiesBetweenTheJawTips(t *testing.T) {
 func TestBuildGripperModelPlacesFrameAtTCP(t *testing.T) {
 	for _, gt := range []string{FollowerGripper, LeaderGripper} {
 		t.Run(gt, func(t *testing.T) {
-			model, err := BuildGripperModel(gt, LowDetail, "gripper")
+			model, err := BuildGripperModel(gt, LowDetail, "gripper", false)
 			require.NoError(t, err)
 			require.NotNil(t, model)
 
@@ -121,7 +121,7 @@ func TestBuildGripperModelCarriesMeshes(t *testing.T) {
 		{LeaderGripper, 3},
 	} {
 		t.Run(tc.gripperType, func(t *testing.T) {
-			model, err := BuildGripperModel(tc.gripperType, LowDetail, "gripper")
+			model, err := BuildGripperModel(tc.gripperType, LowDetail, "gripper", false)
 			require.NoError(t, err)
 
 			gif, err := model.Geometries(nil)
@@ -146,7 +146,7 @@ func TestBuildGripperModelCarriesMeshes(t *testing.T) {
 // assembled in memory without OriginalFile transmits as UNSPECIFIED and the server sees nothing --
 // which every in-process check would miss.
 func TestGripperModelSurvivesSerialization(t *testing.T) {
-	model, err := BuildGripperModel(FollowerGripper, LowDetail, "gripper")
+	model, err := BuildGripperModel(FollowerGripper, LowDetail, "gripper", false)
 	require.NoError(t, err)
 
 	resp := referenceframe.KinematicModelToProtobuf(model)
@@ -171,7 +171,7 @@ func TestGripperModelSurvivesSerialization(t *testing.T) {
 func TestGripperFrameResolvesToTCPInFrameSystem(t *testing.T) {
 	armModel, err := ArmModelJSON("arm")
 	require.NoError(t, err)
-	gripperModel, err := BuildGripperModel(FollowerGripper, LowDetail, "gripper")
+	gripperModel, err := BuildGripperModel(FollowerGripper, LowDetail, "gripper", false)
 	require.NoError(t, err)
 
 	armLink, err := (&referenceframe.LinkConfig{ID: "arm", Parent: referenceframe.World}).ParseConfig()
@@ -225,4 +225,29 @@ func TestJawAngleBijection(t *testing.T) {
 	assert.InDelta(t, GripperJointMax, JawRadiansFromPct(150), 1e-12)
 	assert.InDelta(t, 0.0, JawPctFromRadians(GripperJointMin-1e-6), 1e-12)
 	assert.InDelta(t, 100.0, JawPctFromRadians(GripperJointMax+1e-6), 1e-12)
+}
+
+// TestZeroDoFModelUnchanged guards the default path: with jawDoF false the model must stay
+// exactly what it is today -- no DoF, both meshes, frame at the TCP. Every existing machine
+// config depends on this.
+func TestZeroDoFModelUnchanged(t *testing.T) {
+	for _, gt := range []string{FollowerGripper, LeaderGripper} {
+		t.Run(gt, func(t *testing.T) {
+			m, err := BuildGripperModel(gt, LowDetail, "gripper", false)
+			require.NoError(t, err)
+			assert.Empty(t, m.DoF(), "the default gripper model must remain 0-DoF")
+
+			pose, err := m.Transform(nil)
+			require.NoError(t, err)
+			want := GripperTCPPose.Point()
+			if gt == LeaderGripper {
+				want = r3.Vector{}
+			}
+			assert.Less(t, pose.Point().Sub(want).Norm(), 1e-9)
+
+			gif, err := m.Geometries(nil)
+			require.NoError(t, err)
+			assert.Len(t, gif.Geometries(), len(gripperStaticMeshNames(gt))+1)
+		})
+	}
 }

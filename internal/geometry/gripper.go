@@ -79,20 +79,32 @@ func JawPctFromRadians(rad float64) float64 {
 	return math.Max(0, math.Min(100, pct))
 }
 
+// gripperStaticMeshNames returns the static body mesh names for a gripper variant. The
+// follower's body is one piece; the leader's is the wrist-roll part (which connects to the
+// arm) plus the handle attached to it.
+func gripperStaticMeshNames(gripperType string) []string {
+	if gripperType == LeaderGripper {
+		return []string{"leader_wrist_roll", "leader_body"}
+	}
+	return []string{"follower_body"}
+}
+
+// gripperMovingMeshName returns the moving part's mesh name: the jaw for the follower, the
+// trigger for the leader.
+func gripperMovingMeshName(gripperType string) string {
+	if gripperType == LeaderGripper {
+		return "leader_trigger"
+	}
+	return "follower_jaw"
+}
+
 // BuildGripperMeshes returns the gripper's static body mesh plus the moving part
 // (jaw for the follower, trigger for the leader) posed at jawAngle radians about
 // the gripper joint, at the requested mesh detail level ("high" or "low"). It is
 // split out from Geometries so it can be tested without a hardware controller.
 func BuildGripperMeshes(gripperType, meshDetail string, jawAngle float64) ([]spatialmath.Geometry, error) {
-	// Mesh names for this gripper variant: the static body part(s) plus the moving
-	// part. The follower's body is one piece; the leader's is the wrist-roll part
-	// (which connects to the arm) plus the handle attached to it.
-	staticNames := []string{"follower_body"}
-	movingName := "follower_jaw"
-	if gripperType == LeaderGripper {
-		staticNames = []string{"leader_wrist_roll", "leader_body"}
-		movingName = "leader_trigger"
-	}
+	staticNames := gripperStaticMeshNames(gripperType)
+	movingName := gripperMovingMeshName(gripperType)
 
 	bodyPose := spatialmath.Compose(toolFromGripperLink, gripperBodyPose)
 	geoms := make([]spatialmath.Geometry, 0, len(staticNames)+1)
@@ -153,7 +165,7 @@ const gripperTCPFrame = "tcp"
 // kinematics to viam-server as ModelConfig().OriginalFile.Bytes, and a model without those bytes
 // transmits as UNSPECIFIED (see TestGripperModelSurvivesSerialization). SVA JSON carries the
 // meshes across the boundary in GeometryConfig.MeshData.
-func BuildGripperModel(gripperType, meshDetail, name string) (referenceframe.Model, error) {
+func BuildGripperModel(gripperType, meshDetail, name string, jawDoF bool) (referenceframe.Model, error) {
 	meshes, err := BuildGripperMeshes(gripperType, meshDetail, GripperJointMin)
 	if err != nil {
 		return nil, err

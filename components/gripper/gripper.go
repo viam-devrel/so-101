@@ -139,7 +139,7 @@ func newSO101Gripper(ctx context.Context, deps resource.Dependencies, conf resou
 		meshDetail = geometry.LowDetail
 	}
 
-	model, err := geometry.BuildGripperModel(gripperType, meshDetail, conf.ResourceName().ShortName())
+	model, err := geometry.BuildGripperModel(gripperType, meshDetail, conf.ResourceName().ShortName(), false)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build gripper kinematic model: %w", err)
 	}
