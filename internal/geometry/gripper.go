@@ -120,10 +120,9 @@ func buildGripperBodyMeshes(gripperType, meshDetail string) ([]spatialmath.Geome
 	return geoms, nil
 }
 
-// buildGripperMovingMesh returns the moving part's mesh at the given pose. The two callers
-// compute that pose by DIFFERENT routes -- BuildGripperMeshes composes it by hand, the
-// articulated model lets the frame system compose it from the jaw joint -- which is what makes
-// TestModelGeometriesMatchBuiltMeshes a real check rather than a tautology.
+// buildGripperMovingMesh returns the moving part's mesh at the given pose. Callers compute that
+// pose by different routes (by hand here, from the jaw joint in appendJawBranch), so both must
+// agree on where the mesh actually ends up.
 func buildGripperMovingMesh(gripperType, meshDetail string, pose spatialmath.Pose) (spatialmath.Geometry, error) {
 	ply, err := gripperMeshPLY(meshDetail, gripperMovingMeshName(gripperType))
 	if err != nil {
@@ -131,6 +130,16 @@ func buildGripperMovingMesh(gripperType, meshDetail string, pose spatialmath.Pos
 	}
 	return spatialmath.NewMeshFromProto(pose,
 		&commonpb.Mesh{ContentType: "ply", Mesh: ply}, "gripper_moving")
+}
+
+// movingMeshPose is the moving part's pose in the tool frame at jawAngle radians: joint origin,
+// rotation about the joint's Z, then the mesh offset. The single definition both BuildGripperMeshes
+// and the frozen (jawDoF: false) branch of BuildGripperModel use.
+func movingMeshPose(jawAngle float64) spatialmath.Pose {
+	return spatialmath.Compose(toolFromGripperLink, spatialmath.Compose(
+		spatialmath.Compose(gripperJointPose,
+			spatialmath.NewPose(r3.Vector{}, &spatialmath.EulerAngles{Yaw: jawAngle})),
+		gripperMovingVisualPose))
 }
 
 // BuildGripperMeshes returns the gripper's static body mesh plus the moving part
@@ -143,14 +152,7 @@ func BuildGripperMeshes(gripperType, meshDetail string, jawAngle float64) ([]spa
 		return nil, err
 	}
 
-	// Moving part: joint origin, then a rotation about the joint Z axis, then the
-	// moving-part mesh offset -- the whole chain corrected into the tool frame.
-	movingPose := spatialmath.Compose(toolFromGripperLink, spatialmath.Compose(
-		spatialmath.Compose(gripperJointPose,
-			spatialmath.NewPose(r3.Vector{}, &spatialmath.EulerAngles{Yaw: jawAngle})),
-		gripperMovingVisualPose,
-	))
-	moving, err := buildGripperMovingMesh(gripperType, meshDetail, movingPose)
+	moving, err := buildGripperMovingMesh(gripperType, meshDetail, movingMeshPose(jawAngle))
 	if err != nil {
 		return nil, err
 	}
@@ -162,11 +164,12 @@ func BuildGripperMeshes(gripperType, meshDetail string, jawAngle float64) ([]spa
 // model resolves to, and therefore the pose viam-server reports for the gripper component.
 const gripperTCPFrame = "tcp"
 
-// Frame names for the articulated (jawDoF: true) jaw branch.
+// Frame names for the articulated (jawDoF: true) jaw branch. The mesh link itself is named
+// from moving.Label() in appendJawBranch, not a const here, so it matches the 0-DoF path's
+// mesh.Label()-derived name by construction rather than by two literals staying in sync.
 const (
 	gripperJawMountFrame = "jaw_mount"
 	gripperJawJointFrame = "jaw_joint"
-	gripperJawLinkFrame  = "gripper_moving"
 )
 
 // appendJawBranch hangs the revolute jaw branch off parent:
@@ -210,7 +213,7 @@ func appendJawBranch(cfg *referenceframe.ModelConfigJSON, gripperType, meshDetai
 		Max:    utils.RadToDeg(GripperJointMax),
 	})
 	cfg.Links = append(cfg.Links, referenceframe.LinkConfig{
-		ID:       gripperJawLinkFrame,
+		ID:       moving.Label(),
 		Parent:   gripperJawJointFrame,
 		Geometry: movingCfg,
 	})
@@ -232,10 +235,15 @@ func appendJawBranch(cfg *referenceframe.ModelConfigJSON, gripperType, meshDetai
 //   - false (the default): a zero-DoF chain of static links, meshes frozen at the closed jaw
 //     pose (GripperJointMin). A DoF here would become a variable the motion planner is free to
 //     drive, and freezing the jaw open would inflate the swept volume enough to block otherwise-
-//     valid plans. Geometries() still serves the live, articulating jaw for the 3D viewer.
+//     valid plans. tcp's parent is the moving mesh's link.
 //   - true: a branching 1-DoF model -- the jaw mesh hangs off a revolute joint, but the TCP leaf
 //     is reached by a separate static branch, so the model's Transform (the TCP) never moves as
-//     the jaw articulates. This is the topology the jaw-DoF experiment measures.
+//     the jaw articulates. This is the topology the jaw-DoF experiment measures. tcp's parent is
+//     the last static body mesh's link instead, since the moving mesh now hangs off the jaw
+//     branch; poses are identical either way (every body-mesh link has an identity transform),
+//     but the frame-system node tree the 3D viewer draws differs in shape between the two modes.
+//
+// Geometries() always serves the live, articulating jaw to the 3D viewer regardless of jawDoF.
 //
 // Round-tripped through SVA JSON rather than assembled in memory: a component ships its
 // kinematics to viam-server as ModelConfig().OriginalFile.Bytes, and a model without those bytes
@@ -250,11 +258,7 @@ func BuildGripperModel(gripperType, meshDetail, name string, jawDoF bool) (refer
 	}
 	if !jawDoF {
 		// Frozen closed, in the chain, exactly as before.
-		frozen, err := buildGripperMovingMesh(gripperType, meshDetail,
-			spatialmath.Compose(toolFromGripperLink, spatialmath.Compose(
-				spatialmath.Compose(gripperJointPose,
-					spatialmath.NewPose(r3.Vector{}, &spatialmath.EulerAngles{Yaw: GripperJointMin})),
-				gripperMovingVisualPose)))
+		frozen, err := buildGripperMovingMesh(gripperType, meshDetail, movingMeshPose(GripperJointMin))
 		if err != nil {
 			return nil, err
 		}
@@ -262,17 +266,19 @@ func BuildGripperModel(gripperType, meshDetail, name string, jawDoF bool) (refer
 	}
 
 	// Each mesh gets its own link because a link carries at most one geometry. All transforms
-	// are identity, so the full mesh pose lives in the geometry offset.
-	parent := referenceframe.World
+	// are identity, so the full mesh pose lives in the geometry offset. bodyLeaf is the fork
+	// point: both the tcp link below and appendJawBranch's jaw_mount hang off it directly, so
+	// jawDoF only ever adds a branch here -- it never reroutes the static chain.
+	bodyLeaf := referenceframe.World
 	for _, mesh := range bodies {
 		geomCfg, err := spatialmath.NewGeometryConfig(mesh)
 		if err != nil {
 			return nil, fmt.Errorf("converting gripper mesh %q to a geometry config: %w", mesh.Label(), err)
 		}
 		cfg.Links = append(cfg.Links, referenceframe.LinkConfig{
-			ID: mesh.Label(), Parent: parent, Geometry: geomCfg,
+			ID: mesh.Label(), Parent: bodyLeaf, Geometry: geomCfg,
 		})
-		parent = mesh.Label()
+		bodyLeaf = mesh.Label()
 	}
 
 	// The leader gripper is a hand-held trigger, not a pair of jaws, so it has no grasp point:
@@ -282,13 +288,13 @@ func BuildGripperModel(gripperType, meshDetail, name string, jawDoF bool) (refer
 		tcp = spatialmath.NewZeroPose()
 	}
 	cfg.Links = append(cfg.Links, referenceframe.LinkConfig{
-		ID: gripperTCPFrame, Parent: parent, Translation: tcp.Point(),
+		ID: gripperTCPFrame, Parent: bodyLeaf, Translation: tcp.Point(),
 	})
 
 	if jawDoF {
-		// Two leaves (tcp and gripper_moving) are legal only with output_frames, which v1.0.0
+		// Two leaves (tcp and the jaw mesh) are legal only with output_frames, which v1.0.0
 		// accepts for exactly one entry.
-		if err := appendJawBranch(cfg, gripperType, meshDetail, parent); err != nil {
+		if err := appendJawBranch(cfg, gripperType, meshDetail, bodyLeaf); err != nil {
 			return nil, err
 		}
 		cfg.OutputFrames = []string{gripperTCPFrame}

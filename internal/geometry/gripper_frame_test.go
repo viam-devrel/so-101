@@ -129,12 +129,20 @@ func TestBuildGripperModelCarriesMeshes(t *testing.T) {
 			require.Len(t, gif.Geometries(), tc.meshes)
 
 			// Model geometry must land exactly where Geometries() draws the closed gripper,
-			// so the collision volume and the rendered meshes agree.
+			// so the collision volume and the rendered meshes agree. Both position AND
+			// orientation: the moving mesh's pose ORIGIN is invariant under the Yaw rotation
+			// (a pure-Z offset rotated about Z), so a point-only check can't catch the model
+			// freezing the wrong jaw angle -- see TestArticulatedGripperModelShape's comment
+			// on the same fact.
 			want, err := BuildGripperMeshes(tc.gripperType, LowDetail, GripperJointMin)
 			require.NoError(t, err)
 			for i, got := range gif.Geometries() {
 				assert.Lessf(t, got.Pose().Point().Sub(want[i].Pose().Point()).Norm(), 1e-6,
 					"model geometry %d at %v, want %v", i, got.Pose().Point(), want[i].Pose().Point())
+				oriD := spatialmath.QuatToR3AA(
+					spatialmath.OrientationBetween(got.Pose().Orientation(), want[i].Pose().Orientation()).Quaternion()).Norm()
+				assert.InDeltaf(t, 0, oriD, 1e-9,
+					"model geometry %d orientation differs by %.4f rad from BuildGripperMeshes", i, oriD)
 			}
 		})
 	}
@@ -254,6 +262,11 @@ func TestArticulatedGripperModelShape(t *testing.T) {
 				require.NoError(t, err)
 				assert.Lessf(t, p.Point().Sub(want).Norm(), 1e-9,
 					"TCP moved to %v at jaw=%.4f rad; it must be invariant", p.Point(), theta)
+				// A motion goal is a full pose, not just a point -- check orientation too. Every
+				// link on the static tcp branch has an identity transform, so the TCP's
+				// orientation is the tool frame's own, unrotated by the jaw.
+				assert.Truef(t, spatialmath.OrientationAlmostEqual(p.Orientation(), spatialmath.NewZeroOrientation()),
+					"TCP orientation %v rotated at jaw=%.4f rad; it must be invariant", p.Orientation(), theta)
 			}
 
 			// The jaw mesh, by contrast, must move. Note WHAT is asserted here:
