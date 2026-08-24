@@ -411,5 +411,9 @@ func (s *so101) GoToInputs(ctx context.Context, inputSteps ...[]referenceframe.I
 }
 
 func (s *so101) IsMoving(ctx context.Context) (bool, error) {
-	return s.isMoving.Load(), nil
+	// Fast path: mid-command is never wrong, and avoids bus traffic during a move.
+	if s.isMoving.Load() {
+		return true, nil
+	}
+	return s.controller.ServosMoving(ctx, s.armServoIDs)
 }

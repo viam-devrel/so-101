@@ -305,7 +305,24 @@ func (g *so101Gripper) Stop(ctx context.Context, extra map[string]interface{}) e
 }
 
 func (g *so101Gripper) IsMoving(ctx context.Context) (bool, error) {
-	return g.isMoving.Load(), nil
+	// Fast path: mid-command is never wrong, and avoids bus traffic during a move.
+	if g.isMoving.Load() {
+		return true, nil
+	}
+
+	res, err := g.servoDo(ctx, servocmd.CmdServoMoving, nil)
+	if err != nil {
+		// A remote arm may run an older module build with no servo_moving; fall back to
+		// the intent flag rather than fail a call teleop may poll repeatedly.
+		g.logger.Debugf("servo_moving failed, falling back to intent flag: %v", err)
+		return g.isMoving.Load(), nil
+	}
+	moving, ok := res["moving"].(bool)
+	if !ok {
+		g.logger.Debugf("servo_moving response missing 'moving', falling back to intent flag")
+		return g.isMoving.Load(), nil
+	}
+	return moving, nil
 }
 
 // jawAngle maps the gripper's current open percentage onto the URDF gripper-joint
