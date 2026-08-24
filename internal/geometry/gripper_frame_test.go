@@ -303,3 +303,42 @@ func TestArticulatedGripperModelShape(t *testing.T) {
 		})
 	}
 }
+
+// TestModelGeometriesMatchBuiltMeshes closes the drift risk introduced by articulation: the jaw
+// pose is now computed twice -- by the frame system from the jaw joint (collision geometry) and
+// by hand in BuildGripperMeshes (the 3D viewer). The two must agree at every angle or the
+// planner will avoid a jaw that is not where the user sees it.
+func TestModelGeometriesMatchBuiltMeshes(t *testing.T) {
+	for _, gt := range []string{FollowerGripper, LeaderGripper} {
+		t.Run(gt, func(t *testing.T) {
+			m, err := BuildGripperModel(gt, LowDetail, "gripper", true)
+			require.NoError(t, err)
+
+			steps := 9
+			for i := 0; i <= steps; i++ {
+				// Clamp: at i==steps the linspace lands one ULP above GripperJointMax, which
+				// trips the joint's strict bound check even though the literal constant itself
+				// is in range. Unrelated to the pose comparison below.
+				theta := math.Min(GripperJointMax, GripperJointMin+(GripperJointMax-GripperJointMin)*float64(i)/float64(steps))
+
+				gif, err := m.Geometries([]referenceframe.Input{theta})
+				require.NoError(t, err)
+				fromModel := gif.GeometryByName("gripper:gripper_moving")
+				require.NotNilf(t, fromModel, "model has no jaw geometry at %.4f rad", theta)
+
+				built, err := BuildGripperMeshes(gt, LowDetail, theta)
+				require.NoError(t, err)
+				fromMeshes := built[len(built)-1]
+				require.Equal(t, "gripper_moving", fromMeshes.Label())
+
+				a, b := fromModel.Pose(), fromMeshes.Pose()
+				assert.Lessf(t, a.Point().Sub(b.Point()).Norm(), 1e-9,
+					"jaw=%.4f rad: model places the mesh at %v, BuildGripperMeshes at %v", theta, a.Point(), b.Point())
+				oriD := spatialmath.QuatToR3AA(
+					spatialmath.OrientationBetween(a.Orientation(), b.Orientation()).Quaternion()).Norm()
+				assert.Lessf(t, oriD, 1e-9,
+					"jaw=%.4f rad: jaw mesh orientation differs by %.3e rad between the two paths", theta, oriD)
+			}
+		})
+	}
+}
