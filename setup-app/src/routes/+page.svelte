@@ -1,9 +1,13 @@
 <script lang="ts">
+	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
 	import SensorConfigForm from '$lib/components/SensorConfigForm.svelte';
 	import WorkflowSelector from '$lib/components/WorkflowSelector.svelte';
 	import type { SensorConfig, WorkflowType } from '$lib/types';
 	import { getMachineRootPath, parseConnectionFromCookies } from '$lib/utils/connection';
+	import { useWorkflowConfig } from '$lib/composables/useWorkflowConfig';
+
+	const { getSensorConfigFromSession } = useWorkflowConfig();
 
 	// Landing page state
 	let sensorConfig = $state<SensorConfig | null>(null);
@@ -37,23 +41,11 @@
 
 	// Check for existing session state on page load
 	function checkExistingSession() {
-		try {
-			const stored = sessionStorage.getItem('so101-setup-state');
-			if (stored) {
-				const sessionState = JSON.parse(stored);
-				// Only restore if less than 1 hour old
-				if (Date.now() - (sessionState.timestamp || 0) < 3600000) {
-					sensorConfig = sessionState.sensorConfig;
-				}
-			}
-		} catch (error) {
-			// Ignore invalid session data
-			console.warn('Invalid session data, starting fresh');
-		}
+		sensorConfig = getSensorConfigFromSession();
 	}
 
-	// Initialize on mount
-	$effect(() => {
+	// Initialize once on mount
+	onMount(() => {
 		checkExistingSession();
 	});
 </script>

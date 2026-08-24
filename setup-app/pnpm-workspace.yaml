@@ -4,3 +4,7 @@
 allowBuilds:
   '@tailwindcss/oxide': true
   esbuild: true
+
+# Enforce package.json's `engines`. pnpm 11 ignores .npmrc's `engine-strict`
+# for this, same migration as `allowBuilds` above.
+engineStrict: true

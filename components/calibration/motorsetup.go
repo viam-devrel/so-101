@@ -145,12 +145,26 @@ func (cs *so101CalibrationSensor) motorSetupVerify(ctx context.Context) (map[str
 
 	results := make(map[string]any)
 	allGood := true
+	warnCount := 0
 
 	// Check each expected motor
 	for id, name := range expectedMotors {
 		if cs.controller.ServoPresent(id) {
-			// Try to ping the servo
-			_, err := cs.controller.PingServo(ctx, id)
+			// PingServo's response already carries the model number (feetech.Bus.Ping reads
+			// it as part of the same round trip), so classify from it directly instead of a
+			// second DetectServoModel ping: a servo that stops answering between the two
+			// pings would otherwise land in model_detection_failed instead of
+			// not_responding. This also drops a redundant round trip per servo.
+			//
+			// Non-blocking by design when the model number just isn't in the driver's
+			// registry: the servo answered its ping, and bus_session.go constructs every
+			// session servo as ModelSTS3215 regardless of detection, so an unrecognized
+			// model doesn't change how this servo is driven (DetectServoModel's model
+			// mutation was a no-op here anyway: ModelSTS3215 and ModelSTS3250 share every
+			// field but Name/Number). Contrast discoverOneMotor below, which rejects the
+			// same condition outright because it is choosing which physical servo to assign
+			// a bus ID to.
+			modelNum, err := cs.controller.PingServo(ctx, id)
 			if err != nil {
 				results[name] = map[string]any{
 					"id":     id,
@@ -158,21 +172,19 @@ func (cs *so101CalibrationSensor) motorSetupVerify(ctx context.Context) (map[str
 					"error":  err.Error(),
 				}
 				allGood = false
-			} else {
-				// Auto-detect model
-				if modelName, err := cs.controller.DetectServoModel(ctx, id); err != nil {
-					results[name] = map[string]any{
-						"id":     id,
-						"status": "model_detection_failed",
-						"error":  err.Error(),
-					}
-				} else {
-					results[name] = map[string]any{
-						"id":     id,
-						"status": "ok",
-						"model":  modelName,
-					}
+			} else if m, ok := feetech.GetModelByNumber(modelNum); ok {
+				results[name] = map[string]any{
+					"id":     id,
+					"status": "ok",
+					"model":  m.Name,
 				}
+			} else {
+				results[name] = map[string]any{
+					"id":     id,
+					"status": "model_detection_failed",
+					"error":  fmt.Sprintf("unknown model number: %d", modelNum),
+				}
+				warnCount++
 			}
 		} else {
 			results[name] = map[string]any{
@@ -184,16 +196,25 @@ func (cs *so101CalibrationSensor) motorSetupVerify(ctx context.Context) (map[str
 		}
 	}
 
-	if allGood {
+	switch {
+	case allGood && warnCount > 0:
+		cs.setupStatus = fmt.Sprintf("⚠️ All SO-101 motors responding, %d with unrecognized model", warnCount)
+	case allGood:
 		cs.setupStatus = "✅ All SO-101 motors verified successfully"
-	} else {
+	default:
 		cs.setupStatus = "⚠️ Some motors failed verification"
 	}
 
 	cs.logger.Infof("Motor setup: %s", cs.setupStatus)
 
+	// success reports that the call itself completed, matching every other command in this
+	// file; the aggregate motor verdict lives in all_ok. See motorsetup_test.go for the
+	// regression this fixes: a partial motor failure used to make this command return
+	// success:false, which the app's sendCommand treats as a thrown error, so the whole
+	// per-motor grid became unreachable.
 	return map[string]any{
-		"success": allGood,
+		"success": true,
+		"all_ok":  allGood,
 		"motors":  results,
 		"status":  cs.setupStatus,
 	}, nil
@@ -282,6 +303,9 @@ func (cs *so101CalibrationSensor) discoverOneMotor(ctx context.Context, expected
 	}
 
 	servo := discovered[0]
+	// Strict by design, unlike motorSetupVerify's model_detection_failed warning: this call
+	// is choosing which physical servo to assign a bus ID to, so an unrecognized model must
+	// reject rather than warn.
 	if servo.Model == nil || servo.Model.Name != expectedModel {
 		actualModel := "unknown"
 		if servo.Model != nil {

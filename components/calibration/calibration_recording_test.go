@@ -21,7 +21,10 @@ import (
 // NewSO101CalibrationSensor acquires through the process-wide registry, which needs real
 // serial hardware. This builds its own registry instead -- explicitly, so the bypass is
 // visible at the call site -- letting a fake feetech.Transport stand in for the port.
-func testRecordingSensor(t *testing.T, ft *testfake.FakeTransport) *so101CalibrationSensor {
+// ft takes the feetech.Transport interface, not the concrete *testfake.FakeTransport, so a
+// test can wrap a FakeTransport to inject targeted failures (see
+// calibration_save_retry_test.go).
+func testRecordingSensor(t *testing.T, ft feetech.Transport) *so101CalibrationSensor {
 	t.Helper()
 	servoIDs := []int{1, 2, 3, 4, 5, 6}
 
@@ -39,9 +42,17 @@ func testRecordingSensor(t *testing.T, ft *testfake.FakeTransport) *so101Calibra
 	require.NoError(t, err)
 	t.Cleanup(h.Release)
 
+	// Every joint gets its real name: Readings keys its "joints" map by joint.Name, so
+	// unnamed joints would all collapse into a single "" entry.
+	servoNames := map[int]string{
+		1: "shoulder_pan", 2: "shoulder_lift", 3: "elbow_flex",
+		4: "wrist_flex", 5: "wrist_roll", 6: "gripper",
+	}
 	joints := make(map[int]*JointCalibrationData, len(servoIDs))
 	for _, id := range servoIDs {
 		joints[id] = &JointCalibrationData{
+			ID:          id,
+			Name:        servoNames[id],
 			RecordedMin: math.MaxInt32,
 			RecordedMax: math.MinInt32,
 		}
@@ -54,7 +65,7 @@ func testRecordingSensor(t *testing.T, ft *testfake.FakeTransport) *so101Calibra
 		controller: h,
 		state:      StateHomingPosition,
 		joints:     joints,
-		servoNames: map[int]string{1: "shoulder_pan"},
+		servoNames: servoNames,
 	}
 }
 

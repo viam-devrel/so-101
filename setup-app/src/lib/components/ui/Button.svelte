@@ -1,4 +1,6 @@
 <script lang="ts">
+	// Usage: <Button variant="primary" fullWidth loading={saving} onclick={save}>Save</Button>
+	//
 	import LoadingSpinner from './LoadingSpinner.svelte';
 
 	interface Props {
@@ -9,7 +11,6 @@
 		fullWidth?: boolean;
 		type?: 'button' | 'submit' | 'reset';
 		onclick?: () => void;
-		className?: string;
 		children?: any;
 	}
 
@@ -21,7 +22,6 @@
 		fullWidth = false,
 		type = 'button',
 		onclick,
-		className = '',
 		children
 	}: Props = $props();
 
@@ -42,9 +42,11 @@
 		lg: 'px-6 py-3 text-base'
 	};
 
-	const buttonClass = `${baseClasses} ${variantClasses[variant]} ${sizeClasses[size]} ${fullWidth ? 'w-full' : ''} ${className}`;
+	const buttonClass = $derived(
+		`${baseClasses} ${variantClasses[variant]} ${sizeClasses[size]} ${fullWidth ? 'w-full' : ''}`
+	);
 
-	const isDisabled = disabled || loading;
+	const isDisabled = $derived(disabled || loading);
 
 	function handleClick() {
 		if (!isDisabled && onclick) {
@@ -53,12 +55,12 @@
 	}
 </script>
 
-<button {type} class={buttonClass} disabled={isDisabled} onclick={handleClick}>
+<button {type} class={buttonClass} disabled={isDisabled} aria-busy={loading} onclick={handleClick}>
 	{#if loading}
 		<LoadingSpinner
 			size="sm"
 			color={variant === 'primary' || variant === 'success' || variant === 'danger'
-				? 'gray'
+				? 'white'
 				: 'blue'}
 			inline
 		/>

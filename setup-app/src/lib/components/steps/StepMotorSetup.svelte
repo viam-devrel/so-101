@@ -1,6 +1,7 @@
 <script lang="ts">
-	import type { StepProps, MotorSetupConfig, MotorSetupResult } from '$lib/types';
-	import { Button, LoadingSpinner } from '$lib/components/ui';
+	import type { StepProps } from '$lib/types';
+	import { MOTOR_SETUP_ORDER } from '$lib/constants';
+	import { Button, LoadingSpinner, Icon, InfoPanel } from '$lib/components/ui';
 
 	let {
 		sendCommand,
@@ -8,22 +9,32 @@
 		clearError,
 		nextStep,
 		motorSetupResults,
-		updateMotorSetupResult
+		updateMotorSetupResult,
+		clearMotorSetupResult,
+		markStepComplete
 	}: StepProps = $props();
 
-	// Motor configuration order (reverse assembly order to avoid ID conflicts)
-	const MOTOR_SETUP_ORDER: MotorSetupConfig[] = [
-		{ name: 'gripper', targetId: 6, description: 'Gripper (end effector)' },
-		{ name: 'wrist_roll', targetId: 5, description: 'Wrist Roll Joint' },
-		{ name: 'wrist_flex', targetId: 4, description: 'Wrist Flex Joint' },
-		{ name: 'elbow_flex', targetId: 3, description: 'Elbow Flex Joint' },
-		{ name: 'shoulder_lift', targetId: 2, description: 'Shoulder Lift Joint' },
-		{ name: 'shoulder_pan', targetId: 1, description: 'Shoulder Pan Joint' }
-	];
+	// First motor that's neither configured nor skipped, so resuming this step (it survives
+	// unmount only via motorSetupResults -- currentMotorIndex itself does not) lands where the
+	// user left off instead of restarting at motor 1. Once every motor is processed, prefer the
+	// first *skipped* one: that is the only unfinished work left, and the alternative made a
+	// returning user click "Previous Motor" back down the list to reach it. Last resort is the
+	// final motor (everything is configured, in which case this panel isn't rendered at all).
+	function findResumeIndex(): number {
+		const unprocessed = MOTOR_SETUP_ORDER.findIndex((motor) => {
+			const step = motorSetupResults[motor.name]?.step;
+			return step !== 'configured' && step !== 'skipped';
+		});
+		if (unprocessed !== -1) return unprocessed;
+		const skipped = MOTOR_SETUP_ORDER.findIndex(
+			(motor) => motorSetupResults[motor.name]?.step === 'skipped'
+		);
+		return skipped !== -1 ? skipped : MOTOR_SETUP_ORDER.length - 1;
+	}
 
 	// Component state
 	let isLoading = $state(false);
-	let currentMotorIndex = $state(0);
+	let currentMotorIndex = $state(findResumeIndex());
 	let discoveredMotor = $state<any>(null);
 
 	// Computed values
@@ -31,14 +42,45 @@
 	const allMotorsConfigured = $derived(
 		MOTOR_SETUP_ORDER.every((motor) => motorSetupResults[motor.name]?.step === 'configured')
 	);
+	const configuredCount = $derived(
+		MOTOR_SETUP_ORDER.filter((motor) => motorSetupResults[motor.name]?.step === 'configured').length
+	);
+	// Every motor has reached a terminal state (configured or skipped) -- the point at which
+	// there's nothing left to advance through, so a "continue anyway" escape hatch applies.
+	const allMotorsProcessed = $derived(
+		MOTOR_SETUP_ORDER.every((motor) => {
+			const step = motorSetupResults[motor.name]?.step;
+			return step === 'configured' || step === 'skipped';
+		})
+	);
+	const showPartialContinue = $derived(allMotorsProcessed && !allMotorsConfigured);
+	const currentMotorConfigured = $derived(
+		motorSetupResults[currentMotor.name]?.step === 'configured'
+	);
+
+	// Once every motor is configured or skipped, this step is done -- lets the footer "Next"
+	// button and the step's own "Continue" agree (see wizardProgress.ts). $effect (not a
+	// direct call at assign/skip time) because two separate actions can flip
+	// allMotorsProcessed to true. Safe to re-run only because markStepComplete writes a single
+	// $state property without reading the record: a same-value property write notifies
+	// nothing, whereas the object-spread reassign it used to do made this effect depend on the
+	// state it writes and Svelte aborted the flush with effect_update_depth_exceeded.
+	$effect(() => {
+		if (allMotorsProcessed) {
+			markStepComplete('motor_setup');
+		}
+	});
 
 	// Get motor status for display
-	function getMotorStatus(motorName: string): 'pending' | 'current' | 'discovered' | 'configured' {
-		const result = motorSetupResults[motorName];
-		if (!result) {
-			return motorName === currentMotor?.name ? 'current' : 'pending';
-		}
-		return result.step;
+	function getMotorStatus(
+		motorName: string
+	): 'pending' | 'current' | 'discovered' | 'configured' | 'skipped' {
+		const step = motorSetupResults[motorName]?.step;
+		if (step === 'configured') return 'configured';
+		if (step === 'discovered') return 'discovered';
+		if (motorName === currentMotor?.name) return 'current';
+		if (step === 'skipped') return 'skipped';
+		return 'pending';
 	}
 
 	// Get status color class
@@ -50,6 +92,8 @@
 				return 'bg-yellow-100 border-yellow-300 text-yellow-800';
 			case 'configured':
 				return 'bg-green-100 border-green-300 text-green-800';
+			case 'skipped':
+				return 'bg-orange-100 border-orange-300 text-orange-800';
 			default:
 				return 'bg-gray-100 border-gray-300 text-gray-600';
 		}
@@ -102,16 +146,27 @@
 				current_baudrate: discoveredMotor.found_baudrate
 			});
 
-			// Update motor setup results to configured
+			// Update motor setup results to configured. Built from discoveredMotor rather than
+			// spread from the prior result: the prior result's type is the MotorSetupResult
+			// union, which may be the fieldless 'skipped' variant, so spreading it can't be
+			// relied on to carry current_id/target_id/model/found_baudrate.
 			updateMotorSetupResult(currentMotor.name, {
-				...motorSetupResults[currentMotor.name],
-				step: 'configured'
+				motor_name: currentMotor.name,
+				current_id: discoveredMotor.current_id,
+				target_id: discoveredMotor.target_id,
+				model: discoveredMotor.model,
+				found_baudrate: discoveredMotor.found_baudrate,
+				step: 'configured',
+				success: true
 			});
+			// Always clear, even on the last motor -- previously this only ran inside the
+			// advance branch below, so configuring the last motor left a stale "Motor
+			// Discovered" panel on screen.
+			discoveredMotor = null;
 
-			// Move to next motor or complete
+			// Move to next motor if there is one
 			if (currentMotorIndex < MOTOR_SETUP_ORDER.length - 1) {
 				currentMotorIndex++;
-				discoveredMotor = null;
 			}
 		} catch (error) {
 			setError(error instanceof Error ? error.message : 'Configuration failed');
@@ -120,13 +175,22 @@
 		}
 	}
 
-	// Skip to next motor
-	function nextMotor() {
+	// Skip current motor. Never downgrades an already-configured motor to skipped -- writing
+	// the result overwrites any prior 'discovered' entry too, so the grid can't show a stale
+	// "Found: ID x -> y" for a motor now marked skipped.
+	function skipMotor() {
+		if (motorSetupResults[currentMotor.name]?.step !== 'configured') {
+			updateMotorSetupResult(currentMotor.name, {
+				motor_name: currentMotor.name,
+				step: 'skipped',
+				success: true
+			});
+		}
 		if (currentMotorIndex < MOTOR_SETUP_ORDER.length - 1) {
 			currentMotorIndex++;
-			discoveredMotor = null;
-			clearError();
 		}
+		discoveredMotor = null;
+		clearError();
 	}
 
 	// Go back to previous motor
@@ -137,33 +201,24 @@
 			clearError();
 		}
 	}
+
+	// Delete the stale discovery outright so the grid stops showing it as this motor's result.
+	function rediscoverMotor() {
+		clearMotorSetupResult(currentMotor.name);
+		discoveredMotor = null;
+	}
 </script>
 
 <div class="max-w-4xl mx-auto">
 	<!-- Instructions -->
 	<div class="mb-8">
 		<h3 class="text-2xl font-bold text-gray-900 mb-4">Motor Setup & Configuration</h3>
-		<div class="bg-blue-50 p-6 rounded-lg mb-6">
-			<div class="flex items-start">
-				<div class="flex-shrink-0">
-					<svg class="w-6 h-6 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path
-							stroke-linecap="round"
-							stroke-linejoin="round"
-							stroke-width="2"
-							d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
-						></path>
-					</svg>
-				</div>
-				<div class="ml-3">
-					<h4 class="font-semibold text-blue-900 mb-2">Important: Connect ONE Motor at a Time</h4>
-					<p class="text-blue-800 text-sm">
-						To avoid ID conflicts, connect only the motor you're currently configuring. Disconnect
-						all other servo motors from the daisy chain during this process.
-					</p>
-				</div>
-			</div>
-		</div>
+		<InfoPanel tone="info" title="Important: Connect ONE Motor at a Time" className="mb-6">
+			<p class="text-blue-800 text-sm">
+				To avoid ID conflicts, connect only the motor you're currently configuring. Disconnect all
+				other servo motors from the daisy chain during this process.
+			</p>
+		</InfoPanel>
 	</div>
 
 	<!-- Motor Progress Grid -->
@@ -187,21 +242,22 @@
 					<div class="text-sm">
 						{#if status === 'configured'}
 							<div class="flex items-center text-green-700">
-								<svg class="w-4 h-4 mr-1" fill="currentColor" viewBox="0 0 20 20">
-									<path
-										fill-rule="evenodd"
-										d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
-										clip-rule="evenodd"
-									/>
-								</svg>
+								<Icon name="checkSmall" className="w-4 h-4 mr-1" />
 								Configured
 							</div>
-						{:else if status === 'discovered'}
+						{:else if status === 'discovered' && result && result.step === 'discovered'}
 							<div class="text-yellow-700">
-								Found: ID {result?.current_id} → {result?.target_id}
+								Found: ID {result.current_id} → {result.target_id}
 							</div>
 						{:else if status === 'current'}
 							<div class="text-blue-700 font-medium">← Current Motor</div>
+							<!-- 'current' outranks 'skipped', and skipping the last motor cannot advance
+							     off it, so say so here rather than losing the skip mark. -->
+							{#if motorSetupResults[motor.name]?.step === 'skipped'}
+								<div class="text-blue-700">Skipped — not configured</div>
+							{/if}
+						{:else if status === 'skipped'}
+							<div class="text-orange-700">Skipped</div>
 						{:else}
 							<div class="text-gray-600">Waiting...</div>
 						{/if}
@@ -219,8 +275,7 @@
 			</h4>
 
 			<div class="mb-6">
-				<div class="bg-yellow-50 p-4 rounded-lg mb-4">
-					<h5 class="font-medium text-yellow-900 mb-2">Step-by-step Instructions:</h5>
+				<InfoPanel tone="warning" icon={null} title="Step-by-step Instructions:" className="mb-4">
 					<ol class="text-yellow-800 text-sm space-y-1">
 						<li>1. Disconnect ALL servo motors from the daisy chain</li>
 						<li>
@@ -228,19 +283,23 @@
 						</li>
 						<li>3. Click "Discover Motor" to find the connected servo</li>
 						<li>4. Click "Configure Motor" to set the correct ID and baudrate</li>
+						<li>
+							Already set up or unavailable? "Skip Motor" moves on without configuring it.
+							Verification still pings every ID: a motor that was already set up passes, one that
+							was never configured shows as not responding or not found.
+						</li>
 					</ol>
-				</div>
+				</InfoPanel>
 
 				{#if discoveredMotor}
-					<div class="bg-green-50 p-4 rounded-lg mb-4">
-						<h5 class="font-medium text-green-900 mb-2">Motor Discovered:</h5>
+					<InfoPanel tone="success" icon={null} title="Motor Discovered:" className="mb-4">
 						<div class="text-green-800 text-sm space-y-1">
 							<p>• Current ID: {discoveredMotor.current_id}</p>
 							<p>• Target ID: {discoveredMotor.target_id}</p>
 							<p>• Model: {discoveredMotor.model}</p>
 							<p>• Current Baudrate: {discoveredMotor.found_baudrate}</p>
 						</div>
-					</div>
+					</InfoPanel>
 				{/if}
 
 				<div class="flex flex-wrap gap-3">
@@ -250,14 +309,7 @@
 								<LoadingSpinner size="sm" className="mr-2" />
 								Discovering...
 							{:else}
-								<svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path
-										stroke-linecap="round"
-										stroke-linejoin="round"
-										stroke-width="2"
-										d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
-									></path>
-								</svg>
+								<Icon name="search" className="w-4 h-4 mr-2" />
 								Discover Motor
 							{/if}
 						</Button>
@@ -267,23 +319,12 @@
 								<LoadingSpinner size="sm" className="mr-2" />
 								Configuring...
 							{:else}
-								<svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path
-										stroke-linecap="round"
-										stroke-linejoin="round"
-										stroke-width="2"
-										d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"
-									></path>
-								</svg>
+								<Icon name="checkCircle" className="w-4 h-4 mr-2" />
 								Configure Motor
 							{/if}
 						</Button>
 
-						<Button
-							onclick={() => (discoveredMotor = null)}
-							disabled={isLoading}
-							variant="secondary"
-						>
+						<Button onclick={rediscoverMotor} disabled={isLoading} variant="secondary">
 							Rediscover
 						</Button>
 					{/if}
@@ -294,48 +335,43 @@
 						</Button>
 					{/if}
 
-					{#if currentMotorIndex < MOTOR_SETUP_ORDER.length - 1}
-						<Button onclick={nextMotor} disabled={isLoading} variant="ghost">Skip Motor →</Button>
+					{#if !currentMotorConfigured}
+						<Button onclick={skipMotor} disabled={isLoading} variant="ghost">
+							{currentMotorIndex < MOTOR_SETUP_ORDER.length - 1 ? 'Skip Motor →' : 'Skip Motor'}
+						</Button>
 					{/if}
 				</div>
 			</div>
 		</div>
+
+		{#if showPartialContinue}
+			<InfoPanel
+				tone="danger"
+				title="{configuredCount} of {MOTOR_SETUP_ORDER.length} motors configured"
+				className="mb-6"
+			>
+				<p class="text-orange-800 text-sm mb-4">
+					The rest were skipped, so this app did not configure them. Verification on the next step
+					pings every ID anyway: any skipped motor that was not already set up will show as "not
+					responding" or "not found" until you come back here and configure it.
+				</p>
+				<Button onclick={nextStep} variant="primary">
+					Continue with {configuredCount} of {MOTOR_SETUP_ORDER.length} configured →
+				</Button>
+			</InfoPanel>
+		{/if}
 	{:else}
 		<!-- All motors configured -->
-		<div class="bg-green-50 p-6 rounded-lg mb-6">
-			<div class="flex items-center">
-				<svg
-					class="w-8 h-8 text-green-600 mr-4"
-					fill="none"
-					stroke="currentColor"
-					viewBox="0 0 24 24"
-				>
-					<path
-						stroke-linecap="round"
-						stroke-linejoin="round"
-						stroke-width="2"
-						d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"
-					></path>
-				</svg>
-				<div>
-					<h4 class="text-lg font-semibold text-green-900">All Motors Configured!</h4>
-					<p class="text-green-800">
-						You can now connect all motors in a daisy chain and proceed to verification.
-					</p>
-				</div>
-			</div>
-		</div>
+		<InfoPanel tone="success" title="All Motors Configured!" className="mb-6">
+			<p class="text-green-800">
+				You can now connect all motors in a daisy chain and proceed to verification.
+			</p>
+		</InfoPanel>
 
 		<div class="text-center">
 			<Button onclick={nextStep} variant="primary" size="lg">
 				Continue to Verification
-				<svg class="ml-2 -mr-1 w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
-					<path
-						fill-rule="evenodd"
-						d="M10.293 3.293a1 1 0 011.414 0l6 6a1 1 0 010 1.414l-6 6a1 1 0 01-1.414-1.414L14.586 11H3a1 1 0 110-2h11.586l-4.293-4.293a1 1 0 010-1.414z"
-						clip-rule="evenodd"
-					/>
-				</svg>
+				<Icon name="arrowRight" className="ml-2 -mr-1 w-5 h-5" />
 			</Button>
 		</div>
 	{/if}

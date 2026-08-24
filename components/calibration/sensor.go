@@ -124,6 +124,11 @@ type so101CalibrationSensor struct {
 	servoNames       map[int]string
 	recordingStarted time.Time
 	lastInstruction  string
+	// lastSaveError durably records a save_calibration failure. Needed because a save failure
+	// deliberately stays at StateCompleted (see workflow.go's saveCalibration) and setState
+	// only fills errorMsg for StateError, so nothing else outlives the transient DoCommand
+	// error. Owned by DoCommand's dispatch, which already holds cs.mu and sees the error.
+	lastSaveError string
 
 	// Range recording state
 	recordingActive bool
@@ -215,7 +220,7 @@ func NewSO101CalibrationSensor(
 		state:           StateIdle,
 		joints:          joints,
 		servoNames:      servoNames,
-		lastInstruction: "Ready to start calibration. Use DoCommand with 'start' to begin.",
+		lastInstruction: "Ready to start calibration.",
 	}
 
 	logger.Infof("SO-101 calibration sensor initialized for servos: %v", conf.ServoIDs)
@@ -242,6 +247,10 @@ func (cs *so101CalibrationSensor) Readings(ctx context.Context, extra map[string
 		readings["error"] = cs.errorMsg
 	}
 
+	if cs.lastSaveError != "" {
+		readings["last_save_error"] = cs.lastSaveError
+	}
+
 	// Add joint-specific information
 	jointInfo := make(map[string]any)
 	for _, joint := range cs.joints {
@@ -266,18 +275,20 @@ func (cs *so101CalibrationSensor) Readings(ctx context.Context, extra map[string
 	}
 
 	// Add available commands based on state
+	// reset is unguarded in workflow.go (safe and idempotent from any state), so it belongs
+	// in every case here -- otherwise the advertised contract lies about what DoCommand accepts.
 	availableCommands := []any{}
 	switch cs.state {
 	case StateIdle:
-		availableCommands = []any{"start"}
+		availableCommands = []any{"start", "reset"}
 	case StateStarted:
-		availableCommands = []any{"set_homing", "abort"}
+		availableCommands = []any{"set_homing", "abort", "reset"}
 	case StateHomingPosition:
-		availableCommands = []any{"start_range_recording", "abort"}
+		availableCommands = []any{"start_range_recording", "abort", "reset"}
 	case StateRangeRecording:
-		availableCommands = []any{"stop_range_recording", "abort"}
+		availableCommands = []any{"stop_range_recording", "abort", "reset"}
 	case StateCompleted:
-		availableCommands = []any{"save_calibration", "start"} // Allow restart
+		availableCommands = []any{"save_calibration", "start", "reset"} // Allow restart
 	case StateError:
 		availableCommands = []any{"reset", "start"}
 	}
@@ -310,6 +321,8 @@ func (cs *so101CalibrationSensor) DoCommand(ctx context.Context, cmd map[string]
 
 	switch command {
 	case "start":
+		// A fresh session must not carry a stale save failure forward.
+		cs.lastSaveError = ""
 		return cs.startCalibration(ctx)
 
 	case "set_homing":
@@ -322,12 +335,27 @@ func (cs *so101CalibrationSensor) DoCommand(ctx context.Context, cmd map[string]
 		return cs.stopRangeRecording(ctx)
 
 	case "save_calibration":
-		return cs.saveCalibration(ctx)
+		result, err := cs.saveCalibration(ctx)
+		if err != nil {
+			cs.lastSaveError = err.Error()
+		} else {
+			cs.lastSaveError = ""
+		}
+		return result, err
 
 	case "abort":
-		return cs.abortCalibration(ctx)
+		// Abort can now be rejected (StateCompleted, see workflow.go), so only clear
+		// lastSaveError once it actually runs -- a rejected abort must leave a prior save
+		// failure exactly as it found it.
+		result, err := cs.abortCalibration(ctx)
+		if err == nil {
+			cs.lastSaveError = ""
+		}
+		return result, err
 
 	case "reset":
+		// Reset must not leave a prior save failure haunting the next session.
+		cs.lastSaveError = ""
 		return cs.resetCalibration(ctx)
 
 	case "get_current_positions":

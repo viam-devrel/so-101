@@ -328,3 +328,73 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
 - **`feetech.BusConfig` takes an exported `Transport`**, so `ReadCalibrationFromServos`'s
   bus-dependent paths are unit-testable without serial hardware. Worth knowing generally — the
   repo has other paths written off as hardware-only that may not be.
+- **`motor_setup_verify` returns `success` for "the call completed" and `all_ok` for the
+  verdict.** It used to return `success: allGood`, alone among the commands in `motorsetup.go`
+  in overloading that field — and since `setup-app`'s `sendCommand` throws on `success:false`,
+  any single unhealthy motor threw and took the whole per-motor verification UI (grid, status
+  badges, troubleshooting panel) down with it. The app still derives its own verdict from the
+  per-motor `status` values rather than trusting `all_ok`, and only logs when the two disagree.
+  Safe to change the wire format because the module binary and the built app ship in one
+  `module.tar.gz`, so there is no version skew between them.
+- **`motorSetupVerify` and `discoverOneMotor` deliberately disagree about an unrecognized servo
+  model.** Both see the same fact — the servo answered but its model number is not in the
+  registry, and `bus_session.go` drives it as `ModelSTS3215` either way — but verify treats it as
+  a warning (`model_detection_failed`, leaves `all_ok` true) while
+  discovery rejects it, because discovery is choosing which physical servo to write a bus ID to.
+  Commented at both call sites; don't "fix" one to match the other. Mechanically they differ:
+  verify classifies the model number `PingServo` already returns (one round trip) via
+  `feetech.GetModelByNumber`, while discovery reads `FoundServo.Model` from `Discover`. Verify
+  deliberately no longer calls `feetech.Servo.DetectModel` — that re-pinged, so a servo dropping
+  out mid-detection was misreported as a model problem, and its side effect of repointing the
+  session servo's register map (an SCS model would have moved `LockAddress` for the rest of the
+  session) was a latent hazard. That left `ControllerHandle.DetectServoModel` with no caller, so
+  it was deleted — a `PingServo` + `feetech.GetModelByNumber` pair is the replacement, and it has
+  no register-map side effect. Note neither call site checks the model is one the SO-101 *ships*:
+  a known-but-wrong model (say `scs0009`) still verifies as `ok`.
+- **Enabling torque is a bare `SyncWrite`, so seed `Goal_Position` first.** `EnableAll` writes
+  `RegTorqueEnable` with no goal sync, and these are closed-loop position servos — they resume
+  driving toward whatever goal their register holds, which the calibration workflow never writes
+  (so it is the arm component's last target, or a power-on leftover). Bounded only by the
+  `min`/`max_angle_limit` pair just written, i.e. the joint's whole travel, at a `Goal_Velocity`
+  where `0` means MAXIMUM. `saveCalibration` therefore calls `seedGoalPositions` (live
+  `SyncReadPositions` → per-servo `goal_position` write) immediately before enabling, and leaves
+  torque OFF if that seed fails. `abort`/`reset` perform no motion-capable operation at all: they
+  are reached with registers half-written and hands on the arm.
+- **`writeHomingOffset` really writes `position_offset` now**, sign-magnitude encoded at
+  `feetech.RegPositionOffset.SignBit` (11) — it used to ignore its argument and write `128` to
+  `torque_enable`. That was not inert: `128` is FEETECH's "calibrate middle position" command, so
+  the firmware wrote the offset itself and the frame shift already existed. Every position the
+  servo reports after `set_homing` is offset-shifted, and recorded ranges, the written limits, and
+  the calibration file all live in that same post-offset frame — which is exactly why
+  `HomingOffset` must stay unused in `Normalize`/`Denormalize`. Double-applying it is the bug.
+- **A failed `saveCalibration` stays at `StateCompleted`, not `StateError`.** Its own guard
+  requires `StateCompleted`, so the old `StateError` on failure made every retry return
+  "calibration not completed (current state: error)" — the only recovery was a `reset` that
+  discarded a completed recording session. Retry is safe because it rewrites every servo
+  unconditionally (no per-servo "already done" tracking) from the untouched in-memory
+  `cs.joints`. The calibration file is written *before* the servo registers, on purpose: it is
+  the only durable record of the recording session, and nothing requires it to agree with the
+  registers. `LoadCalibration` reads the registers only when no file exists, so a file present
+  without the register writes is correct — whereas registers written without a file falls back
+  to `ReadCalibrationFromServos`, where an unwritten servo's factory `0`/`4095` still reads as
+  "calibrated" and the gripper lands on `guardGripperTravel`'s closed-stop window that this
+  workflow's own homing offset invalidates. Don't "fix" the order.
+- **`readings.last_save_error` is the durable signal for a failed `save_calibration`, not
+  `readings.error`.** `setState` only populates `errorMsg` for `StateError`, and a save failure
+  deliberately stays at `StateCompleted` so the command stays retryable — so `readings.error` is
+  empty exactly when a save has failed. `sensor.go`'s `DoCommand` dispatch, not `workflow.go`,
+  sets and clears `lastSaveError`: it already sees `saveCalibration`'s error return under
+  `cs.mu`. Cleared by a successful save, `start`, `reset`, and a *successful* `abort` — a rejected
+  abort must leave a prior save failure untouched, so the `abort` case only clears it once
+  `abortCalibration` returns nil.
+- **`available_commands` must match what `DoCommand` actually accepts, in both directions** —
+  for the *workflow* commands. `get_current_positions` and the five `motor_setup_*` commands are
+  accepted in every state and advertised in none, on purpose: they are not workflow steps.
+  `resetCalibration` has no state guard at all — it is safe and idempotent from every state — so
+  `Readings` advertises `reset` in every case, not just `error`. `abortCalibration` was the
+  opposite risk: also unguarded, but `completed` holds a finished recording session waiting on
+  `save_calibration`, so an abort there would silently discard minutes of hand-moved calibration.
+  It now rejects `StateCompleted` and treats `StateIdle` as a no-op success, worded so it cannot
+  be mistaken for having done anything. `abort`'s advertised states are unchanged — only the
+  guard was added. One gap remains by choice: `error` still accepts `abort` without advertising
+  it, which is harmless because `reset` is the escape hatch offered there.

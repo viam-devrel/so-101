@@ -1,6 +1,9 @@
 # SO-101 Setup Application
 
-A SvelteKit web application that provides a setup wizard for the SO-101 5-DOF robotic arm. The app guides users through motor configuration and calibration workflows using the Viam TypeScript SDK to connect to robots and interact with the SO-101 calibration sensor component.
+A SvelteKit web application (the `so101-setup` Viam application) that provides guided
+motor-setup and calibration workflows for the SO-101 5-DOF robotic arm. It talks to the
+`devrel:so101:calibration` sensor component via DoCommand to drive the underlying state
+machine. It is bundled into `module.tar.gz` and served as a Viam App.
 
 ## Architecture
 
@@ -16,96 +19,112 @@ A SvelteKit web application that provides a setup wizard for the SO-101 5-DOF ro
 ### Application Structure
 
 - **Client-side only**: SSR disabled, runs entirely in browser
-- **Cookie-based authentication**: Connection details from Viam platform cookies
-- **URL routing**: `/robot/{machine-id}` where machine-id matches cookie key
-- **Wizard-based UI**: 8-step workflow for setup process
+- **Cookie-based authentication**: connection details come from a per-machine cookie
+- **Three workflows**, all served by one dynamic route
+  (`src/routes/workflows/[workflow]/`): motor setup (4 steps), calibration (6 steps), and
+  full setup (8 steps, motor setup + calibration back to back)
 
-### Core Components
+### Routing
 
-#### Connection Management (`src/routes/+layout.svelte`)
+- `src/routes/+page.svelte` — landing page. Shows `SensorConfigForm` (a picker of the
+  machine's `sensor` resources plus a Test Connection button; the part ID is not a field,
+  it is hardcoded to `'main'`) until a connection test succeeds, then `WorkflowSelector`
+  to choose a workflow. The chosen sensor config is passed to the workflow route as URL
+  params and mirrored into `sessionStorage` (keyed `so101-setup-state-{machineId}`) so a
+  refresh on the workflow page doesn't lose it.
+- `src/routes/workflows/[workflow]/+page.svelte` — the single workflow page, for all three
+  values of `WorkflowType`. It resolves the sensor config via `useWorkflowConfig` (URL
+  params first, session storage fallback), then renders `<SensorProvider>` wrapping
+  `<Wizard {workflow} />`. A param outside the three known values renders an "Unknown
+  Workflow" card rather than a 404. `<Wizard>` sits inside `{#key workflow}`: SvelteKit
+  reuses this route component across `/workflows/<a>` → `/workflows/<b>`, and the wizard
+  reads its step list once at init, so without the key it would keep the previous
+  workflow's steps.
+- `src/routes/workflows/[workflow]/+page.ts` exports `entries()` listing the three values.
+  The app only reaches these routes via `goto()`, so there is no `<a href>` for
+  adapter-static's prerenderer to crawl; without `entries()` the build fails outright
+  (`routes were marked as prerenderable, but were not prerendered`).
 
-- Parses connection details from browser cookies
-- Creates `DialConf` for ViamProvider setup
-- Handles connection errors and loading states
-- Expected cookie structure: `{ apiKey: { id, key }, machineId, hostname }`
+### Connection Management (`src/routes/+layout.svelte`, `src/lib/utils/connection.ts`)
 
-#### Setup Wizard (`src/lib/components/SetupWizard.svelte`)
+- `parseConnectionFromCookies` derives a machine ID from the URL path (it accepts
+  `/machine/{name}/robot/{id}`, `/machine/{name}`, and `/robot/{id}` for local dev), then
+  reads a cookie keyed by that machine ID with shape
+  `{ apiKey: { id, key }, machineId, hostname }`.
+- The layout turns that into a `dialConfigs` map for `ViamProvider`, always under the
+  fixed key `'main'`.
 
-- Orchestrates 8-step workflow with state management
-- Progress tracking and navigation between steps
-- Error handling with retry mechanisms
-- Motor setup results persistence across steps
+### Sensor Context (`src/lib/components/SensorProvider.svelte`)
 
-#### Step Components (`src/lib/components/steps/`)
+Wraps the wizard and sets a Svelte context: the sensor client, a polled `getReadings`
+query (interval adapts to `calibration_state` — 300 ms while recording ranges, 1 s
+mid-workflow, 3 s when idle), a `doCommand` mutation, a `sendCommand` helper that raises
+user-friendly errors, and the `sensorConfig` it was given. The context key is a module-level
+`Symbol` in `src/lib/sensorContext.ts`, reached through `setSensorContext()` /
+`useSensor()`; `useSensor()` throws a named error when there is no provider above it. The
+wizard reads this context rather than talking to the SDK directly, and passes it down to
+step components as props.
 
-- **StepOverview**: Introduction and safety information
-- **StepMotorSetup**: Motor ID discovery and configuration
-- **StepMotorVerify**: Motor verification and validation
-- **StepCalibrationStart**: Begin calibration workflow
-- **StepCalibrationHoming**: Manual positioning for homing
-- **StepCalibrationRecording**: Range recording with real-time progress
-- **StepCalibrationSave**: Save calibration data
-- **StepComplete**: Success confirmation
+> **Known wart**: `SensorConfig.partId` is not a Viam part ID — it's the key into the
+> `dialConfigs` map built in `+layout.svelte`, which is hardcoded to `'main'`. The field
+> is named for a rename that hasn't happened yet.
+
+### Wizard (`src/lib/components/Wizard.svelte`, `BaseWizard.svelte`)
+
+`BaseWizard.svelte` is the shared chrome: progress bar, step breadcrumbs, the error
+banner, and the previous/next footer. `Wizard.svelte` owns the per-run state
+(`currentStep`, `error`, `motorSetupResults`, `stepCompletion`, `torqueOutcome`), looks its
+step list and titles up in `WORKFLOW_DEFINITIONS` (`src/lib/wizardProgress.ts`) by
+`workflow`, and switches over the current step name to render the matching step component:
+
+- **motor-setup** (4 steps): overview → motor_setup → motor_verify → complete
+- **calibration** (6 steps): overview → calibration_start → calibration_homing →
+  calibration_recording → calibration_save → complete
+- **full-setup** (8 steps): overview → motor_setup → motor_verify →
+  calibration_start → calibration_homing → calibration_recording → calibration_save →
+  complete
+
+### Step Components (`src/lib/components/steps/`)
+
+Shared across the wizards above:
+
+- **StepOverview**: introduction and safety information
+- **StepMotorSetup**: motor ID discovery and configuration
+- **StepMotorVerify**: motor verification and validation
+- **StepCalibrationStart**: begin calibration workflow
+- **StepCalibrationHoming**: manual positioning for homing
+- **StepCalibrationRecording**: range recording with real-time progress
+- **StepCalibrationSave**: save calibration data
+- **StepComplete**: success confirmation
 
 ## Development Commands
 
-### Setup
-
 ```bash
-pnpm install          # Install dependencies (preferred)
-npm install           # Alternative package manager
-```
-
-### Development
-
-```bash
-pnpm dev              # Start development server
-npm run dev           # Alternative with npm
-
-# Start server and open in browser
-pnpm dev -- --open
-npm run dev -- --open
-```
-
-### Building
-
-```bash
+pnpm install          # Install dependencies
+pnpm dev              # Start development server (add -- --open to open a browser)
 pnpm build            # Build production application
-npm run build         # Alternative with npm
-
 pnpm preview          # Preview production build
-npm run preview       # Alternative with npm
-```
-
-### Code Quality
-
-```bash
-pnpm check            # Run Svelte type checking
-npm run check         # Alternative with npm
-
+pnpm check            # Svelte type checking (svelte-check)
 pnpm format           # Format code with Prettier
-npm run format        # Alternative with npm
-
-pnpm lint             # Check code formatting
-npm run lint          # Alternative with npm
+pnpm lint             # Check formatting with Prettier (no writes)
 ```
+
+`pnpm run check`, `pnpm run lint`, and `pnpm run build` all run in CI on every pull
+request (`.github/workflows/ci.yml`, on Node 22 / pnpm 11).
 
 ## Local Development with Viam CLI
 
 To test the application with a live robot connection, use the Viam CLI proxy server:
 
 ```bash
-# Start the proxy server to connect local app to your robot
 viam module local-app-testing --app-url http://localhost:5173 --machine-id <machine-id>
 ```
 
-Replace `<machine-id>` with your robot's machine ID from the Viam platform.
-
-This command:
-
-1. Creates a secure tunnel between your local development server and the Viam platform
-2. Allows the web app to authenticate and connect to your robot
-3. Enables testing of the full setup workflow with real hardware
+Replace `<machine-id>` with your robot's machine ID from the Viam platform. The CLI stands
+up a proxy on `http://localhost:8012` that simulates the Viam app server, so it supplies
+the machine-scoped connection cookie the app reads. Browse to **localhost:8012**, not
+5173 — hitting the dev server directly has no cookie and no machine ID in the path, so the
+layout stops at "Connection Error".
 
 ### Prerequisites for Local Testing
 
@@ -125,19 +144,39 @@ The application configures motors in reverse assembly order to avoid ID conflict
 5. **Shoulder Lift** (servo 2) - Shoulder lift joint
 6. **Shoulder Pan** (servo 1) - Base rotation joint
 
-Each motor follows: discover → configure → verify pattern using sensor DoCommands.
+Per motor, `StepMotorSetup` issues `motor_setup_discover` then `motor_setup_assign_id`
+(which also sets the 1 Mbaud baudrate). Verification is not per motor: `StepMotorVerify`
+makes a single `motor_setup_verify` call covering all six.
 
 ## Calibration State Machine
 
 The SO-101 calibration sensor implements a state machine:
 
 - `idle` → `started` → `homing_position` → `range_recording` → `completed` → `idle`
-- UI tracks state transitions and provides appropriate controls
+  (`save_calibration` is what returns `completed` to `idle`); any failure sets `error`,
+  which `reset` clears back to `idle`
+- Step components read `calibration_state` out of the polled readings and gate their
+  controls on it
 - Real-time progress feedback during range recording phase
+
+## Debugging
+
+`src/lib/utils/logger.ts` buffers the last 1000 log entries in memory on the exported
+`logger` singleton and exposes them via `getLogs()`, `getLogsForLevel(level)`,
+`exportLogs()` (JSON string), and `clearLogs()`. Console output is narrower than the
+buffer: `warn` and `error` always print, `debug` and `info` only when `import.meta.env.DEV`.
+
+The buffer is currently unreachable. Nothing calls any of those four methods, they are not
+declared on the `Logger` interface in `types.ts`, and the singleton is not attached to
+`window` — so from a live browser console there is no way in short of a breakpoint or a
+temporary import. Treat it as groundwork for a debug panel that does not exist yet, not as
+a debugging tool you can use today.
 
 ## Safety Considerations
 
-- Prominent safety warnings throughout workflow
-- Clear torque disable notifications during manual positioning
-- Emergency abort functionality always available
-- Workspace safety requirements prominently displayed
+- `StepOverview` leads with a safety warning, workspace requirements, and a prerequisites
+  checklist before any command is sent
+- `StepCalibrationStart` warns that holding torque is about to be disabled, before the
+  manual-positioning steps; `StepCalibrationSave` says when torque is restored
+- `StepCalibrationStart` offers `abort`; the later calibration steps offer `reset`. The two
+  motor-setup steps offer neither — there is no single always-available abort control
