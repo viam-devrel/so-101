@@ -183,7 +183,10 @@ const (
 // so the mesh swings with the joint.
 func appendJawBranch(cfg *referenceframe.ModelConfigJSON, gripperType, meshDetail, parent string) error {
 	mountPose := spatialmath.Compose(toolFromGripperLink, gripperJointPose)
-	mountOrient, err := spatialmath.NewOrientationConfig(mountPose.Orientation())
+	// Encode as euler_angles, not the quaternion Compose hands back. Both parse identically in
+	// rdk, but the 3D viewer rendered the jaw branch wrong until this matched so101.json's
+	// encoding -- every orientation the arm ships is euler_angles.
+	mountOrient, err := spatialmath.NewOrientationConfig(mountPose.Orientation().EulerAngles())
 	if err != nil {
 		return fmt.Errorf("encoding the jaw mount orientation: %w", err)
 	}

@@ -1,6 +1,7 @@
 package geometry
 
 import (
+	"encoding/json"
 	"maps"
 	"math"
 	"slices"
@@ -339,6 +340,41 @@ func TestModelGeometriesMatchBuiltMeshes(t *testing.T) {
 				assert.Lessf(t, oriD, 1e-9,
 					"jaw=%.4f rad: jaw mesh orientation differs by %.3e rad between the two paths", theta, oriD)
 			}
+		})
+	}
+}
+
+// TestJawMountOrientationIsEuler pins the encoding, not the value. spatialmath.Compose returns a
+// *Quaternion, so NewOrientationConfig emits "quaternion" -- which rdk parses correctly but the
+// 3D viewer rendered wrong, splaying the jaw branch. Every orientation in so101.json is
+// euler_angles, and the arm renders correctly, so the gripper matches it.
+func TestJawMountOrientationIsEuler(t *testing.T) {
+	for _, gt := range []string{FollowerGripper, LeaderGripper} {
+		t.Run(gt, func(t *testing.T) {
+			m, err := BuildGripperModel(gt, LowDetail, "gripper", true)
+			require.NoError(t, err)
+
+			var raw struct {
+				Links []struct {
+					ID          string `json:"id"`
+					Orientation *struct {
+						Type string `json:"type"`
+					} `json:"orientation"`
+				} `json:"links"`
+			}
+			require.NoError(t, json.Unmarshal(m.ModelConfig().OriginalFile.Bytes, &raw))
+
+			var checked int
+			for _, l := range raw.Links {
+				if l.Orientation == nil {
+					continue
+				}
+				checked++
+				assert.Equalf(t, "euler_angles", l.Orientation.Type,
+					"link %q ships a %q orientation; the 3D viewer only renders euler_angles correctly",
+					l.ID, l.Orientation.Type)
+			}
+			assert.Positive(t, checked, "no link carried an orientation -- the guard checked nothing")
 		})
 	}
 }
