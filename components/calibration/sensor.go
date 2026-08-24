@@ -220,7 +220,7 @@ func NewSO101CalibrationSensor(
 		state:           StateIdle,
 		joints:          joints,
 		servoNames:      servoNames,
-		lastInstruction: "Ready to start calibration. Use DoCommand with 'start' to begin.",
+		lastInstruction: "Ready to start calibration.",
 	}
 
 	logger.Infof("SO-101 calibration sensor initialized for servos: %v", conf.ServoIDs)

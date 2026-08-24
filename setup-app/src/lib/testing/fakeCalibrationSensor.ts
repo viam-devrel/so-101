@@ -75,7 +75,7 @@ const EXPECTED_MOTOR_NAMES = [
 
 export class FakeCalibrationSensor {
 	private state: FakeCalibrationState = 'idle';
-	private instruction = "Ready to start calibration. Use DoCommand with 'start' to begin.";
+	private instruction = 'Ready to start calibration.';
 	private errorMsg = '';
 	private lastSaveError = '';
 	private recordingActive = false;

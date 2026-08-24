@@ -366,7 +366,7 @@ func (cs *so101CalibrationSensor) saveCalibration(ctx context.Context) (map[stri
 	// the fallback read when no file exists (controller.LoadCalibration).
 	if err := controller.SaveFullCalibrationToFile(cs.cfg.CalibrationFile, fullCalibration); err != nil {
 		cs.setState(StateCompleted, fmt.Sprintf(
-			"Failed to save calibration file: %v. Recorded ranges are unaffected -- retry save_calibration.", err))
+			"Failed to save calibration file: %v. Recorded ranges are unaffected -- saving again is safe.", err))
 		return map[string]any{"success": false}, err
 	}
 
@@ -378,7 +378,7 @@ func (cs *so101CalibrationSensor) saveCalibration(ctx context.Context) (map[stri
 		// Write min position limit
 		if err := cs.writeMinPositionLimit(ctx, servoID, joint.RangeMin); err != nil {
 			cs.setState(StateCompleted, fmt.Sprintf(
-				"Failed to write min position limit to servo %d: %v. The calibration file is already saved -- retry save_calibration to finish the servo registers.",
+				"Failed to write min position limit to servo %d: %v. The calibration file is already saved -- saving again finishes the servo registers.",
 				servoID, err))
 			return map[string]any{"success": false}, err
 		}
@@ -386,7 +386,7 @@ func (cs *so101CalibrationSensor) saveCalibration(ctx context.Context) (map[stri
 		// Write max position limit
 		if err := cs.writeMaxPositionLimit(ctx, servoID, joint.RangeMax); err != nil {
 			cs.setState(StateCompleted, fmt.Sprintf(
-				"Failed to write max position limit to servo %d: %v. The calibration file is already saved -- retry save_calibration to finish the servo registers.",
+				"Failed to write max position limit to servo %d: %v. The calibration file is already saved -- saving again finishes the servo registers.",
 				servoID, err))
 			return map[string]any{"success": false}, err
 		}
