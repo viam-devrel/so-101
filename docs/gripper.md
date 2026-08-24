@@ -132,6 +132,13 @@ register, since no call is left in flight to ask; against a remote arm running a
 module build with no `servo_moving` support, it reports `false` while the jaw is still
 travelling.
 
+The response's `position` echoes the clamped setpoint, not a measured position — under
+`wait: false` the jaw has not arrived yet. Use `{"get": true}` or `get_position` for feedback.
+
+Pacing is the caller's job. The module does not rate-limit writes, and the settle wait was
+the only thing bounding them: sustained max-rate writes contend with arm motion on the shared
+serial bus.
+
 The flag has no effect on the raw `servo_position` form, which never waited.
 
 `Open()` and `Grab()` always wait and offer no way to opt out: `Grab()` reads the position
