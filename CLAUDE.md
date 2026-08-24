@@ -228,7 +228,12 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
   regenerating them can't strand the TCP inside a finger. The `leader` gripper has no jaws, so
   its leaf offset is zero. The model is **0-DoF by default**: a jaw DoF would become a variable
   the motion planner may drive, and it means the frame-system collision meshes are frozen
-  closed while `Geometries()` keeps serving the live articulating jaw to the 3D viewer.
+  closed. **`Geometries()` does NOT feed the 3D viewer** — an earlier version of this note claimed
+  it did, and that claim is false. Verified on a live machine: `GetGeometries` correctly swings the
+  jaw the full 110° between `Grab` and `Open`, while the viewer does not move at all. The viewer
+  renders a gripper from `Kinematics()` (`robot/impl/local_robot.go:1362` takes the kinematics
+  branch and `continue`s, never calling `Geometries()`), so a 0-DoF model renders frozen no matter
+  what `Geometries()` reports.
   `TestGripperFrameResolvesToTCPInFrameSystem` asserts the end-to-end contract, which is also
   why users must **not** add a compensating `translation` to the gripper's `frame`. The simulated
   gripper's `articulated_jaw` config attribute opts into the 1-DoF version to measure exactly
@@ -455,6 +460,11 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
   plans and only 4%-20% of its range under obstruction, usually returning near its start
   (`TestPlannerJawTravel`). Do not assume an unconstrained joint will swing to its limits — and do
   not assume it will stay put either.
+- **The 3D viewer only renders `euler_angles` link orientations correctly.** `spatialmath.Compose`
+  returns a `*Quaternion`, so `NewOrientationConfig` emits `"type":"quaternion"` — which rdk parses
+  identically to euler, but which the viewer rendered wrong (the gripper's jaw branch splayed off
+  at a bad angle). Every orientation in `so101.json` is `euler_angles`. Convert with
+  `.Orientation().EulerAngles()` before encoding; `TestJawMountOrientationIsEuler` guards it.
 - **rdk rejects a joint input that exceeds a limit by even one ULP** (`input out of bounds`). A
   sweep computing `min + (range*i)/steps` overshoots by 2.22e-16 at `i == steps`, because `*` and
   `/` are left-associative. `GoToInputs` validates against a deliberately wide `jawLimitEpsilon`
