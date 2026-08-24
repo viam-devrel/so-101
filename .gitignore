@@ -39,3 +39,4 @@ docs/plans/
 
 # stray binary that `go build ./...` drops at the repo root (named for cmd/module)
 /module
+docs/superpowers/plans/
