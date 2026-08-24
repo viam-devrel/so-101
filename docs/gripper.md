@@ -60,6 +60,8 @@ with its axes drawn at the grasp point — no extra configuration and no placeho
 
 ## Communication
 
+The gripper owns no serial connection of its own: it asks the arm for its servo's live `Moving` state over [`servo_moving`](arm.md#servo-moving), and if the arm cannot answer — including a remote arm running an older module build that does not know the command — it logs at Debug and falls back to whether a gripper command is in flight, rather than returning an error.
+
 ## When the arm fails to build
 
 Because the arm is a required dependency, a gripper cannot start unless its arm starts. If the arm fails to configure, the gripper reports `dependency not ready` rather than coming up on its own. Worth knowing when diagnosing: the arm's startup check pings **all six** servos, so a dead *gripper* servo fails the arm, which in turn keeps the gripper down. Check the arm's logs first when a gripper will not configure.

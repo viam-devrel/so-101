@@ -91,6 +91,10 @@ type fakeServoArm struct {
 	percent      float64 // returned by servo_position
 	raw          int
 	doErr        error // returned for every non-capabilities command
+
+	moving         bool           // returned by servo_moving, unless movingResponse is set
+	movingResponse map[string]any // overrides the servo_moving response entirely, for shape tests
+	onServoMoving  func()         // called on a servo_moving command, before it is answered
 }
 
 func newFakeServoArm() *fakeServoArm {
@@ -110,12 +114,20 @@ func (f *fakeServoArm) DoCommand(_ context.Context, cmd map[string]any) (map[str
 	if cmd["command"] == servocmd.CmdServoCapabilities {
 		return map[string]any{"servo_commands": true, "servo_ids": f.capabilities}, nil
 	}
+	if cmd["command"] == servocmd.CmdServoMoving && f.onServoMoving != nil {
+		f.onServoMoving()
+	}
 	if f.doErr != nil {
 		return nil, f.doErr
 	}
 	switch cmd["command"] {
 	case servocmd.CmdServoPosition:
 		return map[string]any{"percent": f.percent, "raw": f.raw}, nil
+	case servocmd.CmdServoMoving:
+		if f.movingResponse != nil {
+			return f.movingResponse, nil
+		}
+		return map[string]any{"moving": f.moving}, nil
 	default:
 		return map[string]any{}, nil
 	}
@@ -232,6 +244,70 @@ func TestGripperStopIsScopedToItsOwnServo(t *testing.T) {
 
 	assert.Equal(t, []string{servocmd.CmdServoStop}, fa.issued())
 	assert.Equal(t, 6, fa.lastCommand(servocmd.CmdServoStop)["servo_id"])
+}
+
+// The atomic intent flag is a fast path: when set, IsMoving must return true without
+// sending any servo_moving DoCommand at all.
+func TestGripperIsMovingFastPathShortCircuits(t *testing.T) {
+	fa := newFakeServoArm()
+	g := newTestGripper(t, fa)
+	g.isMoving.Store(true)
+
+	moving, err := g.IsMoving(context.Background())
+	require.NoError(t, err)
+	assert.True(t, moving)
+	assert.Empty(t, fa.issued(), "fast path must not query the hardware")
+}
+
+func TestGripperIsMovingQueriesHardwareWhenFlagFalse(t *testing.T) {
+	for _, want := range []bool{true, false} {
+		fa := newFakeServoArm()
+		fa.moving = want
+		g := newTestGripper(t, fa)
+
+		moving, err := g.IsMoving(context.Background())
+		require.NoError(t, err)
+		assert.Equal(t, want, moving)
+		assert.Equal(t, []string{servocmd.CmdServoMoving}, fa.issued())
+	}
+}
+
+// A response missing "moving" entirely (e.g. an older module build that never wrote the
+// key) must not be silently read as "stopped".
+func TestGripperIsMovingFallsBackOnMissingKey(t *testing.T) {
+	fa := newFakeServoArm()
+	fa.movingResponse = map[string]any{}
+	g := newTestGripper(t, fa)
+
+	moving, err := g.IsMoving(context.Background())
+	require.NoError(t, err)
+	assert.False(t, moving, "flag is false, so fallback reports not-moving")
+}
+
+// A remote arm on an older module build returns "unknown servo command" for servo_moving;
+// IsMoving must fall back to the intent flag rather than fail outright.
+func TestGripperIsMovingFallsBackOnUnknownCommandError(t *testing.T) {
+	fa := newFakeServoArm()
+	fa.doErr = errors.New("unknown servo command: servo_moving")
+	g := newTestGripper(t, fa)
+
+	moving, err := g.IsMoving(context.Background())
+	require.NoError(t, err)
+	assert.False(t, moving)
+}
+
+// The fallback's two Load()s are separated by a full DoCommand round trip, so a concurrent
+// Open() can legitimately flip the flag between them. This pins that re-read: the hook flips
+// the flag mid-round-trip, so a value cached before the call would wrongly report false.
+func TestGripperIsMovingFallbackReReadsFlagAfterRoundTrip(t *testing.T) {
+	fa := newFakeServoArm()
+	fa.doErr = errors.New("unknown servo command: servo_moving")
+	g := newTestGripper(t, fa)
+	fa.onServoMoving = func() { g.isMoving.Store(true) }
+
+	moving, err := g.IsMoving(context.Background())
+	require.NoError(t, err)
+	assert.True(t, moving, "fallback must re-read the flag, not a value cached before the round trip")
 }
 
 func TestGripperGetPositionReturnsPercent(t *testing.T) {

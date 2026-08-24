@@ -91,6 +91,63 @@ func TestServoPresentReportsConfiguredServos(t *testing.T) {
 	assert.False(t, h.ServoPresent(9), "motorSetupVerify needs absent-vs-unresponsive")
 }
 
+func TestAnyServoMovingReportsFalseWhenAllStopped(t *testing.T) {
+	h := testHandle(t, testfake.NewFakeTransport())
+	moving, err := h.AnyServoMoving(context.Background(), []int{1, 2, 3})
+	require.NoError(t, err)
+	assert.False(t, moving)
+}
+
+func TestAnyServoMovingReportsTrueWhenOneIsMoving(t *testing.T) {
+	ft := testfake.NewFakeTransport()
+	ft.SetRegister(2, feetech.RegMoving.Address, []byte{1})
+	h := testHandle(t, ft)
+
+	moving, err := h.AnyServoMoving(context.Background(), []int{1, 2, 3})
+	require.NoError(t, err)
+	assert.True(t, moving)
+}
+
+func TestWaitForServosToStopReturnsOnceAllStopped(t *testing.T) {
+	h := testHandle(t, testfake.NewFakeTransport())
+	err := h.WaitForServosToStop(context.Background(), []int{1, 2}, 200)
+	require.NoError(t, err)
+}
+
+func TestWaitForServosToStopTimesOutWithoutError(t *testing.T) {
+	ft := testfake.NewFakeTransport()
+	ft.SetRegister(1, feetech.RegMoving.Address, []byte{1})
+	h := testHandle(t, ft)
+
+	err := h.WaitForServosToStop(context.Background(), []int{1}, 60)
+	assert.NoError(t, err, "a still-moving servo must time out best-effort, not fail")
+}
+
+func TestWaitForServosToStopHonorsContextCancellation(t *testing.T) {
+	ft := testfake.NewFakeTransport()
+	ft.SetRegister(1, feetech.RegMoving.Address, []byte{1})
+	h := testHandle(t, ft)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := h.WaitForServosToStop(ctx, []int{1}, 5000)
+	assert.ErrorIs(t, err, context.Canceled)
+}
+
+func TestWaitForServosToStopFailsFastWhileDisconnected(t *testing.T) {
+	h := testHandle(t, testfake.NewFakeTransport())
+	h.entry.session.Store(nil)
+
+	err := h.WaitForServosToStop(context.Background(), []int{1}, 200)
+	assert.ErrorIs(t, err, ErrPortDisconnected)
+}
+
+func TestWaitForServosToStopIgnoresIDsNotOnTheBus(t *testing.T) {
+	h := testHandle(t, testfake.NewFakeTransport())
+	err := h.WaitForServosToStop(context.Background(), []int{1, 42}, 200)
+	require.NoError(t, err)
+}
+
 func TestHandleOperationsFailFastWhileDisconnected(t *testing.T) {
 	h := testHandle(t, testfake.NewFakeTransport())
 	h.entry.session.Store(nil)

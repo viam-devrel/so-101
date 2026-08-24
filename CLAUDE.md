@@ -237,6 +237,26 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
   each joint's speed and acceleration are scaled by its share of the travel so all joints finish
   together. The hardware arm used to move each joint at the same configured speed independently,
   so longer-travel joints finished later (measured on hardware as a 260-520 ms spread).
+- **Polling `AnyServoMoving` cannot corrupt or interleave with a concurrent position
+  read/write, but it does queue behind (or ahead of) one.** `entry.busMu` in
+  `internal/controller/bus_session.go` only arbitrates writes vs. reads (`withSessionRead`
+  takes `RLock`, so two concurrent reads are NOT serialized by `busMu` itself) -- the real
+  exclusion is one level down: every `*feetech.Bus` method takes the bus's own mutex for a
+  transaction's whole request+response round trip, and `enforceCommandGap`'s sleep (default
+  1ms, never overridden here -- see `registry.go`'s `feetech.BusConfig` literal) runs *while
+  that lock is held*. So a queued caller pays the ~1ms gap of whatever transaction is ahead of
+  it, not just its own -- both transactions are dominated by that fixed gap, not by payload
+  size. Measured on hardware (300 samples @ 1Mbaud, 3 runs, since removed with the
+  throwaway test that produced them): `SyncReadPositions(6)` 1.48-1.60ms mean,
+  `AnyServoMoving(5)` 1.27-1.30ms, and the same 5 Moving reads issued one per servo (what
+  `WaitForServosToStop` did before batching) ~5.4-5.7ms. A 50Hz poll costs a concurrent
+  position read only ~0-100us mean -- but its p95 goes ~1.6ms -> ~2.7ms, because a read that
+  *does* collide pays a whole extra transaction, so judge this by the tail and not the mean.
+  An unthrottled poller costs +1.34-1.49ms mean, i.e. one full transaction: the degradation is
+  linear and bounded, not pathological. Seen once in ~6 runs: under *sustained max-rate*
+  polling a position read failed outright (nothing retries), the same transient that would
+  abort a move from `WaitForServosToStop`'s own poll -- another reason not to poll `IsMoving`
+  in a tight loop.
 - **`Speed: 0` means MAXIMUM, not stopped**, and **`Acc: 0` means UNLIMITED, not zero** — both
   Feetech register sentinels are the opposite of what they look like, and both have already
   caused real bugs in this project. A short-travel joint scaled down by a small `k` can round

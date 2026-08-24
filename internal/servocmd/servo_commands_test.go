@@ -151,6 +151,51 @@ func TestServoWaitStopIsScopedToOneServo(t *testing.T) {
 	assert.Equal(t, 1500, ops.WaitedMs)
 }
 
+func TestServoMovingReturnsUnderlyingState(t *testing.T) {
+	for _, want := range []bool{true, false} {
+		ops := &testfake.FakeServoOps{Moving: want}
+		res, err := HandleServoCommand(context.Background(),
+			map[string]any{"command": CmdServoMoving, "servo_id": 6}, ops, armServos)
+		require.NoError(t, err)
+		assert.Equal(t, want, res["moving"])
+		assert.Equal(t, []int{6}, ops.MovingIDs)
+	}
+}
+
+func TestServoMovingRejectsArmOwnedServo(t *testing.T) {
+	for _, id := range armServos {
+		ops := &testfake.FakeServoOps{}
+		_, err := HandleServoCommand(context.Background(),
+			map[string]any{"command": CmdServoMoving, "servo_id": id}, ops, armServos)
+		require.Error(t, err, "servo %d belongs to the arm", id)
+	}
+}
+
+func TestServoMovingRequiresServoID(t *testing.T) {
+	ops := &testfake.FakeServoOps{}
+	_, err := HandleServoCommand(context.Background(),
+		map[string]any{"command": CmdServoMoving}, ops, armServos)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "servo_id")
+}
+
+func TestServoMovingCoercesFloat64ServoID(t *testing.T) {
+	ops := &testfake.FakeServoOps{Moving: true}
+	res, err := HandleServoCommand(context.Background(),
+		map[string]any{"command": CmdServoMoving, "servo_id": float64(6)}, ops, armServos)
+	require.NoError(t, err)
+	assert.Equal(t, true, res["moving"])
+	assert.Equal(t, []int{6}, ops.MovingIDs)
+}
+
+func TestServoMovingPropagatesOpsError(t *testing.T) {
+	boom := errors.New("bus is on fire")
+	ops := &testfake.FakeServoOps{MovingErr: boom}
+	_, err := HandleServoCommand(context.Background(),
+		map[string]any{"command": CmdServoMoving, "servo_id": 6}, ops, armServos)
+	require.ErrorIs(t, err, boom)
+}
+
 func TestServoCommandPropagatesOpsError(t *testing.T) {
 	boom := errors.New("bus is on fire")
 	ops := &testfake.FakeServoOps{MoveErr: boom}

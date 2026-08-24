@@ -69,7 +69,11 @@ The hardware arm scales each joint's speed and acceleration by its share of the 
 
 `MoveThroughJointPositions` streams waypoints back-to-back: intermediate waypoints are commanded without waiting for the arm to settle (flythrough), and the arm waits to stop only after the **final** waypoint. As a result, intermediate waypoints are not guaranteed stop-points. `GoToInputs` shares this same streaming path.
 
-`IsMoving()` reports whether a move call is currently in progress. On the internal safety-timeout edge case (a move times out waiting for servos to settle), `IsMoving` may briefly differ from whether the servos are physically moving.
+`IsMoving()` reports the servos' own `Moving` register, not just whether a move call is in progress: it stays `true` while an interrupted or timed-out move is still settling, and it is the only signal available on the non-blocking (`wait: false`) path, where no call is left in flight to ask. While a move call **is** in flight, it short-circuits to `true` without touching the bus at all.
+
+**It is not a hand-motion detector.** With torque disabled (`set_torque {"enable": false}`) the servos execute no goal command, so the register reads `0` and `IsMoving()` reports `false` while the arm is back-driven by hand. [Manual mode](#manual-mode) is the opposite case: it keeps torque enabled and chases the hand with real goal-position writes, so the servos are genuinely executing goals — `IsMoving()` now reports `true` intermittently throughout a hand-guided session, where it previously reported `false` the whole time.
+
+Each query costs a serial transaction (~1.3ms measured); polling it in a tight loop competes with position reads and writes on the same bus.
 
 `Stop()` does not currently interrupt an in-progress joint move: a move blocks until the servos settle (or the internal safety timeout elapses), so a `Stop()` issued mid-move takes effect only once that move returns. Interrupting in-flight motion is a planned follow-up.
 
@@ -454,6 +458,25 @@ Halt a single servo, leaving every other servo on the bus untouched:
 {
   "command": "servo_stop",
   "servo_id": 6
+}
+```
+
+### Servo Moving
+
+Report whether a single servo is currently moving, read from its own `Moving` register — scoped to that servo, so it will not report `true` for arm motion:
+
+```json
+{
+  "command": "servo_moving",
+  "servo_id": 6
+}
+```
+
+Response:
+
+```json
+{
+  "moving": false
 }
 ```
 
