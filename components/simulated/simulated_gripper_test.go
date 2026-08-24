@@ -48,6 +48,7 @@ func newTestSimGripper(t *testing.T, gripperType, meshDetail string) gripper.Gri
 	}
 	g, err := newSimulatedSO101Gripper(context.Background(), nil, conf, logging.NewTestLogger(t))
 	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, g.Close(context.Background())) })
 	return g
 }
 
@@ -217,4 +218,30 @@ func TestArticulatedJawConfig(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, in, 1)
 	})
+}
+
+// TestSetPositionStaysNonBlocking is a regression guard for the teleop loop: teleop.go issues a
+// set_position DoCommand every tick and depends on it returning before the jaw arrives. Open and
+// Grab block; set_position must not.
+func TestSetPositionStaysNonBlocking(t *testing.T) {
+	ctx := context.Background()
+	g := newTestSimGripper(t, geometry.FollowerGripper, geometry.LowDetail)
+
+	_, err := g.Grab(ctx, nil) // start closed
+	require.NoError(t, err)
+	start := time.Now()
+	_, err = g.DoCommand(ctx, map[string]interface{}{
+		"command": "set_position", "percentage": 100.0,
+	})
+	require.NoError(t, err)
+	elapsed := time.Since(start)
+
+	// A full 0->100 sweep takes ~500ms at gripperTravelPctPerSec. Returning in under 50ms proves
+	// we did not wait for arrival.
+	assert.Lessf(t, elapsed, 50*time.Millisecond,
+		"set_position blocked for %v; the teleop loop ticks faster than that", elapsed)
+
+	moving, err := g.IsMoving(ctx)
+	require.NoError(t, err)
+	assert.True(t, moving, "set_position should have started the jaw moving")
 }

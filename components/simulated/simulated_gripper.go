@@ -172,13 +172,16 @@ func (g *simulatedSO101Gripper) updateForTime(now time.Time) {
 	}
 }
 
-// moveTo sets the target opening and blocks until the jaw reaches it, the arm is closed,
-// or the context is canceled.
-func (g *simulatedSO101Gripper) moveTo(ctx context.Context, pct float64) error {
+// setTarget sets the target opening without waiting. set_position uses this: the teleop loop
+// issues one every tick and must not block.
+func (g *simulatedSO101Gripper) setTarget(pct float64) {
 	g.mu.Lock()
+	defer g.mu.Unlock()
 	g.targetPct = pct
-	g.mu.Unlock()
+}
 
+// awaitArrival blocks until the jaw reaches its target, the gripper is closed, or ctx is done.
+func (g *simulatedSO101Gripper) awaitArrival(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
@@ -195,6 +198,12 @@ func (g *simulatedSO101Gripper) moveTo(ctx context.Context, pct float64) error {
 			time.Sleep(time.Millisecond)
 		}
 	}
+}
+
+// moveTo sets the target and blocks until the jaw reaches it. Open, Grab and GoToInputs use it.
+func (g *simulatedSO101Gripper) moveTo(ctx context.Context, pct float64) error {
+	g.setTarget(pct)
+	return g.awaitArrival(ctx)
 }
 
 func (g *simulatedSO101Gripper) Name() resource.Name {
@@ -261,9 +270,7 @@ func (g *simulatedSO101Gripper) DoCommand(
 			return nil, fmt.Errorf("set_position requires a numeric 'percentage'")
 		}
 		clamped := math.Max(0, math.Min(100, pct))
-		g.mu.Lock()
-		g.targetPct = clamped
-		g.mu.Unlock()
+		g.setTarget(clamped)
 		return map[string]interface{}{"target_percentage": clamped}, nil
 	case "get_position":
 		g.mu.Lock()
