@@ -1,4 +1,10 @@
 <script lang="ts">
+	// Usage: <Button variant="primary" fullWidth loading={saving} onclick={save}>Save</Button>
+	//
+	// fullWidth is the canonical way to make a button span its container.
+	// className still accepts a literal "w-full" for callers that predate
+	// fullWidth (e.g. SensorConfigForm.svelte, WorkflowSelector.svelte) — a
+	// later wave should migrate those to fullWidth and drop the className.
 	import LoadingSpinner from './LoadingSpinner.svelte';
 
 	interface Props {
@@ -6,6 +12,7 @@
 		size?: 'sm' | 'md' | 'lg';
 		disabled?: boolean;
 		loading?: boolean;
+		/** Preferred way to span the button's container; see file header. */
 		fullWidth?: boolean;
 		type?: 'button' | 'submit' | 'reset';
 		onclick?: () => void;
@@ -55,12 +62,12 @@
 	}
 </script>
 
-<button {type} class={buttonClass} disabled={isDisabled} onclick={handleClick}>
+<button {type} class={buttonClass} disabled={isDisabled} aria-busy={loading} onclick={handleClick}>
 	{#if loading}
 		<LoadingSpinner
 			size="sm"
 			color={variant === 'primary' || variant === 'success' || variant === 'danger'
-				? 'gray'
+				? 'white'
 				: 'blue'}
 			inline
 		/>
