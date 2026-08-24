@@ -2,6 +2,7 @@ package simulated
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -9,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.viam.com/rdk/components/gripper"
 	"go.viam.com/rdk/logging"
+	"go.viam.com/rdk/referenceframe"
 	"go.viam.com/rdk/resource"
 	"go.viam.com/rdk/spatialmath"
 
@@ -173,4 +175,46 @@ func TestSimulatedGripperOpenReachesMaxAngle(t *testing.T) {
 
 	assert.True(t, spatialmath.PoseAlmostEqual(openGeoms[1].Pose(), wantGeoms[1].Pose()),
 		"open moving-part pose %v, want %v (fully open)", openGeoms[1].Pose(), wantGeoms[1].Pose())
+}
+
+// TestArticulatedJawConfig covers the flag end to end. The ErrUnsupported half matters as much
+// as the enabled half: robot/framesystem's CurrentInputs walks every frame with DoF and hard-
+// errors if the component is not InputEnabled, so a 1-DoF model with unwired inputs would break
+// the WHOLE machine's frame system, arm moves included.
+func TestArticulatedJawConfig(t *testing.T) {
+	ctx := context.Background()
+
+	newGripper := func(t *testing.T, articulated bool) gripper.Gripper {
+		t.Helper()
+		g, err := newSimulatedSO101Gripper(ctx, nil, resource.Config{
+			Name:                "sim-gripper",
+			ConvertedAttributes: &SO101SimulatedGripperConfig{ArticulatedJaw: articulated},
+		}, logging.NewTestLogger(t))
+		require.NoError(t, err)
+		t.Cleanup(func() { require.NoError(t, g.Close(ctx)) })
+		return g
+	}
+
+	t.Run("default is static", func(t *testing.T) {
+		g := newGripper(t, false)
+		m, err := g.Kinematics(ctx)
+		require.NoError(t, err)
+		assert.Empty(t, m.DoF(), "articulated_jaw must default to false")
+
+		_, err = g.CurrentInputs(ctx)
+		assert.ErrorIs(t, err, errors.ErrUnsupported)
+		assert.ErrorIs(t, g.GoToInputs(ctx, []referenceframe.Input{0}), errors.ErrUnsupported)
+	})
+
+	t.Run("articulated", func(t *testing.T) {
+		t.Skip("wired in Task 8")
+		g := newGripper(t, true)
+		m, err := g.Kinematics(ctx)
+		require.NoError(t, err)
+		require.Len(t, m.DoF(), 1)
+
+		in, err := g.CurrentInputs(ctx)
+		require.NoError(t, err)
+		require.Len(t, in, 1)
+	})
 }

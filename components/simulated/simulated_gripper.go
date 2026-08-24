@@ -47,6 +47,12 @@ type SO101SimulatedGripperConfig struct {
 	// MeshDetail selects the gripper mesh resolution: "low" (decimated, the
 	// default) or "high" (full resolution).
 	MeshDetail string `json:"mesh_detail,omitempty"`
+
+	// ArticulatedJaw gives the gripper a 1-DoF revolute jaw joint in its kinematic model and
+	// makes it InputEnabled, so the motion planner sees the jaw as a variable it may drive.
+	// Off by default: the jaw does not affect the TCP, so the planner gets a degree of freedom
+	// that changes only collision geometry. See docs/simulated.md.
+	ArticulatedJaw bool `json:"articulated_jaw,omitempty"`
 }
 
 // Validate ensures the config is valid.
@@ -68,10 +74,12 @@ func (cfg *SO101SimulatedGripperConfig) Validate(path string) ([]string, []strin
 type simulatedSO101Gripper struct {
 	resource.AlwaysRebuild
 
-	name        resource.Name
-	gripperType string
-	meshDetail  string
-	model       referenceframe.Model
+	name           resource.Name
+	gripperType    string
+	meshDetail     string
+	articulatedJaw bool
+	model          referenceframe.Model
+	logger         logging.Logger
 
 	// lifetime management
 	closed     atomic.Bool
@@ -104,20 +112,22 @@ func newSimulatedSO101Gripper(
 		meshDetail = geometry.LowDetail
 	}
 
-	model, err := geometry.BuildGripperModel(gripperType, meshDetail, rawConf.ResourceName().ShortName(), false)
+	model, err := geometry.BuildGripperModel(gripperType, meshDetail, rawConf.ResourceName().ShortName(), conf.ArticulatedJaw)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build gripper kinematic model: %w", err)
 	}
 
 	cancelCtx, cancelFunc := context.WithCancel(context.Background())
 	g := &simulatedSO101Gripper{
-		name:        rawConf.ResourceName(),
-		gripperType: gripperType,
-		meshDetail:  meshDetail,
-		model:       model,
-		cancelCtx:   cancelCtx,
-		cancelFunc:  cancelFunc,
-		lastUpdated: time.Now(),
+		name:           rawConf.ResourceName(),
+		gripperType:    gripperType,
+		meshDetail:     meshDetail,
+		articulatedJaw: conf.ArticulatedJaw,
+		model:          model,
+		logger:         logger,
+		cancelCtx:      cancelCtx,
+		cancelFunc:     cancelFunc,
+		lastUpdated:    time.Now(),
 	}
 	g.startMotionSimulation()
 	return g, nil
