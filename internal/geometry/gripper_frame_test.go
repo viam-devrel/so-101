@@ -226,3 +226,67 @@ func TestJawAngleBijection(t *testing.T) {
 	assert.InDelta(t, 0.0, JawPctFromRadians(GripperJointMin-1e-6), 1e-12)
 	assert.InDelta(t, 100.0, JawPctFromRadians(GripperJointMax+1e-6), 1e-12)
 }
+
+// TestArticulatedGripperModelShape is the core contract of the jaw-DoF experiment. Note the
+// limits assertion: JointConfig.Min/Max are DEGREES in SVA JSON (frame_json.go:152 applies
+// DegToRad), while GripperJointMin/Max are radians. Asserting the PARSED limits is what
+// catches a missing conversion -- checking the written values would not.
+func TestArticulatedGripperModelShape(t *testing.T) {
+	for _, gt := range []string{FollowerGripper, LeaderGripper} {
+		t.Run(gt, func(t *testing.T) {
+			m, err := BuildGripperModel(gt, LowDetail, "gripper", true)
+			require.NoError(t, err)
+
+			dof := m.DoF()
+			require.Len(t, dof, 1, "articulated gripper must expose exactly one jaw DoF")
+			assert.InDeltaf(t, GripperJointMin, dof[0].Min, 1e-9,
+				"jaw lower limit %v rad; degrees/radians conversion is wrong", dof[0].Min)
+			assert.InDeltaf(t, GripperJointMax, dof[0].Max, 1e-9,
+				"jaw upper limit %v rad; degrees/radians conversion is wrong", dof[0].Max)
+
+			// The whole point of output_frames: the TCP must not move with the jaw.
+			want := GripperTCPPose.Point()
+			if gt == LeaderGripper {
+				want = r3.Vector{}
+			}
+			for _, theta := range []float64{GripperJointMin, 0, GripperJointMax} {
+				p, err := m.Transform([]referenceframe.Input{theta})
+				require.NoError(t, err)
+				assert.Lessf(t, p.Point().Sub(want).Norm(), 1e-9,
+					"TCP moved to %v at jaw=%.4f rad; it must be invariant", p.Point(), theta)
+			}
+
+			// The jaw mesh, by contrast, must move. Note WHAT is asserted here:
+			// gripperMovingVisualPose is a pure +Z translation and the joint rotates about
+			// local +Z, so Rz(theta) leaves the mesh's pose ORIGIN exactly where it was --
+			// comparing Pose().Point() would compare two identical points and can never pass.
+			// The jaw swings because the mesh VERTICES are offset from that origin, so compare
+			// the transformed vertices (and the orientation, which does change).
+			closed, err := m.Geometries([]referenceframe.Input{GripperJointMin})
+			require.NoError(t, err)
+			opened, err := m.Geometries([]referenceframe.Input{GripperJointMax})
+			require.NoError(t, err)
+			cg := closed.GeometryByName("gripper:gripper_moving")
+			og := opened.GeometryByName("gripper:gripper_moving")
+			require.NotNil(t, cg)
+			require.NotNil(t, og)
+
+			oriD := spatialmath.QuatToR3AA(
+				spatialmath.OrientationBetween(cg.Pose().Orientation(), og.Pose().Orientation()).Quaternion()).Norm()
+			assert.InDeltaf(t, GripperJointMax-GripperJointMin, oriD, 1e-6,
+				"jaw rotated %.4f rad between the limits, want the full %.4f rad range",
+				oriD, GripperJointMax-GripperJointMin)
+
+			// meshWorldPoints already exists at gripper_frame_test.go:17.
+			cp := meshWorldPoints(cg.(*spatialmath.Mesh))
+			op := meshWorldPoints(og.(*spatialmath.Mesh))
+			require.Equal(t, len(cp), len(op))
+			var maxMoved float64
+			for i := range cp {
+				maxMoved = math.Max(maxMoved, cp[i].Sub(op[i]).Norm())
+			}
+			assert.Greaterf(t, maxMoved, 1.0,
+				"no jaw vertex moved more than %.4fmm between the closed and open limits", maxMoved)
+		})
+	}
+}
