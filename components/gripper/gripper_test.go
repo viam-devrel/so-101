@@ -425,9 +425,9 @@ func TestGrabWaitsForTheJawToSettle(t *testing.T) {
 }
 
 // A caller streaming setpoints faster than the jaw travels passes "wait": false, and gets
-// the move commanded with no settle wait behind it. The flag rides in the command map
-// rather than an extra argument because Gripper.DoCommand has no extra parameter.
-func TestGripperWriteCommandsHonorTheWaitFlag(t *testing.T) {
+// the move commanded with no settle wait behind it. The raw servo_position form is absent
+// here on purpose: it never waited, so there is nothing for the flag to gate.
+func TestGripperPercentWritesHonorTheWaitFlag(t *testing.T) {
 	cases := []struct {
 		name     string
 		cmd      map[string]any
@@ -454,9 +454,9 @@ func TestGripperWriteCommandsHonorTheWaitFlag(t *testing.T) {
 			wantWait: true,
 		},
 		{
-			// A JSON string sneaking through must not silently disable the wait on the
-			// paths that need it, so a non-bool falls back to waiting.
-			name:     "a non-bool wait falls back to waiting",
+			// A JSON string must not silently disable the wait. This also catches a
+			// parser that branches on key presence rather than a bool type assertion.
+			name:     "a non-bool wait on the set shorthand falls back to waiting",
 			cmd:      map[string]any{"set": 42.0, "wait": "false"},
 			wantWait: true,
 		},

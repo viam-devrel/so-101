@@ -113,9 +113,9 @@ A raw servo position is also accepted, and is forwarded to the arm — which own
 }
 ```
 
-Both percentage write forms accept an optional `wait` key. It defaults to `true`, which
-blocks until the jaw stops moving (up to 2 seconds). Pass `false` to return as soon as the
-move is commanded:
+Both percentage write forms — `set_position` above and the `set` shorthand below — accept an
+optional `wait` key. It defaults to `true`, which blocks until the jaw stops moving (up to 2
+seconds). Pass `false` to return as soon as the move is commanded:
 
 ```json
 {
