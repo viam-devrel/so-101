@@ -1,7 +1,8 @@
 <script lang="ts">
-	import { getContext } from 'svelte';
 	import BaseWizard from './BaseWizard.svelte';
 	import StepOverview from './steps/StepOverview.svelte';
+	import StepMotorSetup from './steps/StepMotorSetup.svelte';
+	import StepMotorVerify from './steps/StepMotorVerify.svelte';
 	import StepCalibrationStart from './steps/StepCalibrationStart.svelte';
 	import StepCalibrationHoming from './steps/StepCalibrationHoming.svelte';
 	import StepCalibrationRecording from './steps/StepCalibrationRecording.svelte';
@@ -10,41 +11,36 @@
 	import type {
 		CalibrationReadings,
 		WorkflowStep,
+		WorkflowType,
 		MotorSetupResult,
-		SensorContext,
 		TorqueOutcome
 	} from '$lib/types';
 	import { logger } from '$lib/utils/logger';
-	import { canAdvanceFromStep } from '$lib/wizardProgress';
+	import { canAdvanceFromStep, WORKFLOW_DEFINITIONS } from '$lib/wizardProgress';
+	import { useSensor } from '$lib/sensorContext';
 
-	// getContext is only valid at component init, so call it once here (not inside $derived).
-	const sensorContext = getContext<SensorContext>('sensor');
+	interface Props {
+		workflow: WorkflowType;
+	}
 
-	// Calibration Workflow Configuration
-	const WORKFLOW_STEPS: WorkflowStep[] = [
-		'overview',
-		'calibration_start',
-		'calibration_homing',
-		'calibration_recording',
-		'calibration_save',
-		'complete'
-	];
+	let { workflow }: Props = $props();
 
-	const STEP_TITLES = {
-		overview: 'Overview & Safety',
-		calibration_start: 'Start Calibration',
-		calibration_homing: 'Set Homing Position',
-		calibration_recording: 'Record Ranges',
-		calibration_save: 'Save Calibration',
-		complete: 'Calibration Complete'
-	};
+	// useSensor() calls getContext internally, but does so synchronously here at component
+	// init -- never inside $derived -- which is the only timing getContext allows.
+	const sensorContext = useSensor();
+
+	// This workflow's step list/titles. Read once at init: the caller remounts this
+	// component (via a key on `workflow`, since a route param change alone doesn't
+	// remount a Svelte component) whenever the workflow changes, so this never goes stale.
+	const { steps: WORKFLOW_STEPS, stepTitles: STEP_TITLES } = WORKFLOW_DEFINITIONS[workflow];
 
 	// Wizard state management
 	let currentStep = $state(0);
 	let error = $state<string | null>(null);
 	let motorSetupResults = $state<Record<string, MotorSetupResult>>({});
 	// Explicit per-step completion, independent of any readings-derived signal -- see
-	// wizardProgress.ts's canAdvanceFromStep.
+	// wizardProgress.ts's canAdvanceFromStep. Always the full step set regardless of which
+	// steps this workflow uses, so the StepProps contract stays uniform across workflows.
 	let stepCompletion = $state<Record<WorkflowStep, boolean>>({
 		overview: false,
 		motor_setup: false,
@@ -56,6 +52,8 @@
 		complete: false
 	});
 	// Outcome of the last save_calibration's torque re-enable. See types.ts's TorqueOutcome.
+	// Unused by workflows with no calibration_save step, but part of the shared StepProps
+	// contract.
 	let torqueOutcome = $state<TorqueOutcome | null>(null);
 
 	// Navigation functions
@@ -141,8 +139,7 @@
 		sensorClient: sensorContext.sensorClient,
 		sensorReadings: sensorContext.sensorReadings,
 		doCommand: sensorContext.doCommand,
-		sendCommand:
-			sensorContext.sendCommand || (() => Promise.reject(new Error('Send command not available'))),
+		sendCommand: sensorContext.sendCommand,
 		error,
 		setError,
 		clearError,
@@ -176,7 +173,7 @@
 </script>
 
 <BaseWizard
-	workflowType="calibration"
+	workflowType={workflow}
 	steps={WORKFLOW_STEPS}
 	stepTitles={STEP_TITLES}
 	{currentStep}
@@ -188,7 +185,11 @@
 	onClearError={clearError}
 >
 	{#if currentStepName === 'overview'}
-		<StepOverview {...stepProps} workflowType="calibration" />
+		<StepOverview {...stepProps} workflowType={workflow} />
+	{:else if currentStepName === 'motor_setup'}
+		<StepMotorSetup {...stepProps} />
+	{:else if currentStepName === 'motor_verify'}
+		<StepMotorVerify {...stepProps} />
 	{:else if currentStepName === 'calibration_start'}
 		<StepCalibrationStart {...stepProps} />
 	{:else if currentStepName === 'calibration_homing'}
@@ -198,6 +199,6 @@
 	{:else if currentStepName === 'calibration_save'}
 		<StepCalibrationSave {...stepProps} />
 	{:else if currentStepName === 'complete'}
-		<StepComplete {...stepProps} workflowType="calibration" />
+		<StepComplete {...stepProps} workflowType={workflow} />
 	{/if}
 </BaseWizard>

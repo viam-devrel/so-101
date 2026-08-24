@@ -1,5 +1,68 @@
 import { MOTOR_SETUP_NAMES } from './constants';
-import type { CalibrationReadings, MotorSetupResult, WorkflowStep } from './types';
+import type { CalibrationReadings, MotorSetupResult, WorkflowStep, WorkflowType } from './types';
+
+// Per-workflow step list + display titles, one place for what used to be duplicated
+// (byte-for-byte, apart from these two tables) across CalibrationWizard/MotorSetupWizard/
+// FullSetupWizard. Lives here rather than in a new file because this module is already the
+// per-step source of truth (canAdvanceFromStep below) -- a step name that isn't in a
+// workflow's list can't be reached, and stepTitles is a straight lookup keyed by the same
+// WorkflowStep names CAN_ADVANCE is keyed by.
+export interface WorkflowDefinition {
+	steps: WorkflowStep[];
+	stepTitles: Record<string, string>;
+}
+
+export const WORKFLOW_DEFINITIONS: Record<WorkflowType, WorkflowDefinition> = {
+	'motor-setup': {
+		steps: ['overview', 'motor_setup', 'motor_verify', 'complete'],
+		stepTitles: {
+			overview: 'Overview & Safety',
+			motor_setup: 'Motor Setup',
+			motor_verify: 'Motor Verification',
+			complete: 'Setup Complete'
+		}
+	},
+	calibration: {
+		steps: [
+			'overview',
+			'calibration_start',
+			'calibration_homing',
+			'calibration_recording',
+			'calibration_save',
+			'complete'
+		],
+		stepTitles: {
+			overview: 'Overview & Safety',
+			calibration_start: 'Start Calibration',
+			calibration_homing: 'Set Homing Position',
+			calibration_recording: 'Record Ranges',
+			calibration_save: 'Save Calibration',
+			complete: 'Calibration Complete'
+		}
+	},
+	'full-setup': {
+		steps: [
+			'overview',
+			'motor_setup',
+			'motor_verify',
+			'calibration_start',
+			'calibration_homing',
+			'calibration_recording',
+			'calibration_save',
+			'complete'
+		],
+		stepTitles: {
+			overview: 'Overview & Safety',
+			motor_setup: 'Motor Setup',
+			motor_verify: 'Motor Verification',
+			calibration_start: 'Start Calibration',
+			calibration_homing: 'Set Homing Position',
+			calibration_recording: 'Record Ranges',
+			calibration_save: 'Save Calibration',
+			complete: 'Setup Complete'
+		}
+	}
+};
 
 // The module's linear calibration progression (workflow.go). 'error' is deliberately absent:
 // it is off the line, so every calibration gate closes there and the step's own Reset button

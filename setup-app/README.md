@@ -20,9 +20,9 @@ machine. It is bundled into `module.tar.gz` and served as a Viam App.
 
 - **Client-side only**: SSR disabled, runs entirely in browser
 - **Cookie-based authentication**: connection details come from a per-machine cookie
-- **Three independent workflows**, each its own route under `src/routes/workflows/`:
-  motor setup (4 steps), calibration (6 steps), and full setup (8 steps, motor setup +
-  calibration back to back)
+- **Three workflows**, all served by one dynamic route
+  (`src/routes/workflows/[workflow]/`): motor setup (4 steps), calibration (6 steps), and
+  full setup (8 steps, motor setup + calibration back to back)
 
 ### Routing
 
@@ -32,11 +32,18 @@ machine. It is bundled into `module.tar.gz` and served as a Viam App.
   to choose a workflow. The chosen sensor config is passed to the workflow route as URL
   params and mirrored into `sessionStorage` (keyed `so101-setup-state-{machineId}`) so a
   refresh on the workflow page doesn't lose it.
-- `src/routes/workflows/motor-setup/+page.svelte`,
-  `src/routes/workflows/calibration/+page.svelte`,
-  `src/routes/workflows/full-setup/+page.svelte` — one page per workflow. Each resolves
-  the sensor config via `useWorkflowConfig` (URL params first, session storage fallback),
-  then renders `<SensorProvider>` wrapping that workflow's wizard component.
+- `src/routes/workflows/[workflow]/+page.svelte` — the single workflow page, for all three
+  values of `WorkflowType`. It resolves the sensor config via `useWorkflowConfig` (URL
+  params first, session storage fallback), then renders `<SensorProvider>` wrapping
+  `<Wizard {workflow} />`. A param outside the three known values renders an "Unknown
+  Workflow" card rather than a 404. `<Wizard>` sits inside `{#key workflow}`: SvelteKit
+  reuses this route component across `/workflows/<a>` → `/workflows/<b>`, and the wizard
+  reads its step list once at init, so without the key it would keep the previous
+  workflow's steps.
+- `src/routes/workflows/[workflow]/+page.ts` exports `entries()` listing the three values.
+  The app only reaches these routes via `goto()`, so there is no `<a href>` for
+  adapter-static's prerenderer to crawl; without `entries()` the build fails outright
+  (`routes were marked as prerenderable, but were not prerendered`).
 
 ### Connection Management (`src/routes/+layout.svelte`, `src/lib/utils/connection.ts`)
 
@@ -49,25 +56,31 @@ machine. It is bundled into `module.tar.gz` and served as a Viam App.
 
 ### Sensor Context (`src/lib/components/SensorProvider.svelte`)
 
-Wraps a workflow's wizard and sets a `'sensor'` Svelte context: the sensor client, a
-polled `getReadings` query (1s interval), a `doCommand` mutation, a `sendCommand` helper
-that raises user-friendly errors, and the `sensorConfig` it was given. Wizards and step
-components read this context rather than talking to the SDK directly.
+Wraps the wizard and sets a Svelte context: the sensor client, a polled `getReadings`
+query (interval adapts to `calibration_state` — 300 ms while recording ranges, 1 s
+mid-workflow, 3 s when idle), a `doCommand` mutation, a `sendCommand` helper that raises
+user-friendly errors, and the `sensorConfig` it was given. The context key is a module-level
+`Symbol` in `src/lib/sensorContext.ts`, reached through `setSensorContext()` /
+`useSensor()`; `useSensor()` throws a named error when there is no provider above it. The
+wizard reads this context rather than talking to the SDK directly, and passes it down to
+step components as props.
 
 > **Known wart**: `SensorConfig.partId` is not a Viam part ID — it's the key into the
 > `dialConfigs` map built in `+layout.svelte`, which is hardcoded to `'main'`. The field
 > is named for a rename that hasn't happened yet.
 
-### Wizards (`src/lib/components/*Wizard.svelte`)
+### Wizard (`src/lib/components/Wizard.svelte`, `BaseWizard.svelte`)
 
 `BaseWizard.svelte` is the shared chrome: progress bar, step breadcrumbs, the error
-banner, and the previous/next footer. Each workflow wizard supplies its own step list and
-switches over the current step name to render the matching step component:
+banner, and the previous/next footer. `Wizard.svelte` owns the per-run state
+(`currentStep`, `error`, `motorSetupResults`, `stepCompletion`, `torqueOutcome`), looks its
+step list and titles up in `WORKFLOW_DEFINITIONS` (`src/lib/wizardProgress.ts`) by
+`workflow`, and switches over the current step name to render the matching step component:
 
-- **MotorSetupWizard** (4 steps): overview → motor_setup → motor_verify → complete
-- **CalibrationWizard** (6 steps): overview → calibration_start → calibration_homing →
+- **motor-setup** (4 steps): overview → motor_setup → motor_verify → complete
+- **calibration** (6 steps): overview → calibration_start → calibration_homing →
   calibration_recording → calibration_save → complete
-- **FullSetupWizard** (8 steps): overview → motor_setup → motor_verify →
+- **full-setup** (8 steps): overview → motor_setup → motor_verify →
   calibration_start → calibration_homing → calibration_recording → calibration_save →
   complete
 

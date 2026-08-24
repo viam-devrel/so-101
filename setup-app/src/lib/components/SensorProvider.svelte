@@ -1,5 +1,4 @@
 <script lang="ts">
-	import { setContext } from 'svelte';
 	import { SensorClient, Struct } from '@viamrobotics/sdk';
 	import {
 		createResourceClient,
@@ -8,6 +7,7 @@
 	} from '@viamrobotics/svelte-sdk';
 	import type { DoCommandResponse, SensorConfig, SensorContext } from '$lib/types';
 	import { logger } from '$lib/utils/logger';
+	import { setSensorContext } from '$lib/sensorContext';
 
 	interface Props {
 		sensorConfig: SensorConfig;
@@ -122,7 +122,7 @@
 	};
 
 	// Set context for child components to consume
-	setContext('sensor', sensorContext);
+	setSensorContext(sensorContext);
 </script>
 
 <!-- Render children with sensor context available -->
