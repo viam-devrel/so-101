@@ -113,6 +113,64 @@ A raw servo position is also accepted, and is forwarded to the arm — which own
 }
 ```
 
+Both percentage write forms accept an optional `wait` key. It defaults to `true`, which
+blocks until the jaw stops moving (up to 2 seconds). Pass `false` to return as soon as the
+move is commanded:
+
+```json
+{
+  "command": "set_position",
+  "percentage": 50,
+  "wait": false
+}
+```
+
+`wait: false` is for callers issuing setpoints faster than the jaw can physically travel — a
+control loop at 10 Hz, say — where waiting for a setpoint that is about to be superseded is
+pure latency rather than safety. On that path `IsMoving()` reports the servo's own `Moving`
+register, since no call is left in flight to ask; against a remote arm running an older
+module build with no `servo_moving` support, it reports `false` while the jaw is still
+travelling.
+
+The flag has no effect on the raw `servo_position` form, which never waited.
+
+`Open()` and `Grab()` always wait and offer no way to opt out: `Grab()` reads the position
+back after closing to decide whether it caught anything, so sampling a jaw still in flight
+would break grab detection.
+
+The arm takes the same flag, but in the `extra` argument of `MoveToJointPositions`. No
+`DoCommand` has an `extra` parameter — the arm's included — so on the gripper's high-rate
+write path the command map is the only place to put it.
+
+### Get and Set shorthand
+
+A two-key shorthand covers the common read/write pair. It is the form intended for
+high-rate external callers, and it is a supported part of this component's API:
+
+```json
+{ "get": true }
+```
+
+Response:
+
+```json
+{ "position": 42.5 }
+```
+
+```json
+{ "set": 50.0, "wait": false }
+```
+
+Response:
+
+```json
+{ "position": 50.0 }
+```
+
+`set` clamps to 0–100 and takes the same `wait` key with the same `true` default as
+`set_position`. Unlike `set_position` it returns the clamped `position` rather than a
+`success` boolean, and it has no raw-tick form.
+
 ### Controller Status
 
 Check the status of the serial controller, forwarded from the arm that owns it:
