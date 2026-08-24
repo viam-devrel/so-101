@@ -394,10 +394,16 @@ func TestJawTrajectoryDoCommand(t *testing.T) {
 	assert.Greater(t, batches[0]["total_travel_rad"].(float64), 0.0)
 
 	// Record more batches than the ring buffer holds; only the most recent jawTrajectoryHistory
-	// should survive.
+	// should survive. Only the first batch above needs to sweep the full range -- these just need
+	// to exist, so use negligible increments near the current position to avoid paying a full
+	// gripperTravelPctPerSec sweep (~500ms) per batch.
+	const microStep = 0.0005 // negligible relative to the ~1.92 rad joint range
+	pos := geometry.GripperJointMax
 	for i := 0; i < jawTrajectoryHistory+3; i++ {
-		require.NoError(t, g.GoToInputs(ctx, []referenceframe.Input{geometry.GripperJointMin}))
-		require.NoError(t, g.GoToInputs(ctx, []referenceframe.Input{geometry.GripperJointMax}))
+		pos -= microStep
+		require.NoError(t, g.GoToInputs(ctx, []referenceframe.Input{pos}))
+		pos += microStep
+		require.NoError(t, g.GoToInputs(ctx, []referenceframe.Input{pos}))
 	}
 
 	resp, err = g.DoCommand(ctx, map[string]interface{}{"command": "get_jaw_trajectory"})
