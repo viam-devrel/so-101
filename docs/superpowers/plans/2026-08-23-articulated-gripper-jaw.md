@@ -956,6 +956,14 @@ func (g *simulatedSO101Gripper) GoToInputs(ctx context.Context, inputSteps ...[]
 
 Validate **every** step before moving any of them — a batch that fails halfway leaves the jaw somewhere the planner did not intend.
 
+> **Bounds hazard, found during Task 4.** rdk rejects an input that exceeds a joint limit by even
+> **1 ULP** (`input out of bounds`). Task 4's sweep hit this: `(range*i)/steps` at `i==steps`
+> lands 2.22e-16 above `GripperJointMax` because `*` and `/` are left-associative. A planner
+> trajectory that rides a joint limit can plausibly do the same, so a strict `> limits[0].Max`
+> rejection in `GoToInputs` would abort a legitimate move. Validate against a small epsilon
+> (or clamp into range after validating), and add a test feeding exactly
+> `math.Nextafter(GripperJointMax, math.Inf(1))` to pin the chosen behaviour.
+
 - [ ] **Step 4: Verify**
 
 Run: `go test ./components/simulated/ -v`
