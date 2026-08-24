@@ -41,9 +41,9 @@
 
 | File | Change | Responsibility |
 |---|---|---|
-| `internal/servocmd/servo_commands.go` | Modify (add `ParseWaitExtra`) | New shared home for the wait-flag parser, alongside `NumArg`/`FloatArg`/`ClampPercent`. No new import edges — `servocmd` still imports nothing else in the module. |
+| `internal/servocmd/servo_commands.go` | Modify (add `WaitArg`) | New shared home for the wait-flag parser, alongside `NumArg`/`FloatArg`/`ClampPercent`. No new import edges — `servocmd` still imports nothing else in the module. |
 | `internal/servocmd/wait_test.go` | Create | The parser's table test, moved from `components/arm/wait_test.go`. |
-| `components/arm/motion.go` | Modify `:239-249`, `:287`, `:290` | Delete local `parseWaitExtra`; call `servocmd.ParseWaitExtra`. Pure refactor, zero behavior change. |
+| `components/arm/motion.go` | Modify `:239-249`, `:287`, `:290` | Delete local `parseWaitExtra`; call `servocmd.WaitArg`. Pure refactor, zero behavior change. |
 | `components/arm/wait_test.go` | Delete | Superseded by `internal/servocmd/wait_test.go`. |
 | `components/gripper/gripper.go` | Modify `:220-229`, `:257`, `:274`, `:383`, `:424` | Thread `wait bool` through `moveToPercent`; both DoCommand write paths read the flag. |
 | `components/gripper/gripper_test.go` | Modify (append tests) | Six new assertions, all on *emitted commands*. |
@@ -55,7 +55,16 @@ packages already import `servocmd`. The spec's "anything in the arm component is
 scope" was about *behavior*; this is a mechanical move covered by an existing table test.
 If Task 1's review objects, fall back to a private `gripperWaitExtra` in
 `components/gripper/gripper.go` with identical semantics and skip Task 1 entirely — every
-later task still applies, substituting `gripperWaitExtra` for `servocmd.ParseWaitExtra`.
+later task still applies, substituting `gripperWaitExtra` for `servocmd.WaitArg`.
+
+**Amendment (post-Task-1 review):** the helper is named `WaitArg`, not `ParseWaitExtra`.
+Its siblings in `servocmd` are `NumArg`/`FloatArg`, and "Extra" is the arm's word — the
+gripper passes a *command map*, not an `extra`. The doc comment was also trimmed: an earlier
+draft said the gripper reads the flag from the command map "because `Gripper.DoCommand` has
+no `extra` parameter", which reads as though the Gripper API is uniquely extra-less. It is
+not — `Gripper.Open`/`Grab` both take `extra`, and no `DoCommand` takes one, the arm's
+included. The real split is typed method vs `DoCommand`, and the misleading version invited
+wiring the flag into `Grab`, whose wait is load-bearing.
 
 ---
 
@@ -76,20 +85,16 @@ test keeps passing after the move and the arm still compiles.
 Run: `go test ./components/arm/... ./internal/servocmd/... 2>&1 | tail -5`
 Expected: `ok` for both packages.
 
-- [ ] **Step 2: Add `ParseWaitExtra` to `internal/servocmd/servo_commands.go`**
+- [ ] **Step 2: Add `WaitArg` to `internal/servocmd/servo_commands.go`**
 
 Insert immediately after the `ClampPercent` function:
 
 ```go
-// ParseWaitExtra reads the optional "wait" bool from a DoCommand or extra map.
-// Absent or non-bool values default to true so the motion planner and every existing
-// caller keep the blocking behavior; a caller streaming setpoints faster than the
-// hardware can travel passes false. The arm reads it from its extra argument; the
-// gripper reads it from the command map itself, because Gripper.DoCommand has no
-// extra parameter.
-func ParseWaitExtra(extra map[string]any) bool {
-	if extra != nil {
-		if w, ok := extra["wait"].(bool); ok {
+// WaitArg reads the optional "wait" bool from a command or extra map. Absent or
+// non-bool values default to true, so every existing caller keeps blocking.
+func WaitArg(cmd map[string]any) bool {
+	if cmd != nil {
+		if w, ok := cmd["wait"].(bool); ok {
 			return w
 		}
 	}
@@ -109,10 +114,10 @@ package servocmd
 
 import "testing"
 
-func TestParseWaitExtra(t *testing.T) {
+func TestWaitArg(t *testing.T) {
 	cases := []struct {
 		name  string
-		extra map[string]any
+		cmd   map[string]any
 		want  bool
 	}{
 		{"nil defaults to true", nil, true},
@@ -123,8 +128,8 @@ func TestParseWaitExtra(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := ParseWaitExtra(tc.extra); got != tc.want {
-				t.Fatalf("ParseWaitExtra(%v) = %v, want %v", tc.extra, got, tc.want)
+			if got := WaitArg(tc.cmd); got != tc.want {
+				t.Fatalf("WaitArg(%v) = %v, want %v", tc.cmd, got, tc.want)
 			}
 		})
 	}
@@ -139,7 +144,7 @@ rm components/arm/wait_test.go
 
 - [ ] **Step 4: Run the moved test**
 
-Run: `go test ./internal/servocmd/ -run TestParseWaitExtra -v 2>&1 | tail -15`
+Run: `go test ./internal/servocmd/ -run TestWaitArg -v 2>&1 | tail -15`
 Expected: PASS, five subtests.
 
 - [ ] **Step 5: Point the arm at the shared parser**
@@ -161,7 +166,7 @@ func parseWaitExtra(extra map[string]interface{}) bool {
 ```
 
 Then replace both call sites (`:287` and `:290`) — `parseWaitExtra(extra)` becomes
-`servocmd.ParseWaitExtra(extra)`. Add `"so_arm/internal/servocmd"` to `motion.go`'s import
+`servocmd.WaitArg(extra)`. Add `"so_arm/internal/servocmd"` to `motion.go`'s import
 block if it is not already there (`components/arm/status.go` imports it, but each file needs
 its own import).
 
@@ -176,7 +181,7 @@ Expected: no output beyond `no test files` lines. If `go build ./...` leaves a s
 ```bash
 gofmt -s -w internal/servocmd/servo_commands.go internal/servocmd/wait_test.go components/arm/motion.go
 git add internal/servocmd/servo_commands.go internal/servocmd/wait_test.go components/arm/motion.go components/arm/wait_test.go
-git commit -m "refactor: move parseWaitExtra into internal/servocmd as ParseWaitExtra"
+git commit -m "refactor: move parseWaitExtra into internal/servocmd as WaitArg"
 ```
 
 Note: stage explicit paths. Do **not** use `git commit -a`.
@@ -365,7 +370,7 @@ path still hard-codes `true` from Task 2. The three `wantWait: true` subtests al
 `components/gripper/gripper.go:383` — change the hard-coded `true`:
 
 ```go
-if err := g.moveToPercent(ctx, percentPos, servocmd.ParseWaitExtra(cmd)); err != nil {
+if err := g.moveToPercent(ctx, percentPos, servocmd.WaitArg(cmd)); err != nil {
 	return nil, err
 }
 ```
@@ -377,7 +382,7 @@ Leave the surrounding lock and `isMoving` bookkeeping (`:376-381`) untouched.
 `components/gripper/gripper.go:424`:
 
 ```go
-err := g.moveToPercent(ctx, targetPercent, servocmd.ParseWaitExtra(cmd))
+err := g.moveToPercent(ctx, targetPercent, servocmd.WaitArg(cmd))
 return map[string]interface{}{"success": err == nil}, err
 ```
 
@@ -448,9 +453,9 @@ The flag has no effect on the raw `servo_position` form, which never waited.
 back after closing to decide whether it caught anything, so sampling a jaw still in flight
 would break grab detection.
 
-The arm takes the same flag, but in the `extra` argument of `MoveToJointPositions` rather
-than in the command map. The difference is forced by the SDK — `Gripper.DoCommand` has no
-`extra` parameter, so the command map is the only place a caller can put it.
+The arm takes the same flag, but in the `extra` argument of `MoveToJointPositions`. No
+`DoCommand` has an `extra` parameter — the arm's included — so on the gripper's high-rate
+write path the command map is the only place to put it.
 
 ### Get and Set shorthand
 
@@ -524,9 +529,9 @@ under `components/simulated/`, `services/teleop/`, `internal/geometry/`, or `set
 
 Run: `grep -rn '"wait"' --include='*.go' components/ services/ internal/`
 Expected: `services/teleop/teleop.go:183` (the arm's `{"wait": false}`, pre-existing),
-`services/teleop/teleop_test.go:50`, the new `ParseWaitExtra` body, and the new tests. Note
+`services/teleop/teleop_test.go:50`, the new `WaitArg` body, and the new tests. Note
 `components/arm/motion.go` will **not** match — after Task 1 its call sites read
-`servocmd.ParseWaitExtra(extra)` with no `"wait"` literal. That absence is correct, not a
+`servocmd.WaitArg(extra)` with no `"wait"` literal. That absence is correct, not a
 missed edit. `services/teleop/teleop.go:189` must still send `set_position` with **no**
 `wait` key — the teleop service keeps blocking, and changing that is a separate decision.
 
