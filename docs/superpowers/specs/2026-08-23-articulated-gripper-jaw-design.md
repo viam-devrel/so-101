@@ -92,6 +92,74 @@ step (`i == 0` only) differs from `CurrentInputs` by more than
 `defaultExecuteEpsilon = 0.01` (`builtin.go:77`). A jaw still mid-travel from an `Open()`
 when a plan begins executing will trip that check and abort the **arm** move.
 
+## Result
+
+`TestPlannerJawTravel` (`internal/geometry/planner_jaw_test.go`), run against the arm +
+articulated-gripper frame system, goal derived from FK of `jawGoalConfig = [0.8, -1.0,
+1.0, 0.6, 0.3]`, 10 seeds per scenario:
+
+```
+FK-derived goal: (186.979256423666214459444745, -155.686818967522413004189730, 109.886552140576299052554532)
+
+--- direct ---
+seed  0:   2 steps | jaw travel 0.0000 rad (0.0% of range) | span [0.0000, 0.0000] | net 0.0000
+seed  1:   2 steps | jaw travel 0.0000 rad (0.0% of range) | span [0.0000, 0.0000] | net 0.0000
+seed  2:   2 steps | jaw travel 0.0000 rad (0.0% of range) | span [0.0000, 0.0000] | net 0.0000
+seed  3:   2 steps | jaw travel 0.0000 rad (0.0% of range) | span [0.0000, 0.0000] | net 0.0000
+seed  4:   2 steps | jaw travel 0.0000 rad (0.0% of range) | span [0.0000, 0.0000] | net 0.0000
+seed  5:   2 steps | jaw travel 0.0000 rad (0.0% of range) | span [0.0000, 0.0000] | net 0.0000
+seed  6:   2 steps | jaw travel 0.0000 rad (0.0% of range) | span [0.0000, 0.0000] | net 0.0000
+seed  7:   2 steps | jaw travel 0.0000 rad (0.0% of range) | span [0.0000, 0.0000] | net 0.0000
+seed  8:   2 steps | jaw travel 0.0000 rad (0.0% of range) | span [0.0000, 0.0000] | net 0.0000
+seed  9:   2 steps | jaw travel 0.0000 rad (0.0% of range) | span [0.0000, 0.0000] | net 0.0000
+
+--- obstructed ---
+seed  0: 384 steps | jaw travel 0.1552 rad (8.1% of range)  | span [0.0000,  0.0776] | net 0.0000
+seed  1: 346 steps | jaw travel 0.1728 rad (9.0% of range)  | span [0.0000,  0.1439] | net 0.1150
+seed  2: 412 steps | jaw travel 0.2171 rad (11.3% of range) | span [0.0000,  0.1086] | net 0.0000
+seed  3: 410 steps | jaw travel 0.3828 rad (19.9% of range) | span [0.0000,  0.1914] | net 0.0000
+seed  4: 322 steps | jaw travel 0.2935 rad (15.3% of range) | span [0.0000,  0.2776] | net 0.2616
+seed  5: 393 steps | jaw travel 0.2619 rad (13.6% of range) | span [0.0000,  0.1310] | net 0.0000
+seed  6: 391 steps | jaw travel 0.1123 rad (5.8% of range)  | span [-0.0562, 0.0000] | net 0.0000
+seed  7: 338 steps | jaw travel 0.0833 rad (4.3% of range)  | span [0.0000,  0.0417] | net 0.0000
+seed  8: 326 steps | jaw travel 0.1707 rad (8.9% of range)  | span [-0.0853, 0.0000] | net 0.0000
+seed  9: 305 steps | jaw travel 0.2044 rad (10.6% of range) | span [0.0000,  0.1022] | net 0.0000
+
+--- PASS: TestPlannerJawTravel (37.39s)
+    --- PASS: TestPlannerJawTravel/direct (0.83s)
+    --- PASS: TestPlannerJawTravel/obstructed (36.56s)
+```
+
+**The full-range prediction did not hold, for either half of the pipeline it was checked
+against.**
+
+- **IK/seeding (`direct`):** zero jaw travel on all 10 seeds. With no obstacle the
+  two-step trajectory is exactly start-and-goal, and IK never moves the jaw off its
+  start value to reach the goal — unsurprising, since the goal is reachable at the jaw's
+  starting angle and IK has no reason to pay for a change that costs nothing and buys
+  nothing. This says nothing by itself about what the *search* does when it has to work;
+  that is the second scenario.
+- **RRT search (`obstructed`):** the jaw does move — every seed shows nonzero travel,
+  from 4.3% of range up to 19.9% — but nowhere near the full range the sensitivity
+  analysis licenses, and never in a consistent direction (`span` straddles zero across
+  seeds; `net` is zero in 8 of 10, meaning the jaw returns to its start angle by the end
+  of the trajectory even when it explored several tenths of a radian in the middle).
+  Reading `clampSensitivities` alone would predict a joint free to swing anywhere in
+  `[GripperJointMin, GripperJointMax]`; in practice the RRT samples the jaw somewhat more
+  than the arm joints (matching the *ratio* the sensitivity code intends) but the smoothing
+  pass pulls the trajectory back toward small, incidental jaw motion rather than large
+  excursions. The naive reading of the prediction — "expect the jaw to swing wildly since
+  it's unconstrained" — is contradicted by the measured trajectories.
+
+Net effect for the design: the planner does not shove the jaw to a limit and leave it
+there, and it does not leave the jaw pinned at its start value either. It wanders a few
+percent to double digits of its range mid-trajectory in response to obstacles, then
+mostly settles back near its start. This is a real, if modest, hazard for the mid-travel
+`defaultExecuteEpsilon` check described above (a nonzero `net` value, seen in 2 of 10
+obstructed seeds here, means the trajectory's *final* jaw angle differs from where it
+started — relevant to any follow-up move that starts by reading `CurrentInputs`), but it
+does not motivate clamping the jaw's range for planning purposes on this evidence alone.
+
 ## Design
 
 ### 1. Model topology
