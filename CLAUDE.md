@@ -237,6 +237,18 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
   each joint's speed and acceleration are scaled by its share of the travel so all joints finish
   together. The hardware arm used to move each joint at the same configured speed independently,
   so longer-travel joints finished later (measured on hardware as a 260-520 ms spread).
+- **Polling `ServosMoving` cannot corrupt or interleave with a concurrent position
+  read/write, but it does queue behind (or ahead of) one.** `entry.busMu` in
+  `internal/controller/bus_session.go` only arbitrates writes vs. reads (`withSessionRead`
+  takes `RLock`, so two concurrent reads are NOT serialized by `busMu` itself) -- the real
+  exclusion is one level down: every `*feetech.Bus` method takes the bus's own mutex for a
+  transaction's whole request+response round trip, and `enforceCommandGap`'s sleep (default
+  1ms, never overridden here -- see `registry.go`'s `feetech.BusConfig` literal) runs *while
+  that lock is held*. So a queued caller pays the ~1ms gap of whatever transaction is ahead of
+  it, not just its own. A `ServosMoving` SyncRead (1-byte `RegMoving`) across 6 servos is ~56
+  wire bytes (~0.56ms @ 1Mbaud) vs. ~62 for a position SyncRead (~0.62ms) -- both dominated by
+  the fixed 1ms gap, not payload size, so one poll costs roughly one extra ~1.6ms transaction
+  slot to whoever is behind it. See `internal/controller/bus_contention_test.go`.
 - **`Speed: 0` means MAXIMUM, not stopped**, and **`Acc: 0` means UNLIMITED, not zero** — both
   Feetech register sentinels are the opposite of what they look like, and both have already
   caused real bugs in this project. A short-travel joint scaled down by a small `k` can round
