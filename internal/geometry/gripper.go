@@ -159,7 +159,8 @@ const gripperTCPFrame = "tcp"
 // Static on purpose, with the meshes frozen at the closed jaw pose (GripperJointMin): a DoF
 // would become a variable the motion planner is free to drive, and freezing the jaw open would
 // inflate the swept volume enough to block otherwise-valid plans. Geometries() still serves the
-// live, articulating jaw for the 3D viewer.
+// live, articulating jaw for the 3D viewer. jawDoF selects the articulated topology; false is
+// today's static model.
 //
 // Round-tripped through SVA JSON rather than assembled in memory: a component ships its
 // kinematics to viam-server as ModelConfig().OriginalFile.Bytes, and a model without those bytes

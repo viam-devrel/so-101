@@ -85,7 +85,7 @@ func TestGripperTCPLiesBetweenTheJawTips(t *testing.T) {
 
 // TestBuildGripperModelPlacesFrameAtTCP is the core of the reference-frame change: the gripper's
 // kinematic model must be zero-DoF and end at the TCP, so the frame system reports the gripper's
-// pose at the jaw tips rather than at the arm's wrist.
+// pose at the jaw tips rather than at the arm's wrist. This is also the jawDoF: false contract.
 func TestBuildGripperModelPlacesFrameAtTCP(t *testing.T) {
 	for _, gt := range []string{FollowerGripper, LeaderGripper} {
 		t.Run(gt, func(t *testing.T) {
@@ -225,29 +225,4 @@ func TestJawAngleBijection(t *testing.T) {
 	assert.InDelta(t, GripperJointMax, JawRadiansFromPct(150), 1e-12)
 	assert.InDelta(t, 0.0, JawPctFromRadians(GripperJointMin-1e-6), 1e-12)
 	assert.InDelta(t, 100.0, JawPctFromRadians(GripperJointMax+1e-6), 1e-12)
-}
-
-// TestZeroDoFModelUnchanged guards the default path: with jawDoF false the model must stay
-// exactly what it is today -- no DoF, both meshes, frame at the TCP. Every existing machine
-// config depends on this.
-func TestZeroDoFModelUnchanged(t *testing.T) {
-	for _, gt := range []string{FollowerGripper, LeaderGripper} {
-		t.Run(gt, func(t *testing.T) {
-			m, err := BuildGripperModel(gt, LowDetail, "gripper", false)
-			require.NoError(t, err)
-			assert.Empty(t, m.DoF(), "the default gripper model must remain 0-DoF")
-
-			pose, err := m.Transform(nil)
-			require.NoError(t, err)
-			want := GripperTCPPose.Point()
-			if gt == LeaderGripper {
-				want = r3.Vector{}
-			}
-			assert.Less(t, pose.Point().Sub(want).Norm(), 1e-9)
-
-			gif, err := m.Geometries(nil)
-			require.NoError(t, err)
-			assert.Len(t, gif.Geometries(), len(gripperStaticMeshNames(gt))+1)
-		})
-	}
 }
