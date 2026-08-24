@@ -1,4 +1,4 @@
-import type { CalibrationJoint, MotorSetupConfig } from '$lib/types';
+import type { CalibrationJoint, CalibrationReadings, MotorSetupConfig } from '$lib/types';
 
 // Single source of truth for motor setup order (reverse assembly order, to avoid ID
 // conflicts) -- StepMotorSetup renders this list, wizardProgress derives the name set from it.
@@ -28,4 +28,12 @@ export function hasRecordedRange(joint: CalibrationJoint): boolean {
 		joint.recorded_max != null &&
 		joint.recorded_min <= joint.recorded_max
 	);
+}
+
+// Descending by servo ID (deliberate, per commit bcbf8f1) -- just the ordering, since the three
+// call sites render this list differently (a card grid, a progress grid, a summary table).
+export function sortedJoints(
+	readings: CalibrationReadings | undefined
+): [string, CalibrationJoint][] {
+	return Object.entries(readings?.joints || {}).sort(([, a], [, b]) => b.id - a.id);
 }

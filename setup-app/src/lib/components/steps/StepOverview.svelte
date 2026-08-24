@@ -1,5 +1,6 @@
 <script lang="ts">
 	import type { StepProps, WorkflowType } from '$lib/types';
+	import { Button, Icon, InfoPanel } from '$lib/components/ui';
 
 	interface Props extends StepProps {
 		workflowType?: WorkflowType;
@@ -144,32 +145,17 @@
 	</div>
 
 	<!-- Safety Warning Section -->
-	<div class="bg-amber-50 border-l-4 border-amber-400 p-6 mb-8">
-		<div class="flex items-start">
-			<div class="flex-shrink-0">
-				<svg class="h-6 w-6 text-amber-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-					<path
-						stroke-linecap="round"
-						stroke-linejoin="round"
-						stroke-width="2"
-						d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L3.732 16.5c-.77.833.192 2.5 1.732 2.5z"
-					></path>
-				</svg>
-			</div>
-			<div class="ml-3">
-				<h4 class="text-lg font-semibold text-amber-900 mb-3">⚠️ Important Safety Information</h4>
-				<div class="text-amber-800 space-y-2">
-					<p class="font-medium">Before proceeding, please ensure:</p>
-					<ul class="list-disc list-inside space-y-1 text-sm">
-						<li>The SO-101 arm is securely mounted to a stable surface</li>
-						<li>The workspace is clear of obstacles and people</li>
-						<li>All servo cables are properly connected</li>
-						<li>Power supply is connected and stable</li>
-					</ul>
-				</div>
-			</div>
+	<InfoPanel tone="safety" title="⚠️ Important Safety Information" className="mb-8">
+		<div class="text-amber-800 space-y-2">
+			<p class="font-medium">Before proceeding, please ensure:</p>
+			<ul class="list-disc list-inside space-y-1 text-sm">
+				<li>The SO-101 arm is securely mounted to a stable surface</li>
+				<li>The workspace is clear of obstacles and people</li>
+				<li>All servo cables are properly connected</li>
+				<li>Power supply is connected and stable</li>
+			</ul>
 		</div>
-	</div>
+	</InfoPanel>
 
 	<!-- Workspace Requirements -->
 	<div class="bg-gray-50 p-6 rounded-lg mb-8">
@@ -205,13 +191,7 @@
 				<div
 					class="flex-shrink-0 w-5 h-5 bg-blue-100 rounded-full flex items-center justify-center mt-0.5"
 				>
-					<svg class="w-3 h-3 text-blue-600" fill="currentColor" viewBox="0 0 20 20">
-						<path
-							fill-rule="evenodd"
-							d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
-							clip-rule="evenodd"
-						/>
-					</svg>
+					<Icon name="checkSmall" className="w-3 h-3 text-blue-600" />
 				</div>
 				<p class="ml-3 text-gray-700">SO-101 arm is physically assembled and mounted</p>
 			</div>
@@ -219,13 +199,7 @@
 				<div
 					class="flex-shrink-0 w-5 h-5 bg-blue-100 rounded-full flex items-center justify-center mt-0.5"
 				>
-					<svg class="w-3 h-3 text-blue-600" fill="currentColor" viewBox="0 0 20 20">
-						<path
-							fill-rule="evenodd"
-							d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
-							clip-rule="evenodd"
-						/>
-					</svg>
+					<Icon name="checkSmall" className="w-3 h-3 text-blue-600" />
 				</div>
 				<p class="ml-3 text-gray-700">USB serial connection established to robot computer</p>
 			</div>
@@ -233,13 +207,7 @@
 				<div
 					class="flex-shrink-0 w-5 h-5 bg-blue-100 rounded-full flex items-center justify-center mt-0.5"
 				>
-					<svg class="w-3 h-3 text-blue-600" fill="currentColor" viewBox="0 0 20 20">
-						<path
-							fill-rule="evenodd"
-							d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
-							clip-rule="evenodd"
-						/>
-					</svg>
+					<Icon name="checkSmall" className="w-3 h-3 text-blue-600" />
 				</div>
 				<p class="ml-3 text-gray-700">SO-101 calibration sensor configured in robot config</p>
 			</div>
@@ -247,13 +215,7 @@
 				<div
 					class="flex-shrink-0 w-5 h-5 bg-blue-100 rounded-full flex items-center justify-center mt-0.5"
 				>
-					<svg class="w-3 h-3 text-blue-600" fill="currentColor" viewBox="0 0 20 20">
-						<path
-							fill-rule="evenodd"
-							d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
-							clip-rule="evenodd"
-						/>
-					</svg>
+					<Icon name="checkSmall" className="w-3 h-3 text-blue-600" />
 				</div>
 				<p class="ml-3 text-gray-700">Power supply connected and servo motors receiving power</p>
 			</div>
@@ -263,14 +225,7 @@
 	<!-- Time Estimate -->
 	<div class="bg-blue-50 p-4 rounded-lg mb-8">
 		<div class="flex items-center">
-			<svg class="w-5 h-5 text-blue-600 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-				<path
-					stroke-linecap="round"
-					stroke-linejoin="round"
-					stroke-width="2"
-					d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"
-				></path>
-			</svg>
+			<Icon name="clock" className="w-5 h-5 text-blue-600 mr-3" />
 			<span class="text-blue-900 font-medium">
 				Estimated completion time: {content.duration}
 			</span>
@@ -279,19 +234,10 @@
 
 	<!-- Action Button -->
 	<div class="text-center">
-		<button
-			onclick={nextStep}
-			class="inline-flex items-center px-6 py-3 border border-transparent text-base font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 transition-colors duration-200"
-		>
+		<Button onclick={nextStep} variant="primary" size="lg">
 			Begin Setup Process
-			<svg class="ml-2 -mr-1 w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
-				<path
-					fill-rule="evenodd"
-					d="M10.293 3.293a1 1 0 011.414 0l6 6a1 1 0 010 1.414l-6 6a1 1 0 01-1.414-1.414L14.586 11H3a1 1 0 110-2h11.586l-4.293-4.293a1 1 0 010-1.414z"
-					clip-rule="evenodd"
-				/>
-			</svg>
-		</button>
+			<Icon name="arrowRight" className="ml-2 -mr-1 w-5 h-5" />
+		</Button>
 		<p class="mt-2 text-sm text-gray-600">
 			You can navigate back to this page at any time using the progress bar above.
 		</p>

@@ -1,7 +1,7 @@
 <script lang="ts">
 	import type { StepProps } from '$lib/types';
 	import { MOTOR_SETUP_ORDER } from '$lib/constants';
-	import { Button, LoadingSpinner } from '$lib/components/ui';
+	import { Button, LoadingSpinner, Icon, InfoPanel } from '$lib/components/ui';
 
 	let {
 		sendCommand,
@@ -213,27 +213,12 @@
 	<!-- Instructions -->
 	<div class="mb-8">
 		<h3 class="text-2xl font-bold text-gray-900 mb-4">Motor Setup & Configuration</h3>
-		<div class="bg-blue-50 p-6 rounded-lg mb-6">
-			<div class="flex items-start">
-				<div class="flex-shrink-0">
-					<svg class="w-6 h-6 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path
-							stroke-linecap="round"
-							stroke-linejoin="round"
-							stroke-width="2"
-							d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
-						></path>
-					</svg>
-				</div>
-				<div class="ml-3">
-					<h4 class="font-semibold text-blue-900 mb-2">Important: Connect ONE Motor at a Time</h4>
-					<p class="text-blue-800 text-sm">
-						To avoid ID conflicts, connect only the motor you're currently configuring. Disconnect
-						all other servo motors from the daisy chain during this process.
-					</p>
-				</div>
-			</div>
-		</div>
+		<InfoPanel tone="info" title="Important: Connect ONE Motor at a Time" className="mb-6">
+			<p class="text-blue-800 text-sm">
+				To avoid ID conflicts, connect only the motor you're currently configuring. Disconnect all
+				other servo motors from the daisy chain during this process.
+			</p>
+		</InfoPanel>
 	</div>
 
 	<!-- Motor Progress Grid -->
@@ -257,13 +242,7 @@
 					<div class="text-sm">
 						{#if status === 'configured'}
 							<div class="flex items-center text-green-700">
-								<svg class="w-4 h-4 mr-1" fill="currentColor" viewBox="0 0 20 20">
-									<path
-										fill-rule="evenodd"
-										d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
-										clip-rule="evenodd"
-									/>
-								</svg>
+								<Icon name="checkSmall" className="w-4 h-4 mr-1" />
 								Configured
 							</div>
 						{:else if status === 'discovered' && result && result.step === 'discovered'}
@@ -296,8 +275,7 @@
 			</h4>
 
 			<div class="mb-6">
-				<div class="bg-yellow-50 p-4 rounded-lg mb-4">
-					<h5 class="font-medium text-yellow-900 mb-2">Step-by-step Instructions:</h5>
+				<InfoPanel tone="warning" icon={null} title="Step-by-step Instructions:" className="mb-4">
 					<ol class="text-yellow-800 text-sm space-y-1">
 						<li>1. Disconnect ALL servo motors from the daisy chain</li>
 						<li>
@@ -311,18 +289,17 @@
 							was never configured shows as not responding or not found.
 						</li>
 					</ol>
-				</div>
+				</InfoPanel>
 
 				{#if discoveredMotor}
-					<div class="bg-green-50 p-4 rounded-lg mb-4">
-						<h5 class="font-medium text-green-900 mb-2">Motor Discovered:</h5>
+					<InfoPanel tone="success" icon={null} title="Motor Discovered:" className="mb-4">
 						<div class="text-green-800 text-sm space-y-1">
 							<p>• Current ID: {discoveredMotor.current_id}</p>
 							<p>• Target ID: {discoveredMotor.target_id}</p>
 							<p>• Model: {discoveredMotor.model}</p>
 							<p>• Current Baudrate: {discoveredMotor.found_baudrate}</p>
 						</div>
-					</div>
+					</InfoPanel>
 				{/if}
 
 				<div class="flex flex-wrap gap-3">
@@ -332,14 +309,7 @@
 								<LoadingSpinner size="sm" className="mr-2" />
 								Discovering...
 							{:else}
-								<svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path
-										stroke-linecap="round"
-										stroke-linejoin="round"
-										stroke-width="2"
-										d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
-									></path>
-								</svg>
+								<Icon name="search" className="w-4 h-4 mr-2" />
 								Discover Motor
 							{/if}
 						</Button>
@@ -349,14 +319,7 @@
 								<LoadingSpinner size="sm" className="mr-2" />
 								Configuring...
 							{:else}
-								<svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path
-										stroke-linecap="round"
-										stroke-linejoin="round"
-										stroke-width="2"
-										d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"
-									></path>
-								</svg>
+								<Icon name="checkCircle" className="w-4 h-4 mr-2" />
 								Configure Motor
 							{/if}
 						</Button>
@@ -382,69 +345,33 @@
 		</div>
 
 		{#if showPartialContinue}
-			<div class="bg-orange-50 border border-orange-200 rounded-lg p-6 mb-6">
-				<div class="flex items-start">
-					<div class="flex-shrink-0">
-						<svg class="w-6 h-6 text-orange-600" fill="currentColor" viewBox="0 0 20 20">
-							<path
-								fill-rule="evenodd"
-								d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l6.518 11.59c.75 1.334-.213 2.98-1.742 2.98H3.48c-1.53 0-2.492-1.646-1.743-2.98l6.52-11.59zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z"
-								clip-rule="evenodd"
-							/>
-						</svg>
-					</div>
-					<div class="ml-3">
-						<h4 class="font-semibold text-orange-900 mb-2">
-							{configuredCount} of {MOTOR_SETUP_ORDER.length} motors configured
-						</h4>
-						<p class="text-orange-800 text-sm mb-4">
-							The rest were skipped, so this app did not configure them. Verification on the next
-							step pings every ID anyway: any skipped motor that was not already set up will show as
-							"not responding" or "not found" until you come back here and configure it.
-						</p>
-						<Button onclick={nextStep} variant="primary">
-							Continue with {configuredCount} of {MOTOR_SETUP_ORDER.length} configured →
-						</Button>
-					</div>
-				</div>
-			</div>
+			<InfoPanel
+				tone="danger"
+				title="{configuredCount} of {MOTOR_SETUP_ORDER.length} motors configured"
+				className="mb-6"
+			>
+				<p class="text-orange-800 text-sm mb-4">
+					The rest were skipped, so this app did not configure them. Verification on the next step
+					pings every ID anyway: any skipped motor that was not already set up will show as "not
+					responding" or "not found" until you come back here and configure it.
+				</p>
+				<Button onclick={nextStep} variant="primary">
+					Continue with {configuredCount} of {MOTOR_SETUP_ORDER.length} configured →
+				</Button>
+			</InfoPanel>
 		{/if}
 	{:else}
 		<!-- All motors configured -->
-		<div class="bg-green-50 p-6 rounded-lg mb-6">
-			<div class="flex items-center">
-				<svg
-					class="w-8 h-8 text-green-600 mr-4"
-					fill="none"
-					stroke="currentColor"
-					viewBox="0 0 24 24"
-				>
-					<path
-						stroke-linecap="round"
-						stroke-linejoin="round"
-						stroke-width="2"
-						d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"
-					></path>
-				</svg>
-				<div>
-					<h4 class="text-lg font-semibold text-green-900">All Motors Configured!</h4>
-					<p class="text-green-800">
-						You can now connect all motors in a daisy chain and proceed to verification.
-					</p>
-				</div>
-			</div>
-		</div>
+		<InfoPanel tone="success" title="All Motors Configured!" className="mb-6">
+			<p class="text-green-800">
+				You can now connect all motors in a daisy chain and proceed to verification.
+			</p>
+		</InfoPanel>
 
 		<div class="text-center">
 			<Button onclick={nextStep} variant="primary" size="lg">
 				Continue to Verification
-				<svg class="ml-2 -mr-1 w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
-					<path
-						fill-rule="evenodd"
-						d="M10.293 3.293a1 1 0 011.414 0l6 6a1 1 0 010 1.414l-6 6a1 1 0 01-1.414-1.414L14.586 11H3a1 1 0 110-2h11.586l-4.293-4.293a1 1 0 010-1.414z"
-						clip-rule="evenodd"
-					/>
-				</svg>
+				<Icon name="arrowRight" className="ml-2 -mr-1 w-5 h-5" />
 			</Button>
 		</div>
 	{/if}

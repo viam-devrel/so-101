@@ -2,6 +2,8 @@
 	import { goto } from '$app/navigation';
 	import type { StepProps, CalibrationReadings, WorkflowType } from '$lib/types';
 	import { getMachineRootPath } from '$lib/utils/connection';
+	import { Button, Icon, InfoPanel, StatCard } from '$lib/components/ui';
+	import type { IconName } from '$lib/icons';
 
 	interface Props extends StepProps {
 		workflowType?: WorkflowType;
@@ -47,14 +49,17 @@
 	});
 
 	// Per-workflow "What Was Accomplished" content, keyed by section.
-	const ACCOMPLISHMENTS = {
+	interface Accomplishment {
+		title: string;
+		iconColor: string;
+		icon?: IconName;
+		items: string[];
+	}
+	const ACCOMPLISHMENTS: Record<'motor' | 'calibration', Accomplishment> = {
 		motor: {
 			title: 'Motor Configuration',
 			iconColor: 'text-blue-600',
-			iconPaths: [
-				'M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z',
-				'M15 12a3 3 0 11-6 0 3 3 0 016 0z'
-			],
+			icon: 'gear' as const,
 			// Phrased around what verification proved, not around how many motors this wizard
 			// configured: a motor that was already set up can be skipped, so the "Motors
 			// Configured" stat above is legitimately below 6 while all six still answer.
@@ -68,9 +73,7 @@
 		calibration: {
 			title: 'Calibration Process',
 			iconColor: 'text-green-600',
-			iconPaths: [
-				'M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v4a2 2 0 01-2 2h-2a2 2 0 00-2-2z'
-			],
+			icon: 'barChart' as const,
 			items: [
 				'✅ Homing positions set for all joints',
 				'✅ Full range of motion recorded',
@@ -207,14 +210,7 @@
 	<!-- Success Header -->
 	<div class="mb-8">
 		<div class="w-24 h-24 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-6">
-			<svg class="w-12 h-12 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-				<path
-					stroke-linecap="round"
-					stroke-linejoin="round"
-					stroke-width="2"
-					d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"
-				></path>
-			</svg>
+			<Icon name="checkCircle" className="w-12 h-12 text-green-600" />
 		</div>
 		<h3 class="text-3xl font-bold text-gray-900 mb-4">{content.headline}</h3>
 		<p class="text-xl text-gray-600">
@@ -223,21 +219,21 @@
 	</div>
 
 	<!-- Completion Summary -->
-	<div class="bg-green-50 border border-green-200 rounded-lg p-6 mb-8">
-		<h4 class="text-lg font-semibold text-green-900 mb-4">Setup Summary</h4>
+	<InfoPanel tone="success" icon={null} title="Setup Summary" className="mb-8">
 		<div class="grid {statsGridCols} gap-6 text-center">
 			{#each content.stats as statKey}
-				<div class="bg-white p-4 rounded-lg">
-					<div class="text-2xl font-bold text-green-600 mb-2">{statValues[statKey]}</div>
-					<div class="text-sm text-gray-600">{STATS[statKey].label}</div>
-					<div class="text-xs text-gray-500 mt-1">{STATS[statKey].description}</div>
-				</div>
+				<StatCard
+					value={statValues[statKey]}
+					label={STATS[statKey].label}
+					sublabel={STATS[statKey].description}
+					tone="green"
+				/>
 			{/each}
 		</div>
 		<div class="mt-4 text-xs text-gray-600">
 			Completed: {completionTime}
 		</div>
-	</div>
+	</InfoPanel>
 
 	<!-- What Was Accomplished -->
 	<div class="bg-white border border-gray-200 rounded-lg p-6 mb-8 text-left">
@@ -248,17 +244,12 @@
 				{@const accomplishment = ACCOMPLISHMENTS[accomplishmentKey]}
 				<div>
 					<h5 class="font-medium text-gray-800 mb-3 flex items-center">
-						<svg
-							class="w-5 h-5 {accomplishment.iconColor} mr-2"
-							fill="none"
-							stroke="currentColor"
-							viewBox="0 0 24 24"
-						>
-							{#each accomplishment.iconPaths as pathData}
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d={pathData}
-								></path>
-							{/each}
-						</svg>
+						{#if accomplishment.icon}
+							<Icon
+								name={accomplishment.icon}
+								className="w-5 h-5 {accomplishment.iconColor} mr-2"
+							/>
+						{/if}
 						{accomplishment.title}
 					</h5>
 					<ul class="text-sm text-gray-600 space-y-1">
@@ -342,20 +333,10 @@
 		     can't be built correctly from what this app knows -- guessing one would be worse than
 		     omitting it. -->
 		<div class="flex flex-col sm:flex-row gap-4 justify-center">
-			<button
-				onclick={() => goto(getMachineRootPath())}
-				class="inline-flex items-center justify-center px-6 py-3 border border-gray-300 text-base font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors"
-			>
-				<svg class="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-					<path
-						stroke-linecap="round"
-						stroke-linejoin="round"
-						stroke-width="2"
-						d="M10 19l-7-7m0 0l7-7m-7 7h18"
-					></path>
-				</svg>
+			<Button onclick={() => goto(getMachineRootPath())} variant="secondary" size="lg">
+				<Icon name="arrowLeft" className="w-5 h-5 mr-3" />
 				Back to Workflow Selection
-			</button>
+			</Button>
 		</div>
 
 		<!-- Final Message -->

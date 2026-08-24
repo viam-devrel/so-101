@@ -1,7 +1,11 @@
 <script lang="ts">
 	import type { StepProps, CalibrationReadings } from '$lib/types';
-	import { ADVISORY_RANGE_TICKS, hasRecordedRange } from '$lib/constants';
+	import { ADVISORY_RANGE_TICKS, hasRecordedRange, sortedJoints } from '$lib/constants';
 	import { canRun } from '$lib/calibrationCommands';
+	import { resetCalibrationProgress } from '$lib/calibrationSession';
+	import { Icon, InfoPanel, Button } from '$lib/components/ui';
+	import CalibrationStatusGate from '$lib/components/calibration/CalibrationStatusGate.svelte';
+	import CalibrationStatusPanel from '$lib/components/calibration/CalibrationStatusPanel.svelte';
 
 	let {
 		sensorReadings,
@@ -16,13 +20,6 @@
 		torqueOutcome,
 		setTorqueOutcome
 	}: StepProps = $props();
-
-	const CALIBRATION_STEPS = [
-		'calibration_start',
-		'calibration_homing',
-		'calibration_recording',
-		'calibration_save'
-	] as const;
 
 	// Component state
 	let isLoading = $state(false);
@@ -43,12 +40,6 @@
 	// StateError so save_calibration remains retryable). Must not be confused with isError
 	// below, which is the genuine StateError branch.
 	const hasFailedSave = $derived(saveFailed || !!lastSaveError);
-	// isPending, not isLoading: with refetchInterval both are false on background polls,
-	// but the query is disabled until the resource client resolves, and only isPending
-	// covers that window -- isLoading there is false, so the panel fell through to
-	// "Unexpected calibration state: unknown".
-	const isInitialLoad = $derived(sensorReadings.current.isPending);
-	const queryError = $derived(sensorReadings.current.error);
 
 	// Check states
 	const canSave = $derived(canRun(readings, 'save_calibration'));
@@ -98,7 +89,9 @@
 			saveFailed = true;
 			// Both are stale now: torque is off (calibration disabled it and this attempt never
 			// re-enabled it), and an earlier successful save's completion flag would otherwise
-			// keep Next unlocked and let StepComplete claim the old torque outcome.
+			// keep Next unlocked and let StepComplete claim the old torque outcome. Not
+			// resetCalibrationProgress -- this un-completes only calibration_save, not the whole
+			// line, since the module state hasn't moved.
 			setTorqueOutcome(null);
 			markStepIncomplete('calibration_save');
 			setError(error instanceof Error ? error.message : 'Failed to save calibration');
@@ -124,8 +117,7 @@
 
 			await sendCommand({ command: 'reset' });
 			saveFailed = false;
-			setTorqueOutcome(null);
-			for (const step of CALIBRATION_STEPS) markStepIncomplete(step);
+			resetCalibrationProgress({ markStepIncomplete, setTorqueOutcome });
 			goToNamedStep('calibration_start');
 		} catch (error) {
 			setError(error instanceof Error ? error.message : 'Failed to reset calibration');
@@ -167,33 +159,7 @@
 		</p>
 	</div>
 
-	<!-- Current Status -->
-	<div class="mb-6">
-		<h4 class="text-lg font-semibold text-gray-900 mb-3">Current Status:</h4>
-		<div class="bg-gray-50 p-4 rounded-lg">
-			<div class="flex items-center space-x-4">
-				<span class="text-sm font-medium text-gray-700">Calibration State:</span>
-				<span
-					class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium {calibrationState ===
-					'completed'
-						? 'bg-green-100 text-green-800'
-						: calibrationState === 'idle'
-							? 'bg-blue-100 text-blue-800'
-							: calibrationState === 'error'
-								? 'bg-red-100 text-red-800'
-								: 'bg-gray-100 text-gray-800'}"
-				>
-					{calibrationState}
-				</span>
-			</div>
-			{#if readings?.instruction}
-				<div class="mt-2 text-sm text-gray-700">
-					<span class="font-medium">Instructions:</span>
-					{readings.instruction}
-				</div>
-			{/if}
-		</div>
-	</div>
+	<CalibrationStatusPanel {calibrationState} instruction={readings?.instruction} />
 
 	<!-- Calibration Summary -->
 	{#if Object.keys(joints).length > 0}
@@ -219,7 +185,7 @@
 				</div>
 
 				<div class="divide-y divide-gray-200">
-					{#each Object.entries(joints).sort(([, a], [, b]) => b.id - a.id) as [jointName, joint] (joint.id)}
+					{#each sortedJoints(readings) as [jointName, joint] (joint.id)}
 						{@const quality = getCalibrationQuality(joint)}
 
 						<div class="px-6 py-4 hover:bg-gray-50">
@@ -230,17 +196,7 @@
 											{jointName.replace('_', ' ')}
 										</h5>
 										{#if joint.is_completed}
-											<svg
-												class="w-4 h-4 text-green-500 ml-2"
-												fill="currentColor"
-												viewBox="0 0 20 20"
-											>
-												<path
-													fill-rule="evenodd"
-													d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
-													clip-rule="evenodd"
-												/>
-											</svg>
+											<Icon name="checkSmall" className="w-4 h-4 text-green-500 ml-2" />
 										{/if}
 									</div>
 									<div class="text-sm text-gray-600">ID: {joint.id}</div>
@@ -277,373 +233,243 @@
 
 	<!-- Save Controls -->
 	<div class="bg-white border border-gray-200 rounded-lg p-6 mb-6">
-		{#if isInitialLoad}
-			<!-- First load: no readings yet -->
-			<div class="text-center">
-				<div
-					class="animate-spin rounded-full h-10 w-10 border-b-2 border-gray-400 mx-auto mb-4"
-				></div>
-				<p class="text-gray-600">Loading calibration status...</p>
-			</div>
-		{:else if queryError}
-			<!-- Connection error, distinct from an unexpected calibration state -->
-			<div class="text-center">
-				<p class="text-red-600 mb-4">
-					Unable to reach the calibration sensor: {queryError.message}
-				</p>
-				<button
-					onclick={() => sensorReadings.current.refetch()}
-					class="px-4 py-2 bg-gray-600 text-white rounded-md hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-gray-500"
-				>
-					Retry
-				</button>
-			</div>
-		{:else if showSaved}
-			<!-- Successfully saved: wins over the Save panels while the module state lags, and
-			     again on a later remount via the wizard's completion record (see showSaved).
-			     torqueOutcome, not this panel's own success, decides whether the arm is safe to
-			     let go of -- see workflow.go's saveCalibration: a torque re-enable failure still
-			     lands here (the save itself succeeded) but leaves the arm limp. That must be the
-			     most prominent thing on screen, not a footnote under a green checkmark. -->
-			{#if torqueOutcome?.enabled === false}
+		<CalibrationStatusGate {sensorReadings}>
+			{#if showSaved}
+				<!-- Successfully saved: wins over the Save panels while the module state lags, and
+				     again on a later remount via the wizard's completion record (see showSaved).
+				     torqueOutcome, not this panel's own success, decides whether the arm is safe to
+				     let go of -- see workflow.go's saveCalibration: a torque re-enable failure still
+				     lands here (the save itself succeeded) but leaves the arm limp. That must be the
+				     most prominent thing on screen, not a footnote under a green checkmark. -->
+				{#if torqueOutcome?.enabled === false}
+					<div class="text-center">
+						<div
+							class="w-16 h-16 bg-red-100 rounded-full flex items-center justify-center mx-auto mb-4"
+						>
+							<Icon name="warningTriangle" className="w-8 h-8 text-red-600" />
+						</div>
+						<h4 class="text-xl font-semibold text-gray-900 mb-4">
+							Calibration Saved -- Arm Is Not Holding Position
+						</h4>
+						<div
+							class="bg-red-50 border border-red-300 p-4 rounded-lg mb-6 text-left max-w-md mx-auto"
+							role="alert"
+						>
+							<p class="text-red-900 font-semibold mb-2">
+								Holding torque could not be re-enabled. The arm is limp.
+							</p>
+							<p class="text-red-800 text-sm mb-2">
+								Support the arm before letting go. Power-cycle the servos or restart the machine to
+								restore holding torque.
+							</p>
+							<p class="text-red-700 text-xs font-mono break-all">
+								{torqueOutcome.error}
+							</p>
+						</div>
+
+						{#if calibrationFile}
+							<div class="bg-gray-50 p-4 rounded-lg mb-6">
+								<h5 class="font-medium text-gray-900 mb-2">Calibration File Saved:</h5>
+								<p class="text-gray-800 text-sm font-mono break-all">
+									{calibrationFile}
+								</p>
+							</div>
+						{/if}
+
+						<Button variant="primary" size="lg" onclick={nextStep}>
+							Continue Anyway
+							<Icon name="arrowRight" className="ml-2 -mr-1 w-5 h-5" />
+						</Button>
+					</div>
+				{:else}
+					<div class="text-center">
+						<div
+							class="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4"
+						>
+							<Icon name="download" className="w-8 h-8 text-green-600" />
+						</div>
+						<h4 class="text-xl font-semibold text-gray-900 mb-4">
+							Calibration Saved Successfully!
+						</h4>
+						<p class="text-gray-600 mb-6">
+							All calibration data has been written to servo memory and saved to the robot's
+							configuration files.
+						</p>
+
+						{#if calibrationFile}
+							<InfoPanel
+								tone="success"
+								title="Calibration File Saved:"
+								icon={null}
+								className="mb-6"
+							>
+								<p class="text-sm font-mono break-all">{calibrationFile}</p>
+							</InfoPanel>
+						{/if}
+
+						<InfoPanel
+							tone="info"
+							title="Next Steps:"
+							icon={null}
+							className="mb-6 text-left max-w-md mx-auto"
+						>
+							<ul class="text-sm space-y-1">
+								<li>• Motors have been re-enabled with holding torque</li>
+								<li>• Ready for normal operation and control</li>
+							</ul>
+						</InfoPanel>
+
+						<Button variant="primary" size="lg" onclick={nextStep}>
+							Complete Setup
+							<Icon name="arrowRight" className="ml-2 -mr-1 w-5 h-5" />
+						</Button>
+					</div>
+				{/if}
+			{:else if canSave && hasFailedSave}
+				<!-- Completed, but the last save attempt failed. State deliberately stays
+				     'completed' (see workflow.go's saveCalibration) so save_calibration is
+				     retryable -- this must not silently fall back to the plain "Ready to Save"
+				     panel below once the transient banner clears. -->
+				<div class="text-center">
+					<div
+						class="w-16 h-16 bg-amber-100 rounded-full flex items-center justify-center mx-auto mb-4"
+					>
+						<Icon name="warningTriangle" className="w-8 h-8 text-amber-600" />
+					</div>
+					<h4 class="text-xl font-semibold text-gray-900 mb-4">Save Attempt Failed</h4>
+					<p class="text-amber-800 mb-6 max-w-md mx-auto" role="alert">
+						{lastSaveError ||
+							'The last attempt to save calibration data failed. Your recorded ranges are unaffected -- retry when ready.'}
+					</p>
+
+					<div class="space-y-3">
+						<Button variant="success" size="lg" loading={isLoading} onclick={saveCalibration}>
+							{isLoading ? 'Retrying...' : 'Retry Save'}
+						</Button>
+
+						<div>
+							<!-- Ungated on purpose. sensor.go advertises reset in every state and
+							     workflow.go's reset has no state guard, so canRun would always be true
+							     here -- and this is the only escape hatch from a stuck 'completed' save
+							     failure, so it must stay reachable even if that ever changes. -->
+							<Button variant="secondary" loading={isLoading} onclick={resetCalibration}>
+								{isLoading ? 'Resetting...' : 'Start Over Instead'}
+							</Button>
+						</div>
+					</div>
+
+					<InfoPanel tone="warning" icon={null} className="mt-4 text-left max-w-md mx-auto">
+						<p class="text-xs">
+							<strong>Troubleshooting:</strong> Check servo power, connections, and ensure no other applications
+							are using the serial port.
+						</p>
+					</InfoPanel>
+				</div>
+			{:else if canSave}
+				<!-- Ready to save -->
+				<div class="text-center">
+					<h4 class="text-xl font-semibold text-gray-900 mb-4">Ready to Save Calibration</h4>
+
+					<InfoPanel
+						tone="info"
+						title="What will be saved:"
+						icon={null}
+						className="mb-6 text-left max-w-2xl mx-auto"
+					>
+						<ul class="text-sm space-y-2">
+							<li>• <strong>Homing offsets</strong> written to servo EEPROM registers</li>
+							<li>
+								• <strong>Range limits</strong> (min/max positions) written to servo EEPROM
+							</li>
+							<li>
+								• <strong>Calibration file</strong> saved to robot computer for future reference
+							</li>
+							<li>• <strong>Drive modes and normalization</strong> configured per servo</li>
+						</ul>
+					</InfoPanel>
+
+					<InfoPanel tone="warning" className="mb-6">
+						<p class="text-sm">
+							<strong>Note:</strong> This process writes data to servo EEPROM memory. Once saved, the
+							calibration will persist across power cycles and be ready for normal operation.
+						</p>
+					</InfoPanel>
+
+					<Button variant="success" size="lg" loading={isLoading} onclick={saveCalibration}>
+						{#if isLoading}
+							Saving Calibration...
+						{:else}
+							<Icon name="download" className="w-5 h-5 mr-3" />
+							Save Calibration Data
+						{/if}
+					</Button>
+
+					<p class="mt-3 text-xs text-gray-600">
+						This process typically takes 2-3 seconds to write to all servo registers.
+					</p>
+				</div>
+			{:else if isError}
+				<!-- Error state -->
 				<div class="text-center">
 					<div
 						class="w-16 h-16 bg-red-100 rounded-full flex items-center justify-center mx-auto mb-4"
 					>
-						<svg class="w-8 h-8 text-red-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path
-								stroke-linecap="round"
-								stroke-linejoin="round"
-								stroke-width="2"
-								d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L3.732 16.5c-.77.833.192 2.5 1.732 2.5z"
-							></path>
-						</svg>
+						<Icon name="warningTriangle" className="w-8 h-8 text-red-600" />
 					</div>
-					<h4 class="text-xl font-semibold text-gray-900 mb-4">
-						Calibration Saved -- Arm Is Not Holding Position
-					</h4>
-					<div
-						class="bg-red-50 border border-red-300 p-4 rounded-lg mb-6 text-left max-w-md mx-auto"
-					>
-						<p class="text-red-900 font-semibold mb-2">
-							Holding torque could not be re-enabled. The arm is limp.
-						</p>
-						<p class="text-red-800 text-sm mb-2">
-							Support the arm before letting go. Power-cycle the servos or restart the machine to
-							restore holding torque.
-						</p>
-						<p class="text-red-700 text-xs font-mono break-all">
-							{torqueOutcome.error}
-						</p>
+					<h4 class="text-xl font-semibold text-gray-900 mb-4">Save Error</h4>
+					<p class="text-red-600 mb-6" role="alert">
+						{readings?.error ||
+							'Failed to save calibration data. This may be due to servo communication issues.'}
+					</p>
+
+					<div class="space-y-3">
+						<!-- No "Retry Save" here: save_calibration requires state 'completed'
+						     (workflow.go's saveCalibration), which this branch never has -- a save
+						     failure deliberately stays 'completed' (see canSave && hasFailedSave
+						     above), so a genuine 'error' state has nothing for save_calibration to
+						     retry. Reset is the only way out. -->
+						<Button variant="secondary" loading={isLoading} onclick={resetCalibration}>
+							{isLoading ? 'Resetting...' : 'Reset Calibration'}
+						</Button>
 					</div>
 
-					{#if calibrationFile}
-						<div class="bg-gray-50 p-4 rounded-lg mb-6">
-							<h5 class="font-medium text-gray-900 mb-2">Calibration File Saved:</h5>
-							<p class="text-gray-800 text-sm font-mono break-all">
-								{calibrationFile}
-							</p>
-						</div>
-					{/if}
-
-					<button
-						onclick={nextStep}
-						class="inline-flex items-center px-6 py-3 border border-transparent text-base font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
-					>
-						Continue Anyway
-						<svg class="ml-2 -mr-1 w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
-							<path
-								fill-rule="evenodd"
-								d="M10.293 3.293a1 1 0 011.414 0l6 6a1 1 0 010 1.414l-6 6a1 1 0 01-1.414-1.414L14.586 11H3a1 1 0 110-2h11.586l-4.293-4.293a1 1 0 010-1.414z"
-								clip-rule="evenodd"
-							/>
-						</svg>
-					</button>
+					<InfoPanel tone="warning" icon={null} className="mt-4 text-left max-w-md mx-auto">
+						<p class="text-xs">
+							<strong>Troubleshooting:</strong> Check servo power, connections, and ensure no other applications
+							are using the serial port.
+						</p>
+					</InfoPanel>
 				</div>
 			{:else}
+				<!-- Reached when the module is off this step's line: 'idle' with no save on record
+				     (an abort or reset elsewhere), or a state before 'completed'. Trust the module's
+				     own instruction, and offer the way back rather than a dead end. -->
 				<div class="text-center">
-					<div
-						class="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4"
-					>
-						<svg
-							class="w-8 h-8 text-green-600"
-							fill="none"
-							stroke="currentColor"
-							viewBox="0 0 24 24"
-						>
-							<path
-								stroke-linecap="round"
-								stroke-linejoin="round"
-								stroke-width="2"
-								d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3-3m0 0l-3 3m3-3v12"
-							></path>
-						</svg>
-					</div>
-					<h4 class="text-xl font-semibold text-gray-900 mb-4">Calibration Saved Successfully!</h4>
-					<p class="text-gray-600 mb-6">
-						All calibration data has been written to servo memory and saved to the robot's
-						configuration files.
+					<p class="text-gray-600 mb-4">
+						{readings?.instruction || `Unexpected calibration state: ${calibrationState}`}
 					</p>
-
-					{#if calibrationFile}
-						<div class="bg-green-50 p-4 rounded-lg mb-6">
-							<h5 class="font-medium text-green-900 mb-2">Calibration File Saved:</h5>
-							<p class="text-green-800 text-sm font-mono break-all">
-								{calibrationFile}
-							</p>
-						</div>
-					{/if}
-
-					<div class="bg-blue-50 p-4 rounded-lg mb-6 text-left max-w-md mx-auto">
-						<h5 class="font-medium text-blue-900 mb-2">Next Steps:</h5>
-						<ul class="text-blue-800 text-sm space-y-1">
-							<li>• Motors have been re-enabled with holding torque</li>
-							<li>• Ready for normal operation and control</li>
-						</ul>
+					<div class="flex justify-center space-x-3">
+						<Button variant="secondary" onclick={() => sensorReadings.current.refetch()}>
+							Refresh Status
+						</Button>
+						{#if calibrationState === 'idle'}
+							<Button variant="primary" onclick={() => goToNamedStep('calibration_start')}>
+								Start New Calibration
+							</Button>
+						{/if}
 					</div>
-
-					<button
-						onclick={nextStep}
-						class="inline-flex items-center px-6 py-3 border border-transparent text-base font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
-					>
-						Complete Setup
-						<svg class="ml-2 -mr-1 w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
-							<path
-								fill-rule="evenodd"
-								d="M10.293 3.293a1 1 0 011.414 0l6 6a1 1 0 010 1.414l-6 6a1 1 0 01-1.414-1.414L14.586 11H3a1 1 0 110-2h11.586l-4.293-4.293a1 1 0 010-1.414z"
-								clip-rule="evenodd"
-							/>
-						</svg>
-					</button>
 				</div>
 			{/if}
-		{:else if canSave && hasFailedSave}
-			<!-- Completed, but the last save attempt failed. State deliberately stays
-			     'completed' (see workflow.go's saveCalibration) so save_calibration is
-			     retryable -- this must not silently fall back to the plain "Ready to Save"
-			     panel below once the transient banner clears. -->
-			<div class="text-center">
-				<div
-					class="w-16 h-16 bg-amber-100 rounded-full flex items-center justify-center mx-auto mb-4"
-				>
-					<svg class="w-8 h-8 text-amber-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path
-							stroke-linecap="round"
-							stroke-linejoin="round"
-							stroke-width="2"
-							d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L3.732 16.5c-.77.833.192 2.5 1.732 2.5z"
-						></path>
-					</svg>
-				</div>
-				<h4 class="text-xl font-semibold text-gray-900 mb-4">Save Attempt Failed</h4>
-				<p class="text-amber-800 mb-6 max-w-md mx-auto">
-					{lastSaveError ||
-						'The last attempt to save calibration data failed. Your recorded ranges are unaffected -- retry when ready.'}
-				</p>
-
-				<div class="space-y-3">
-					<button
-						onclick={saveCalibration}
-						disabled={isLoading}
-						class="inline-flex items-center px-6 py-3 border border-transparent text-base font-medium rounded-md text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500 disabled:opacity-50 disabled:cursor-not-allowed"
-					>
-						{#if isLoading}
-							<div class="animate-spin rounded-full h-5 w-5 border-b-2 border-white mr-3"></div>
-							Retrying...
-						{:else}
-							Retry Save
-						{/if}
-					</button>
-
-					<div>
-						<!-- Ungated on purpose. sensor.go advertises reset in every state and
-						     workflow.go's reset has no state guard, so canRun would always be true
-						     here -- and this is the only escape hatch from a stuck 'completed' save
-						     failure, so it must stay reachable even if that ever changes. -->
-						<button
-							onclick={resetCalibration}
-							disabled={isLoading}
-							class="inline-flex items-center px-4 py-2 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
-						>
-							{#if isLoading}
-								<div
-									class="animate-spin rounded-full h-4 w-4 border-b-2 border-gray-400 mr-2"
-								></div>
-								Resetting...
-							{:else}
-								Start Over Instead
-							{/if}
-						</button>
-					</div>
-				</div>
-
-				<div class="mt-4 bg-yellow-50 p-3 rounded text-left max-w-md mx-auto">
-					<p class="text-yellow-800 text-xs">
-						<strong>Troubleshooting:</strong> Check servo power, connections, and ensure no other applications
-						are using the serial port.
-					</p>
-				</div>
-			</div>
-		{:else if canSave}
-			<!-- Ready to save -->
-			<div class="text-center">
-				<h4 class="text-xl font-semibold text-gray-900 mb-4">Ready to Save Calibration</h4>
-
-				<div class="bg-blue-50 p-4 rounded-lg mb-6 text-left max-w-2xl mx-auto">
-					<h5 class="font-medium text-blue-900 mb-3">What will be saved:</h5>
-					<ul class="text-blue-800 text-sm space-y-2">
-						<li>• <strong>Homing offsets</strong> written to servo EEPROM registers</li>
-						<li>• <strong>Range limits</strong> (min/max positions) written to servo EEPROM</li>
-						<li>
-							• <strong>Calibration file</strong> saved to robot computer for future reference
-						</li>
-						<li>• <strong>Drive modes and normalization</strong> configured per servo</li>
-					</ul>
-				</div>
-
-				<div class="bg-amber-50 p-4 rounded-lg mb-6">
-					<div class="flex items-start">
-						<div class="flex-shrink-0">
-							<svg
-								class="h-5 w-5 text-amber-600"
-								fill="none"
-								stroke="currentColor"
-								viewBox="0 0 24 24"
-							>
-								<path
-									stroke-linecap="round"
-									stroke-linejoin="round"
-									stroke-width="2"
-									d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L3.732 16.5c-.77.833.192 2.5 1.732 2.5z"
-								></path>
-							</svg>
-						</div>
-						<div class="ml-3">
-							<p class="text-amber-800 text-sm">
-								<strong>Note:</strong> This process writes data to servo EEPROM memory. Once saved, the
-								calibration will persist across power cycles and be ready for normal operation.
-							</p>
-						</div>
-					</div>
-				</div>
-
-				<button
-					onclick={saveCalibration}
-					disabled={isLoading}
-					class="inline-flex items-center px-6 py-3 border border-transparent text-base font-medium rounded-md text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500 disabled:opacity-50 disabled:cursor-not-allowed"
-				>
-					{#if isLoading}
-						<div class="animate-spin rounded-full h-5 w-5 border-b-2 border-white mr-3"></div>
-						Saving Calibration...
-					{:else}
-						<svg class="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path
-								stroke-linecap="round"
-								stroke-linejoin="round"
-								stroke-width="2"
-								d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3-3m0 0l-3 3m3-3v12"
-							></path>
-						</svg>
-						Save Calibration Data
-					{/if}
-				</button>
-
-				<p class="mt-3 text-xs text-gray-600">
-					This process typically takes 2-3 seconds to write to all servo registers.
-				</p>
-			</div>
-		{:else if isError}
-			<!-- Error state -->
-			<div class="text-center">
-				<div
-					class="w-16 h-16 bg-red-100 rounded-full flex items-center justify-center mx-auto mb-4"
-				>
-					<svg class="w-8 h-8 text-red-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path
-							stroke-linecap="round"
-							stroke-linejoin="round"
-							stroke-width="2"
-							d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L3.732 16.5c-.77.833.192 2.5 1.732 2.5z"
-						></path>
-					</svg>
-				</div>
-				<h4 class="text-xl font-semibold text-gray-900 mb-4">Save Error</h4>
-				<p class="text-red-600 mb-6">
-					{readings?.error ||
-						'Failed to save calibration data. This may be due to servo communication issues.'}
-				</p>
-
-				<div class="space-y-3">
-					<!-- No "Retry Save" here: save_calibration requires state 'completed'
-					     (workflow.go's saveCalibration), which this branch never has -- a save
-					     failure deliberately stays 'completed' (see canSave && hasFailedSave
-					     above), so a genuine 'error' state has nothing for save_calibration to
-					     retry. Reset is the only way out. -->
-					<button
-						onclick={resetCalibration}
-						disabled={isLoading}
-						class="inline-flex items-center px-4 py-2 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
-					>
-						{#if isLoading}
-							<div class="animate-spin rounded-full h-4 w-4 border-b-2 border-gray-400 mr-2"></div>
-							Resetting...
-						{:else}
-							Reset Calibration
-						{/if}
-					</button>
-				</div>
-
-				<div class="mt-4 bg-yellow-50 p-3 rounded text-left max-w-md mx-auto">
-					<p class="text-yellow-800 text-xs">
-						<strong>Troubleshooting:</strong> Check servo power, connections, and ensure no other applications
-						are using the serial port.
-					</p>
-				</div>
-			</div>
-		{:else}
-			<!-- Reached when the module is off this step's line: 'idle' with no save on record
-			     (an abort or reset elsewhere), or a state before 'completed'. Trust the module's
-			     own instruction, and offer the way back rather than a dead end. -->
-			<div class="text-center">
-				<p class="text-gray-600 mb-4">
-					{readings?.instruction || `Unexpected calibration state: ${calibrationState}`}
-				</p>
-				<div class="flex justify-center space-x-3">
-					<button
-						onclick={() => sensorReadings.current.refetch()}
-						class="px-4 py-2 bg-gray-600 text-white rounded-md hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-gray-500"
-					>
-						Refresh Status
-					</button>
-					{#if calibrationState === 'idle'}
-						<button
-							onclick={() => goToNamedStep('calibration_start')}
-							class="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
-						>
-							Start New Calibration
-						</button>
-					{/if}
-				</div>
-			</div>
-		{/if}
+		</CalibrationStatusGate>
 	</div>
 
 	<!-- Success Message. Omitted when torque failed -- the panel above already carries that
 	     warning prominently, and "ready for operation" would contradict it. -->
 	{#if showSaved && torqueOutcome?.enabled !== false}
-		<div class="bg-green-50 p-4 rounded-lg">
-			<div class="flex items-center">
-				<svg class="w-5 h-5 text-green-600 mr-3" fill="currentColor" viewBox="0 0 20 20">
-					<path
-						fill-rule="evenodd"
-						d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
-						clip-rule="evenodd"
-					/>
-				</svg>
-				<span class="text-green-900 font-medium">
-					Calibration data saved successfully! Your SO-101 arm is now ready for operation.
-				</span>
-			</div>
-		</div>
+		<InfoPanel tone="success">
+			<span class="text-green-900 font-medium">
+				Calibration data saved successfully! Your SO-101 arm is now ready for operation.
+			</span>
+		</InfoPanel>
 	{/if}
 </div>

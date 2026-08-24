@@ -3,6 +3,7 @@
 	import { MOTOR_SETUP_ORDER } from '$lib/constants';
 	import { logger } from '$lib/utils/logger';
 	import BusScanPanel from '$lib/components/BusScanPanel.svelte';
+	import { Button, Icon, InfoPanel } from '$lib/components/ui';
 
 	let {
 		sendCommand,
@@ -148,67 +149,36 @@
 	<!-- Instructions -->
 	<div class="mb-8">
 		<h3 class="text-2xl font-bold text-gray-900 mb-4">Motor Verification</h3>
-		<div class="bg-blue-50 p-6 rounded-lg">
-			<div class="flex items-start">
-				<div class="flex-shrink-0">
-					<svg class="w-6 h-6 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path
-							stroke-linecap="round"
-							stroke-linejoin="round"
-							stroke-width="2"
-							d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
-						></path>
-					</svg>
-				</div>
-				<div class="ml-3">
-					<h4 class="font-semibold text-blue-900 mb-2">Ready for Verification</h4>
-					<p class="text-blue-800 text-sm mb-2">
-						Now connect ALL servo motors in a daisy chain configuration and verify they communicate
-						properly.
-					</p>
-					<div class="text-blue-800 text-sm">
-						<p><strong>Connection Order:</strong></p>
-						<p>
-							Controller → Shoulder Pan → Shoulder Lift → Elbow → Wrist Flex → Wrist Roll → Gripper
-						</p>
-					</div>
-				</div>
+		<InfoPanel tone="info" title="Ready for Verification">
+			<p class="text-blue-800 text-sm mb-2">
+				Now connect ALL servo motors in a daisy chain configuration and verify they communicate
+				properly.
+			</p>
+			<div class="text-blue-800 text-sm">
+				<p><strong>Connection Order:</strong></p>
+				<p>Controller → Shoulder Pan → Shoulder Lift → Elbow → Wrist Flex → Wrist Roll → Gripper</p>
 			</div>
-		</div>
+		</InfoPanel>
 	</div>
 
 	<!-- Verification Button (also serves as retry after a failed call, since
 	     verificationResults stays null in that case) -->
 	{#if !verificationResults}
 		{#if verifiedEarlier}
-			<div class="bg-green-50 border border-green-200 rounded-lg p-4 mb-4 text-center">
+			<InfoPanel tone="success" icon={null} className="mb-4 text-center">
 				<p class="text-green-800 text-sm">
 					All motors passed verification earlier in this session. You can continue with "Next", or
 					re-run the check below if anything about the wiring changed.
 				</p>
-			</div>
+			</InfoPanel>
 		{/if}
 		<div class="text-center mb-8">
-			<button
-				onclick={verifyMotors}
-				disabled={isLoading}
-				class="inline-flex items-center px-6 py-3 border border-transparent text-base font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
-			>
-				{#if isLoading}
-					<div class="animate-spin rounded-full h-5 w-5 border-b-2 border-white mr-3"></div>
-					Verifying Motors...
-				{:else}
-					<svg class="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path
-							stroke-linecap="round"
-							stroke-linejoin="round"
-							stroke-width="2"
-							d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"
-						></path>
-					</svg>
-					Verify All Motors
+			<Button onclick={verifyMotors} loading={isLoading} variant="primary" size="lg">
+				{#if !isLoading}
+					<Icon name="checkCircle" className="w-5 h-5 mr-3" />
 				{/if}
-			</button>
+				{isLoading ? 'Verifying Motors...' : 'Verify All Motors'}
+			</Button>
 		</div>
 
 		{#if error}
@@ -235,39 +205,21 @@
 						<span
 							class="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium bg-green-100 text-green-800"
 						>
-							<svg class="w-4 h-4 mr-1" fill="currentColor" viewBox="0 0 20 20">
-								<path
-									fill-rule="evenodd"
-									d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
-									clip-rule="evenodd"
-								/>
-							</svg>
+							<Icon name="checkSmall" className="w-4 h-4 mr-1" />
 							All Motors OK
 						</span>
 					{:else if allMotorsOk}
 						<span
 							class="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium bg-yellow-100 text-yellow-800"
 						>
-							<svg class="w-4 h-4 mr-1" fill="currentColor" viewBox="0 0 20 20">
-								<path
-									fill-rule="evenodd"
-									d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l6.518 11.59c.75 1.334-.213 2.98-1.742 2.98H3.48c-1.53 0-2.492-1.646-1.743-2.98l6.52-11.59zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z"
-									clip-rule="evenodd"
-								/>
-							</svg>
+							<Icon name="warningTriangleSolid" className="w-4 h-4 mr-1" />
 							Verified with Warnings
 						</span>
 					{:else}
 						<span
 							class="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium bg-red-100 text-red-800"
 						>
-							<svg class="w-4 h-4 mr-1" fill="currentColor" viewBox="0 0 20 20">
-								<path
-									fill-rule="evenodd"
-									d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z"
-									clip-rule="evenodd"
-								/>
-							</svg>
+							<Icon name="xCircleSolid" className="w-4 h-4 mr-1" />
 							Issues Found
 						</span>
 					{/if}
@@ -331,52 +283,27 @@
 			<!-- Action Buttons -->
 			<div class="flex flex-wrap gap-3 justify-center">
 				{#if !allMotorsOk}
-					<button
-						onclick={verifyMotors}
-						disabled={isLoading}
-						class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
-					>
-						{#if isLoading}
-							<div class="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
-							Retrying...
-						{:else}
-							<svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path
-									stroke-linecap="round"
-									stroke-linejoin="round"
-									stroke-width="2"
-									d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
-								></path>
-							</svg>
-							Retry Verification
+					<Button onclick={verifyMotors} loading={isLoading} variant="primary">
+						{#if !isLoading}
+							<Icon name="refresh" className="w-4 h-4 mr-2" />
 						{/if}
-					</button>
+						{isLoading ? 'Retrying...' : 'Retry Verification'}
+					</Button>
 
-					<div class="bg-yellow-50 p-4 rounded-lg border border-yellow-200 max-w-md">
-						<h5 class="font-medium text-yellow-900 mb-2">Troubleshooting Tips:</h5>
+					<InfoPanel tone="warning" icon={null} title="Troubleshooting Tips:" className="max-w-md">
 						<ul class="text-yellow-800 text-sm space-y-1">
 							<li>• Check all servo cable connections</li>
 							<li>• Ensure power supply is stable</li>
 							<li>• Verify motors are connected in daisy chain</li>
 							<li>• Make sure no other applications are using the serial port</li>
 						</ul>
-					</div>
+					</InfoPanel>
 				{:else}
-					<!-- Success - all motors communicating (model_detection_failed doesn't block) -->
+					<!-- Success - all motors communicating (model_detection_failed doesn't block).
+					     Not an InfoPanel: this is a stacked, centered confirmation card, not the
+					     icon-beside-title layout InfoPanel renders. -->
 					<div class="bg-green-50 p-6 rounded-lg border border-green-200 max-w-md text-center">
-						<svg
-							class="w-12 h-12 text-green-600 mx-auto mb-4"
-							fill="none"
-							stroke="currentColor"
-							viewBox="0 0 24 24"
-						>
-							<path
-								stroke-linecap="round"
-								stroke-linejoin="round"
-								stroke-width="2"
-								d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"
-							></path>
-						</svg>
+						<Icon name="checkCircle" className="w-12 h-12 text-green-600 mx-auto mb-4" />
 						<h5 class="font-semibold text-green-900 mb-2">Verification Complete!</h5>
 						<p class="text-green-800 text-sm mb-4">
 							{#if hasWarnings}
@@ -388,19 +315,10 @@
 								step.
 							{/if}
 						</p>
-						<button
-							onclick={nextStep}
-							class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500"
-						>
+						<Button onclick={nextStep} variant="success">
 							Continue
-							<svg class="ml-2 -mr-1 w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
-								<path
-									fill-rule="evenodd"
-									d="M10.293 3.293a1 1 0 011.414 0l6 6a1 1 0 010 1.414l-6 6a1 1 0 01-1.414-1.414L14.586 11H3a1 1 0 110-2h11.586l-4.293-4.293a1 1 0 010-1.414z"
-									clip-rule="evenodd"
-								/>
-							</svg>
-						</button>
+							<Icon name="arrowRight" className="ml-2 -mr-1 w-4 h-4" />
+						</Button>
 					</div>
 				{/if}
 			</div>
