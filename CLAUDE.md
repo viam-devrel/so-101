@@ -245,10 +245,16 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
   transaction's whole request+response round trip, and `enforceCommandGap`'s sleep (default
   1ms, never overridden here -- see `registry.go`'s `feetech.BusConfig` literal) runs *while
   that lock is held*. So a queued caller pays the ~1ms gap of whatever transaction is ahead of
-  it, not just its own. An `AnyServoMoving` SyncRead (1-byte `RegMoving`) across 6 servos is ~56
-  wire bytes (~0.56ms @ 1Mbaud) vs. ~62 for a position SyncRead (~0.62ms) -- both dominated by
-  the fixed 1ms gap, not payload size, so one poll costs roughly one extra ~1.6ms transaction
-  slot to whoever is behind it. See `internal/controller/bus_contention_test.go`.
+  it, not just its own -- both transactions are dominated by that fixed gap, not by payload
+  size. Measured on hardware (`SO101_PORT=... go test ./internal/controller -run
+  HardwareBusLatency`, 300 samples @ 1Mbaud): `SyncReadPositions(6)` 1.45ms mean / 1.51ms p95,
+  `AnyServoMoving(5)` 1.23ms. A 50Hz poll costs a concurrent position read only +63us mean --
+  but its p95 goes 1.51ms -> 2.63ms, because a read that *does* collide pays a whole extra
+  transaction. An unthrottled poller costs +1.38ms mean, i.e. one full transaction, so the
+  degradation is linear and bounded. Batching matters more than the poll does: the same 5
+  Moving reads issued one per servo (what `WaitForServosToStop` did before) cost 5.33ms per
+  cycle vs. 1.23ms batched, and that loop runs on every blocking move. See
+  `internal/controller/bus_contention_test.go` and `bus_latency_hardware_test.go`.
 - **`Speed: 0` means MAXIMUM, not stopped**, and **`Acc: 0` means UNLIMITED, not zero** — both
   Feetech register sentinels are the opposite of what they look like, and both have already
   caused real bugs in this project. A short-travel joint scaled down by a small `k` can round
