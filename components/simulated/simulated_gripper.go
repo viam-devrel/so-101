@@ -26,7 +26,17 @@ const (
 	gripperTravelPctPerSec = 200.0
 	// gripperUpdateInterval is how often the background goroutine advances the jaw.
 	gripperUpdateInterval = 10 * time.Millisecond
+	// jawTrajectoryHistory is how many GoToInputs batches the gripper remembers for
+	// get_jaw_trajectory. Small on purpose: this is a debugging window, not a log.
+	jawTrajectoryHistory = 8
 )
+
+// jawBatch is one recorded GoToInputs call.
+type jawBatch struct {
+	steps          [][]referenceframe.Input
+	totalTravelRad float64
+	offset         time.Duration // since construction; monotonic so tests stay deterministic
+}
 
 func init() {
 	resource.RegisterComponent(gripper.API, SO101SimulatedGripperModel,
@@ -96,6 +106,11 @@ type simulatedSO101Gripper struct {
 	// targetPct = currentPct makes an in-flight awaitArrival see "arrived" rather than
 	// "stopped", so GoToInputs would silently carry on to the next batch step.
 	stopped bool
+
+	// createdAt anchors jawBatch.offset to a monotonic clock so tests stay deterministic.
+	createdAt time.Time
+	// jawBatches is a ring of the most recent GoToInputs calls, for get_jaw_trajectory.
+	jawBatches []jawBatch
 }
 
 func newSimulatedSO101Gripper(
@@ -132,6 +147,7 @@ func newSimulatedSO101Gripper(
 		cancelCtx:      cancelCtx,
 		cancelFunc:     cancelFunc,
 		lastUpdated:    time.Now(),
+		createdAt:      time.Now(),
 	}
 	g.startMotionSimulation()
 	return g, nil
@@ -305,7 +321,26 @@ func (g *simulatedSO101Gripper) DoCommand(
 		return map[string]interface{}{
 			"position_percentage": g.currentPct,
 			"target_percentage":   g.targetPct,
+			"jaw_angle_rad":       geometry.JawRadiansFromPct(g.currentPct),
+			"dof":                 len(g.model.DoF()),
 		}, nil
+	case "get_jaw_trajectory":
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		out := make([]map[string]interface{}, 0, len(g.jawBatches))
+		for _, b := range g.jawBatches {
+			steps := make([][]float64, len(b.steps))
+			for i, s := range b.steps {
+				steps[i] = append([]float64(nil), s...)
+			}
+			out = append(out, map[string]interface{}{
+				"step_count":       len(b.steps),
+				"total_travel_rad": b.totalTravelRad,
+				"offset_ms":        float64(b.offset.Milliseconds()),
+				"steps":            steps,
+			})
+		}
+		return map[string]interface{}{"batches": out}, nil
 	default:
 		return nil, fmt.Errorf("unknown command: %v", cmd["command"])
 	}
@@ -342,6 +377,42 @@ func (g *simulatedSO101Gripper) CurrentInputs(ctx context.Context) ([]referencef
 	return []referenceframe.Input{geometry.JawRadiansFromPct(pct)}, nil
 }
 
+// recordJawTrajectory logs and remembers one GoToInputs batch, for get_jaw_trajectory. Called
+// after validation passes but before any movement, so a rejected batch is never recorded.
+func (g *simulatedSO101Gripper) recordJawTrajectory(steps [][]referenceframe.Input) {
+	if len(steps) == 0 {
+		return
+	}
+
+	g.mu.Lock()
+	currentRad := geometry.JawRadiansFromPct(g.currentPct)
+	g.mu.Unlock()
+	current := []referenceframe.Input{currentRad}
+
+	totalTravel := 0.0
+	prev := currentRad
+	for _, step := range steps {
+		totalTravel += math.Abs(step[0] - prev)
+		prev = step[0]
+	}
+	linf := referenceframe.InputsLinfDistance(current, steps[len(steps)-1])
+
+	g.logger.Infof(
+		"jaw trajectory: %d steps, theta %.4f -> %.4f rad, total travel %.4f rad, Linf from current %.4f rad",
+		len(steps), steps[0][0], steps[len(steps)-1][0], totalTravel, linf)
+
+	g.mu.Lock()
+	g.jawBatches = append(g.jawBatches, jawBatch{
+		steps:          steps,
+		totalTravelRad: totalTravel,
+		offset:         time.Since(g.createdAt),
+	})
+	if len(g.jawBatches) > jawTrajectoryHistory {
+		g.jawBatches = g.jawBatches[len(g.jawBatches)-jawTrajectoryHistory:]
+	}
+	g.mu.Unlock()
+}
+
 // GoToInputs drives the jaw through each step in turn. The motion service batches consecutive
 // trajectory steps for one component into a single variadic call, so a batch is the normal case.
 // Every step is validated before any of them is applied: a batch that fails halfway would
@@ -372,6 +443,8 @@ func (g *simulatedSO101Gripper) GoToInputs(ctx context.Context, inputSteps ...[]
 				i, step[0], jawLimits.Min, jawLimits.Max)
 		}
 	}
+
+	g.recordJawTrajectory(inputSteps)
 
 	g.clearStopped()
 	for i, step := range inputSteps {

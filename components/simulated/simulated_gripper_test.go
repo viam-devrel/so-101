@@ -371,3 +371,51 @@ func TestGoToInputsAwaitsOnlyFinalStep(t *testing.T) {
 		"50-step batch of negligible motion took %v; per-step blocking would cost ~%v",
 		elapsed, steps*gripperUpdateInterval)
 }
+
+// TestJawTrajectoryDoCommand covers get_jaw_trajectory: a recorded batch reports its step count
+// and total travel, and the ring buffer caps at jawTrajectoryHistory regardless of how many
+// batches are recorded.
+func TestJawTrajectoryDoCommand(t *testing.T) {
+	ctx := context.Background()
+	g := newArticulatedTestGripper(t)
+
+	mid := (geometry.GripperJointMin + geometry.GripperJointMax) / 2
+	require.NoError(t, g.GoToInputs(ctx,
+		[]referenceframe.Input{mid},
+		[]referenceframe.Input{geometry.GripperJointMax},
+	))
+
+	resp, err := g.DoCommand(ctx, map[string]interface{}{"command": "get_jaw_trajectory"})
+	require.NoError(t, err)
+	batches, ok := resp["batches"].([]map[string]interface{})
+	require.True(t, ok, "batches should be []map[string]interface{}, got %T", resp["batches"])
+	require.Len(t, batches, 1)
+	assert.Equal(t, 2, batches[0]["step_count"])
+	assert.Greater(t, batches[0]["total_travel_rad"].(float64), 0.0)
+
+	// Record more batches than the ring buffer holds; only the most recent jawTrajectoryHistory
+	// should survive.
+	for i := 0; i < jawTrajectoryHistory+3; i++ {
+		require.NoError(t, g.GoToInputs(ctx, []referenceframe.Input{geometry.GripperJointMin}))
+		require.NoError(t, g.GoToInputs(ctx, []referenceframe.Input{geometry.GripperJointMax}))
+	}
+
+	resp, err = g.DoCommand(ctx, map[string]interface{}{"command": "get_jaw_trajectory"})
+	require.NoError(t, err)
+	batches, ok = resp["batches"].([]map[string]interface{})
+	require.True(t, ok)
+	assert.Len(t, batches, jawTrajectoryHistory, "ring buffer should cap at jawTrajectoryHistory")
+}
+
+// TestGetPositionReportsJaw checks get_position's added jaw_angle_rad and dof fields.
+func TestGetPositionReportsJaw(t *testing.T) {
+	ctx := context.Background()
+	g := newArticulatedTestGripper(t)
+
+	require.NoError(t, g.Open(ctx, nil))
+
+	resp, err := g.DoCommand(ctx, map[string]interface{}{"command": "get_position"})
+	require.NoError(t, err)
+	assert.Equal(t, 1, resp["dof"])
+	assert.InDelta(t, geometry.GripperJointMax, resp["jaw_angle_rad"].(float64), 1e-9)
+}
