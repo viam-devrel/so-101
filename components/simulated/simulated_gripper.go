@@ -230,10 +230,9 @@ func (g *simulatedSO101Gripper) Geometries(
 	ctx context.Context, extra map[string]interface{},
 ) ([]spatialmath.Geometry, error) {
 	g.mu.Lock()
-	pct := g.currentPct / 100.0
+	pct := g.currentPct
 	g.mu.Unlock()
-	jawAngle := geometry.GripperJointMin + pct*(geometry.GripperJointMax-geometry.GripperJointMin)
-	return geometry.BuildGripperMeshes(g.gripperType, g.meshDetail, jawAngle)
+	return geometry.BuildGripperMeshes(g.gripperType, g.meshDetail, geometry.JawAngleFromPct(pct))
 }
 
 // Status returns the current status of the resource as a map of key-value pairs.

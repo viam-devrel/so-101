@@ -205,3 +205,21 @@ func TestGripperFrameResolvesToTCPInFrameSystem(t *testing.T) {
 	require.True(t, ok, "the gripper contributed no geometry to the frame system: %v", slices.Collect(maps.Keys(geoms)))
 	assert.Len(t, gif.Geometries(), 2, "gripper meshes missing from frame-system geometry")
 }
+
+// TestJawAngleBijection pins the percent<->radian mapping shared by the model builder, both
+// gripper components, and GoToInputs. A drift here silently rescales every jaw command.
+func TestJawAngleBijection(t *testing.T) {
+	assert.InDelta(t, GripperJointMin, JawAngleFromPct(0), 1e-12)
+	assert.InDelta(t, GripperJointMax, JawAngleFromPct(100), 1e-12)
+
+	for _, pct := range []float64{0, 12.5, 50, 87.3, 100} {
+		back := JawPctFromAngle(JawAngleFromPct(pct))
+		assert.InDeltaf(t, pct, back, 1e-9, "round trip lost %v", pct)
+	}
+
+	// Out-of-range inputs clamp rather than extrapolating into the servo stops.
+	assert.InDelta(t, GripperJointMin, JawAngleFromPct(-25), 1e-12)
+	assert.InDelta(t, GripperJointMax, JawAngleFromPct(150), 1e-12)
+	assert.InDelta(t, 0.0, JawPctFromAngle(GripperJointMin-1), 1e-12)
+	assert.InDelta(t, 100.0, JawPctFromAngle(GripperJointMax+1), 1e-12)
+}

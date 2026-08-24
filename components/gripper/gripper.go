@@ -335,8 +335,7 @@ func (g *so101Gripper) jawAngle(ctx context.Context) float64 {
 	if err != nil {
 		return geometry.GripperJointMin
 	}
-	pct := math.Max(0, math.Min(1, percent/100.0))
-	return geometry.GripperJointMin + pct*(geometry.GripperJointMax-geometry.GripperJointMin)
+	return geometry.JawAngleFromPct(percent)
 }
 
 // Geometries serves the gripper as meshes: a static body and a moving part posed by
