@@ -3,6 +3,7 @@ package simulated
 import (
 	"context"
 	"errors"
+	"math"
 	"testing"
 	"time"
 
@@ -208,7 +209,6 @@ func TestArticulatedJawConfig(t *testing.T) {
 	})
 
 	t.Run("articulated", func(t *testing.T) {
-		t.Skip("wired in Task 8")
 		g := newGripper(t, true)
 		m, err := g.Kinematics(ctx)
 		require.NoError(t, err)
@@ -244,4 +244,73 @@ func TestSetPositionStaysNonBlocking(t *testing.T) {
 	moving, err := g.IsMoving(ctx)
 	require.NoError(t, err)
 	assert.True(t, moving, "set_position should have started the jaw moving")
+}
+
+func newArticulatedTestGripper(t *testing.T) *simulatedSO101Gripper {
+	t.Helper()
+	ctx := context.Background()
+	g, err := newSimulatedSO101Gripper(ctx, nil, resource.Config{
+		Name:                "sim-gripper",
+		ConvertedAttributes: &SO101SimulatedGripperConfig{ArticulatedJaw: true},
+	}, logging.NewTestLogger(t))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, g.Close(ctx)) })
+	return g.(*simulatedSO101Gripper)
+}
+
+// TestGripperCurrentInputsTracksJaw checks the input reported to the frame system follows the
+// simulated jaw through the same bijection the meshes use.
+func TestGripperCurrentInputsTracksJaw(t *testing.T) {
+	ctx := context.Background()
+	g := newArticulatedTestGripper(t)
+
+	require.NoError(t, g.Open(ctx, nil))
+	in, err := g.CurrentInputs(ctx)
+	require.NoError(t, err)
+	require.Len(t, in, 1)
+	assert.InDelta(t, geometry.GripperJointMax, in[0], 1e-9, "open jaw should report the upper limit")
+
+	_, err = g.Grab(ctx, nil)
+	require.NoError(t, err)
+	in, err = g.CurrentInputs(ctx)
+	require.NoError(t, err)
+	assert.InDelta(t, geometry.GripperJointMin, in[0], 1e-9, "closed jaw should report the lower limit")
+}
+
+// TestGoToInputsValidation covers what the motion service will actually send. execute() batches
+// consecutive trajectory steps into one variadic GoToInputs call, so multi-step batches are the
+// normal case, not the exception.
+func TestGoToInputsValidation(t *testing.T) {
+	ctx := context.Background()
+	g := newArticulatedTestGripper(t)
+
+	t.Run("rejects wrong arity", func(t *testing.T) {
+		assert.Error(t, g.GoToInputs(ctx, []referenceframe.Input{0, 0}))
+		assert.Error(t, g.GoToInputs(ctx, []referenceframe.Input{}))
+	})
+
+	t.Run("rejects out-of-limit angles", func(t *testing.T) {
+		assert.Error(t, g.GoToInputs(ctx, []referenceframe.Input{geometry.GripperJointMax + 0.5}))
+		assert.Error(t, g.GoToInputs(ctx, []referenceframe.Input{geometry.GripperJointMin - 0.5}))
+	})
+
+	// Pins the chosen ULP-overshoot handling (see jawLimitEpsilon in simulated_gripper.go): a
+	// value 1 ULP above the limit -- exactly what Task 4's left-associative sweep produced --
+	// must not be rejected as out of bounds.
+	t.Run("accepts a 1-ULP overshoot at the limit", func(t *testing.T) {
+		overshoot := math.Nextafter(geometry.GripperJointMax, math.Inf(1))
+		assert.NoError(t, g.GoToInputs(ctx, []referenceframe.Input{overshoot}))
+	})
+
+	t.Run("applies a multi-step batch in order, ending at the last", func(t *testing.T) {
+		mid := (geometry.GripperJointMin + geometry.GripperJointMax) / 2
+		require.NoError(t, g.GoToInputs(ctx,
+			[]referenceframe.Input{mid},
+			[]referenceframe.Input{geometry.GripperJointMax},
+			[]referenceframe.Input{geometry.GripperJointMin},
+		))
+		in, err := g.CurrentInputs(ctx)
+		require.NoError(t, err)
+		assert.InDelta(t, geometry.GripperJointMin, in[0], 1e-9)
+	})
 }

@@ -290,12 +290,52 @@ func (g *simulatedSO101Gripper) Kinematics(ctx context.Context) (referenceframe.
 	return g.model, nil
 }
 
+// jawLimitEpsilon tolerates a planner-issued input that overshoots a joint limit by a few ULP.
+// rdk's frame system rejects an input outside its limit by even 1 ULP ("input out of bounds"),
+// but a trajectory riding a limit can legitimately land a couple ULP past it via left-associative
+// float math (see internal/geometry's angle-sweep gotcha). We validate against limit+/-epsilon,
+// then let geometry.JawPctFromRadians (which already saturates to 0/100) absorb the tiny
+// overshoot when converting -- so a value that passes validation can never drive the jaw past its
+// physical stop.
+const jawLimitEpsilon = 1e-6
+
+// CurrentInputs reports the jaw angle in radians. It is an error rather than a zero value when
+// articulated_jaw is off: robot/framesystem only asks components whose model has DoF, so being
+// asked at all while static means something is inconsistent.
 func (g *simulatedSO101Gripper) CurrentInputs(ctx context.Context) ([]referenceframe.Input, error) {
-	return nil, errors.ErrUnsupported
+	if !g.articulatedJaw {
+		return nil, errors.ErrUnsupported
+	}
+	g.mu.Lock()
+	pct := g.currentPct
+	g.mu.Unlock()
+	return []referenceframe.Input{geometry.JawRadiansFromPct(pct)}, nil
 }
 
-func (g *simulatedSO101Gripper) GoToInputs(ctx context.Context, inputs ...[]referenceframe.Input) error {
-	return errors.ErrUnsupported
+// GoToInputs drives the jaw through each step in turn. The motion service batches consecutive
+// trajectory steps for one component into a single variadic call, so a batch is the normal case.
+// Every step is validated before any of them is applied: a batch that fails halfway would
+// otherwise leave the jaw somewhere the planner did not intend.
+func (g *simulatedSO101Gripper) GoToInputs(ctx context.Context, inputSteps ...[]referenceframe.Input) error {
+	if !g.articulatedJaw {
+		return errors.ErrUnsupported
+	}
+	limits := g.model.DoF()
+	for i, step := range inputSteps {
+		if len(step) != len(limits) {
+			return fmt.Errorf("step %d: got %d inputs, the jaw takes %d", i, len(step), len(limits))
+		}
+		if step[0] < limits[0].Min-jawLimitEpsilon || step[0] > limits[0].Max+jawLimitEpsilon {
+			return fmt.Errorf("step %d: jaw angle %.6f rad is outside [%.6f, %.6f]",
+				i, step[0], limits[0].Min, limits[0].Max)
+		}
+	}
+	for _, step := range inputSteps {
+		if err := g.moveTo(ctx, geometry.JawPctFromRadians(step[0])); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (g *simulatedSO101Gripper) Close(ctx context.Context) error {
