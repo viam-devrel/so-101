@@ -21,31 +21,22 @@
 	const icon = $derived(ICONS[name]);
 </script>
 
-{#if icon.mode === 'solid'}
+{#if icon}
 	<svg
 		class={className}
 		viewBox={icon.viewBox}
-		fill="currentColor"
+		fill={icon.mode === 'solid' ? 'currentColor' : 'none'}
+		stroke={icon.mode === 'solid' ? undefined : 'currentColor'}
 		role={label ? 'img' : undefined}
 		aria-hidden={label ? undefined : 'true'}
 		aria-label={label}
 	>
 		{#each icon.paths as d}
-			<path fill-rule="evenodd" clip-rule="evenodd" {d} />
-		{/each}
-	</svg>
-{:else}
-	<svg
-		class={className}
-		viewBox={icon.viewBox}
-		fill="none"
-		stroke="currentColor"
-		role={label ? 'img' : undefined}
-		aria-hidden={label ? undefined : 'true'}
-		aria-label={label}
-	>
-		{#each icon.paths as d}
-			<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" {d} />
+			{#if icon.mode === 'solid'}
+				<path fill-rule="evenodd" clip-rule="evenodd" {d} />
+			{:else}
+				<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" {d} />
+			{/if}
 		{/each}
 	</svg>
 {/if}

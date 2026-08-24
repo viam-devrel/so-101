@@ -12,7 +12,7 @@
 	Consolidates the hand-rolled `bg-{color}-50` callout boxes repeated ~20x across the step
 	components (instructions, warnings, danger notices, the safety checklist). `tone` picks a
 	literal Tailwind class string per variant (see comment below) so Tailwind's scanner can find
-	them; `icon`/`iconLabel` override the tone's default icon, and omitting both hides the icon.
+	them; `icon` overrides the tone's default icon, and omitting both hides the icon.
 	Children are freeform -- callers vary between prose, a `<ul>`, or a small grid, so the body
 	is not prescribed beyond spacing.
 -->
@@ -20,18 +20,17 @@
 	import Icon from './Icon.svelte';
 	import type { IconName } from '$lib/icons';
 
-	type Tone = 'info' | 'success' | 'warning' | 'danger' | 'safety' | 'neutral';
+	type Tone = 'info' | 'success' | 'warning' | 'danger' | 'safety';
 
 	interface Props {
 		tone?: Tone;
 		title?: string;
 		icon?: IconName | null;
-		iconLabel?: string;
 		className?: string;
 		children?: any;
 	}
 
-	let { tone = 'info', title, icon, iconLabel, className = '', children }: Props = $props();
+	let { tone = 'info', title, icon, className = '', children }: Props = $props();
 
 	// Literal Tailwind strings only -- an interpolated `bg-${tone}-50` is invisible to the
 	// Tailwind v4 scanner (see so-101 CLAUDE.md).
@@ -73,13 +72,6 @@
 			title: 'text-amber-900',
 			body: 'text-amber-800',
 			defaultIcon: 'warningTriangle'
-		},
-		neutral: {
-			container: 'bg-gray-50',
-			icon: 'text-gray-600',
-			title: 'text-gray-900',
-			body: 'text-gray-700',
-			defaultIcon: null
 		}
 	};
 
@@ -91,21 +83,14 @@
 	<div class="flex items-start">
 		{#if resolvedIcon}
 			<div class="flex-shrink-0">
-				<Icon name={resolvedIcon} label={iconLabel} className="h-6 w-6 {config.icon}" />
-			</div>
-			<div class="ml-3 {config.body}">
-				{#if title}
-					<h4 class="font-medium {config.title} mb-2">{title}</h4>
-				{/if}
-				{@render children?.()}
-			</div>
-		{:else}
-			<div class="{config.body} w-full">
-				{#if title}
-					<h4 class="font-medium {config.title} mb-2">{title}</h4>
-				{/if}
-				{@render children?.()}
+				<Icon name={resolvedIcon} className="h-6 w-6 {config.icon}" />
 			</div>
 		{/if}
+		<div class="{resolvedIcon ? 'ml-3' : 'w-full'} {config.body}">
+			{#if title}
+				<h4 class="font-medium {config.title} mb-2">{title}</h4>
+			{/if}
+			{@render children?.()}
+		</div>
 	</div>
 </div>

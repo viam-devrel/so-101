@@ -209,7 +209,7 @@
 					disabled={!isFormValid || isTestingConnection || connectionStatus === 'success'}
 					variant="primary"
 					size="lg"
-					className="w-full"
+					fullWidth
 				>
 					{#if isTestingConnection}
 						<LoadingSpinner size="sm" className="mr-3" />

@@ -16,8 +16,7 @@ import type {
 // - Homing offset is a plain `pos - 2047`, without clampHomingOffset's sign-bit trim or
 //   encodePositionOffset's range check -- setup-app only ever displays homing_offset, never
 //   encodes it.
-// - No goroutine/ticker: range-recording samples are applied synchronously via
-//   `recordPositionSample`/`setRecordedRange`, not a 10ms background loop.
+// - No goroutine/ticker: recorded ranges are whatever a test seeds directly on the joints.
 // - Close()/recordingDone-channel joins and the mutex have no analogue; this is single-threaded.
 // - Every Go handler that returns `success: false` also returns a non-nil error. At the real
 //   gRPC boundary a returned error becomes a REJECTED call, not a resolved `{success:false}`
@@ -134,27 +133,8 @@ export class FakeCalibrationSensor {
 	}
 
 	/** Directly stamps a joint's recorded range, bypassing start_range_recording/samples. */
-	setRecordedRange(jointId: number, min: number, max: number, isCompleted = true): void {
-		const joint = this.requireJoint(jointId);
-		joint.recorded_min = min;
-		joint.recorded_max = max;
-		if (isCompleted) {
-			joint.range_min = min;
-			joint.range_max = max;
-		}
-		joint.is_completed = isCompleted;
-	}
 
 	/** One sample tick of recordPositions: updates current/min/max for the given joints. */
-	recordPositionSample(positions: Record<number, number>): void {
-		for (const [idStr, pos] of Object.entries(positions)) {
-			const joint = this.requireJoint(Number(idStr));
-			joint.current_position = pos;
-			if (pos < joint.recorded_min) joint.recorded_min = pos;
-			if (pos > joint.recorded_max) joint.recorded_max = pos;
-		}
-		this.positionSamples += 1;
-	}
 
 	/** Makes the next call to `command` throw `message`, mirroring a Go handler returning err. */
 	queueFailure(command: CalibrationCommand, message: string): void {
@@ -162,9 +142,6 @@ export class FakeCalibrationSensor {
 	}
 
 	/** Makes the next successful save_calibration report torque_enabled:false. */
-	queueTorqueFailure(message: string): void {
-		this.scriptedTorqueFailure = message;
-	}
 
 	/** Seeds motor_setup_verify's per-motor result for the next call. */
 	setMotorResult(name: string, result: MotorVerificationResult): void {

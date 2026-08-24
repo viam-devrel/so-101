@@ -1,10 +1,6 @@
 <script lang="ts">
 	// Usage: <Button variant="primary" fullWidth loading={saving} onclick={save}>Save</Button>
 	//
-	// fullWidth is the canonical way to make a button span its container.
-	// className still accepts a literal "w-full" for callers that predate
-	// fullWidth (e.g. SensorConfigForm.svelte, WorkflowSelector.svelte) — a
-	// later wave should migrate those to fullWidth and drop the className.
 	import LoadingSpinner from './LoadingSpinner.svelte';
 
 	interface Props {
@@ -12,11 +8,9 @@
 		size?: 'sm' | 'md' | 'lg';
 		disabled?: boolean;
 		loading?: boolean;
-		/** Preferred way to span the button's container; see file header. */
 		fullWidth?: boolean;
 		type?: 'button' | 'submit' | 'reset';
 		onclick?: () => void;
-		className?: string;
 		children?: any;
 	}
 
@@ -28,7 +22,6 @@
 		fullWidth = false,
 		type = 'button',
 		onclick,
-		className = '',
 		children
 	}: Props = $props();
 
@@ -50,7 +43,7 @@
 	};
 
 	const buttonClass = $derived(
-		`${baseClasses} ${variantClasses[variant]} ${sizeClasses[size]} ${fullWidth ? 'w-full' : ''} ${className}`
+		`${baseClasses} ${variantClasses[variant]} ${sizeClasses[size]} ${fullWidth ? 'w-full' : ''}`
 	);
 
 	const isDisabled = $derived(disabled || loading);

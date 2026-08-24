@@ -14,17 +14,15 @@
 	import type { IconName } from '$lib/icons';
 
 	interface Props {
-		/** @deprecated use variant */
-		type?: 'info' | 'success' | 'warning' | 'error';
 		variant?: 'info' | 'success' | 'warning' | 'error';
 		title?: string;
 		dismissible?: boolean;
 		children?: any;
 	}
 
-	let { type, variant, title, dismissible = false, children }: Props = $props();
+	let { variant = 'info', title, dismissible = false, children }: Props = $props();
 
-	const alertType = $derived(variant || type || 'info');
+	const alertType = $derived(variant);
 	let isVisible = $state(true);
 	let lastKey: string | null = null;
 
