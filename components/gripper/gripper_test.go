@@ -542,6 +542,60 @@ func TestIsHoldingSomethingReportsGrasp(t *testing.T) {
 	}
 }
 
+// TestIsHoldingSomethingRespectsCalibratedClosedPosition guards against the threshold expression
+// silently degrading to "pct > graspThresholdPct": every other fixture leaves closedPosition at
+// its 0.0 zero value, so that mutation would leave the rest of the suite green. With a calibrated
+// closed_position of 20%, a jaw reading 30% is only 10 percentage points past closed -- under the
+// 15pp threshold -- so it must read as NOT holding.
+func TestIsHoldingSomethingRespectsCalibratedClosedPosition(t *testing.T) {
+	ctx := context.Background()
+	fa := newFakeServoArm()
+	fa.percent = 30
+	g := newTestGripperWithConfig(t, fa, SO101GripperConfig{ArticulatedJaw: true})
+
+	_, err := g.DoCommand(ctx, map[string]interface{}{
+		"command": "calibrate_positions", "closed_position": 20.0,
+	})
+	require.NoError(t, err)
+
+	st, err := g.IsHoldingSomething(ctx, nil)
+	require.NoError(t, err)
+	assert.False(t, st.IsHoldingSomething,
+		"30%% is only 10pp past a calibrated closed_position of 20%%, under the 15pp threshold")
+}
+
+// TestConcurrentCurrentInputsPollingWithOpenGrab exercises the interleaving the jaw cache design
+// assumes: a viewer polling CurrentInputs continuously while Open/Grab command the same jaw from
+// another goroutine. Must pass under `go test -race`.
+func TestConcurrentCurrentInputsPollingWithOpenGrab(t *testing.T) {
+	ctx := context.Background()
+	fa := newFakeServoArm()
+	g := newTestGripperWithConfig(t, fa, SO101GripperConfig{ArticulatedJaw: true})
+
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				_, _ = g.CurrentInputs(ctx)
+			}
+		}
+	}()
+
+	for i := 0; i < 20; i++ {
+		require.NoError(t, g.Open(ctx, nil))
+		_, err := g.Grab(ctx, nil)
+		require.NoError(t, err)
+	}
+
+	close(stop)
+	<-done
+}
+
 // TestArticulatedJawConfigHardware covers the flag end to end. The ErrUnsupported half matters as
 // much as the enabled half: robot/framesystem's CurrentInputs walks every frame with DoF and hard-
 // errors if the component is not InputEnabled, so a 1-DoF model with unwired inputs would break
@@ -550,7 +604,12 @@ func TestArticulatedJawConfigHardware(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("default is static", func(t *testing.T) {
-		g := newTestGripper(t, newFakeServoArm())
+		fa := newFakeServoArm()
+		g := newTestGripper(t, fa)
+		assert.Len(t, fa.commands, 1,
+			"flag off is the shipping default: the constructor must issue only the capabilities "+
+				"probe, no jaw-cache prime")
+
 		m, err := g.Kinematics(ctx)
 		require.NoError(t, err)
 		assert.Empty(t, m.DoF(), "articulated_jaw must default to false")
@@ -584,6 +643,11 @@ func TestJawCacheBoundsBusReads(t *testing.T) {
 	ctx := context.Background()
 	fa := newFakeServoArm()
 	g := newTestGripperWithConfig(t, fa, SO101GripperConfig{ArticulatedJaw: true})
+
+	// Pin the clock (as TestJawCacheExpires does) so this doesn't depend on 20 calls completing
+	// inside a real 50ms wall-clock window.
+	base := time.Now()
+	g.now = func() time.Time { return base }
 
 	before := countCommands(fa, servocmd.CmdServoPosition)
 	for i := 0; i < 20; i++ {
@@ -678,7 +742,10 @@ func TestHardwareCurrentInputsTracksJaw(t *testing.T) {
 
 // TestStopDuringReadDoesNotStampStaleValue closes the window opened by releasing jawMu across the
 // bus read: an invalidation landing mid-read must not be overwritten by the in-flight pre-write
-// value and stamped fresh.
+// value and stamped fresh. The hook drives this through the real Stop path (Stop -> servoDo ->
+// invalidateJawCache), not a direct invalidateJawCache call, so it also proves Stop itself
+// invalidates. Hooks are invoked outside f.mu specifically so re-entering the gripper here is
+// safe.
 func TestStopDuringReadDoesNotStampStaleValue(t *testing.T) {
 	ctx := context.Background()
 	fa := newFakeServoArm()
@@ -689,7 +756,7 @@ func TestStopDuringReadDoesNotStampStaleValue(t *testing.T) {
 	// never runs.
 	g.invalidateJawCache()
 
-	fa.onRead = func() { g.invalidateJawCache() } // lands inside the unlocked window
+	fa.onRead = func() { _ = g.Stop(ctx, nil) } // lands inside the unlocked window
 	_, err := g.CurrentInputs(ctx)
 	require.NoError(t, err)
 	fa.onRead = nil
@@ -801,7 +868,6 @@ func TestGoToInputsAbortsOnStop(t *testing.T) {
 	fa := newFakeServoArm()
 	g := newTestGripperWithConfig(t, fa, SO101GripperConfig{ArticulatedJaw: true})
 
-	fa.onRead = nil
 	fa.onMove = func() { _ = g.Stop(context.Background(), nil) } // fires mid-batch
 	err := g.GoToInputs(ctx, []referenceframe.Input{geometry.GripperJointMax})
 	assert.Error(t, err, "a stopped batch must report that it did not complete")
