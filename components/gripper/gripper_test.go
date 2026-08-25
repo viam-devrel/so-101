@@ -11,6 +11,7 @@ import (
 	"go.viam.com/rdk/components/arm"
 	"go.viam.com/rdk/components/gripper"
 	"go.viam.com/rdk/logging"
+	"go.viam.com/rdk/referenceframe"
 	"go.viam.com/rdk/resource"
 	"go.viam.com/rdk/spatialmath"
 
@@ -511,4 +512,30 @@ func TestGripperPercentWritesHonorTheWaitFlag(t *testing.T) {
 				"issued commands: %v", fa.issued())
 		})
 	}
+}
+
+// TestArticulatedJawConfigHardware covers the flag end to end. The ErrUnsupported half matters as
+// much as the enabled half: robot/framesystem's CurrentInputs walks every frame with DoF and hard-
+// errors if the component is not InputEnabled, so a 1-DoF model with unwired inputs would break
+// the WHOLE machine's frame system, arm moves included.
+func TestArticulatedJawConfigHardware(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("default is static", func(t *testing.T) {
+		g := newTestGripper(t, newFakeServoArm())
+		m, err := g.Kinematics(ctx)
+		require.NoError(t, err)
+		assert.Empty(t, m.DoF(), "articulated_jaw must default to false")
+
+		_, err = g.CurrentInputs(ctx)
+		assert.ErrorIs(t, err, errors.ErrUnsupported)
+		assert.ErrorIs(t, g.GoToInputs(ctx, []referenceframe.Input{0}), errors.ErrUnsupported)
+	})
+
+	t.Run("articulated", func(t *testing.T) {
+		g := newTestGripperWithConfig(t, newFakeServoArm(), SO101GripperConfig{ArticulatedJaw: true})
+		m, err := g.Kinematics(ctx)
+		require.NoError(t, err)
+		require.Len(t, m.DoF(), 1)
+	})
 }

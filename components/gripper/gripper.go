@@ -43,6 +43,12 @@ type SO101GripperConfig struct {
 	// "low" (decimated, the default -- keeps motion planning fast) or "high"
 	// (full resolution).
 	MeshDetail string `json:"mesh_detail,omitempty"`
+
+	// ArticulatedJaw gives the gripper a 1-DoF revolute jaw joint in its kinematic model and makes
+	// it InputEnabled, so the motion planner sees the jaw as a variable it may drive. Off by
+	// default: the jaw does not affect the TCP, so the planner gains a degree of freedom that
+	// changes only collision geometry. See docs/gripper.md.
+	ArticulatedJaw bool `json:"articulated_jaw,omitempty"`
 }
 
 // Validate ensures all parts of the config are valid, and reports the arm as a required
@@ -82,12 +88,13 @@ type so101Gripper struct {
 	// arm owns the serial bus. The gripper drives its servo exclusively through this
 	// dependency's servo_* DoCommand family and holds no controller, port, or
 	// calibration state of its own.
-	arm         arm.Arm
-	logger      logging.Logger
-	gripperType string
-	meshDetail  string
-	servoID     int
-	model       referenceframe.Model
+	arm            arm.Arm
+	logger         logging.Logger
+	gripperType    string
+	meshDetail     string
+	servoID        int
+	model          referenceframe.Model
+	articulatedJaw bool
 
 	mu       sync.Mutex
 	isMoving atomic.Bool
@@ -139,7 +146,7 @@ func newSO101Gripper(ctx context.Context, deps resource.Dependencies, conf resou
 		meshDetail = geometry.LowDetail
 	}
 
-	model, err := geometry.BuildGripperModel(gripperType, meshDetail, conf.ResourceName().ShortName(), false)
+	model, err := geometry.BuildGripperModel(gripperType, meshDetail, conf.ResourceName().ShortName(), cfg.ArticulatedJaw)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build gripper kinematic model: %w", err)
 	}
@@ -152,6 +159,7 @@ func newSO101Gripper(ctx context.Context, deps resource.Dependencies, conf resou
 		meshDetail:     meshDetail,
 		servoID:        cfg.ServoID,
 		model:          model,
+		articulatedJaw: cfg.ArticulatedJaw,
 		speed:          30,
 		acceleration:   50,
 		openPosition:   95.0,
