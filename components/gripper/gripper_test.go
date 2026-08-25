@@ -98,8 +98,8 @@ type fakeServoArm struct {
 	moving         bool           // returned by servo_moving, unless movingResponse is set
 	movingResponse map[string]any // overrides the servo_moving response entirely, for shape tests
 	onServoMoving  func()         // called on a servo_moving command, before it is answered
-	onRead func() // invoked (outside f.mu) after a servo_position command, if set
-	onMove func() // invoked (outside f.mu) after a servo_move command, if set
+	onRead         func()         // invoked (outside f.mu) after a servo_position command, if set
+	onMove         func()         // invoked (outside f.mu) after a servo_move command, if set
 }
 
 func newFakeServoArm() *fakeServoArm {
@@ -529,6 +529,10 @@ func TestGripperPercentWritesHonorTheWaitFlag(t *testing.T) {
 // TestIsHoldingSomethingReportsGrasp: Grab already infers a grasp from the jaw stopping short of
 // closed. IsHoldingSomething was a stub that always said "not holding"; GoToInputs's safety guard
 // depends on it telling the truth.
+//
+// IsHoldingSomething now compares the reading against the jaw's last COMMANDED target, not a
+// bare closed-stop constant, so each case establishes that target honestly with a real Grab (to
+// closedPosition, the 0.0 default) before setting the fake's reading and asking.
 func TestIsHoldingSomethingReportsGrasp(t *testing.T) {
 	ctx := context.Background()
 	for _, tc := range []struct {
@@ -543,8 +547,12 @@ func TestIsHoldingSomethingReportsGrasp(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fa := newFakeServoArm()
-			fa.percent = tc.percent
 			g := newTestGripperWithConfig(t, fa, SO101GripperConfig{ArticulatedJaw: true})
+
+			fa.percent = tc.percent // the fake reports the jaw stopped here despite being told to close
+			_, err := g.Grab(ctx, nil)
+			require.NoError(t, err)
+
 			st, err := g.IsHoldingSomething(ctx, nil)
 			require.NoError(t, err)
 			assert.Equal(t, tc.holding, st.IsHoldingSomething)
@@ -554,22 +562,69 @@ func TestIsHoldingSomethingReportsGrasp(t *testing.T) {
 
 // TestIsHoldingSomethingRespectsCalibratedClosedPosition guards against the threshold expression
 // silently degrading to "pct > graspThresholdPct": every other fixture leaves closedPosition at
-// its 0.0 zero value, so that mutation would leave the rest of the suite green. With a calibrated
-// closed_position of 20%, a jaw reading 30% is only 10 percentage points past closed -- under the
-// 15pp threshold -- so it must read as NOT holding.
+// its 0.0 zero value, so that mutation would leave the rest of the suite green. Calibrate
+// closed_position to 20%% first, so Grab's subsequent close commands the jaw to 20%% (not 0%%) --
+// that becomes the commanded target IsHoldingSomething compares against. A jaw reading 30%% is
+// then only 10 percentage points past its commanded target -- under the 15pp threshold -- so it
+// must read as NOT holding.
 func TestIsHoldingSomethingRespectsCalibratedClosedPosition(t *testing.T) {
 	ctx := context.Background()
-	_, g := newJawGripper(t, 30)
+	fa := newFakeServoArm()
+	g := newTestGripperWithConfig(t, fa, SO101GripperConfig{ArticulatedJaw: true})
 
 	_, err := g.DoCommand(ctx, map[string]interface{}{
 		"command": "calibrate_positions", "closed_position": 20.0,
 	})
 	require.NoError(t, err)
 
+	fa.percent = 30 // the fake reports the jaw stopped here despite being told to close to 20%%
+	_, err = g.Grab(ctx, nil)
+	require.NoError(t, err)
+
 	st, err := g.IsHoldingSomething(ctx, nil)
 	require.NoError(t, err)
 	assert.False(t, st.IsHoldingSomething,
 		"30%% is only 10pp past a calibrated closed_position of 20%%, under the 15pp threshold")
+}
+
+// TestIsHoldingSomethingWithNoCommandedTarget: before anything has ever been commanded there is
+// no evidence of obstruction, so IsHoldingSomething must default to false even if the jaw happens
+// to read open -- guessing "holding" is the more damaging error (see isHoldingAt).
+func TestIsHoldingSomethingWithNoCommandedTarget(t *testing.T) {
+	ctx := context.Background()
+	fa := newFakeServoArm()
+	fa.percent = 60            // an arbitrary open reading; irrelevant since nothing has been commanded yet
+	g := newTestGripper(t, fa) // ArticulatedJaw false: the constructor never primes a commanded target
+
+	st, err := g.IsHoldingSomething(ctx, nil)
+	require.NoError(t, err)
+	assert.False(t, st.IsHoldingSomething, "no evidence of obstruction without a prior command")
+}
+
+// TestGoToInputsDoesNotLatchOpenAsHolding reproduces the live failure found on hardware: opening
+// the jaw to an ordinary angle made IsHoldingSomething claim it was holding something (comparing
+// against the closed stop, any open jaw looks held), and GoToInputs's guard then refused every
+// subsequent jaw command, including one to close the gripper back up. Fails against the pre-fix
+// isHoldingAt(pct, closedPct) formula.
+func TestGoToInputsDoesNotLatchOpenAsHolding(t *testing.T) {
+	ctx := context.Background()
+	fa := newFakeServoArm()
+	g := newTestGripperWithConfig(t, fa, SO101GripperConfig{ArticulatedJaw: true})
+
+	// Open the jaw to ~50%% via GoToInputs, with the fake faithfully reporting that the servo
+	// reached it -- nothing obstructed the move.
+	fa.percent = 50
+	require.NoError(t, g.GoToInputs(ctx, []referenceframe.Input{geometry.JawRadiansFromPct(50)}))
+
+	st, err := g.IsHoldingSomething(ctx, nil)
+	require.NoError(t, err)
+	assert.False(t, st.IsHoldingSomething, "an open, empty jaw must not read as holding")
+
+	// A further command to a different angle -- including closing -- must succeed. The bug
+	// latched the gripper open: once IsHoldingSomething wrongly said "holding", every subsequent
+	// GoToInputs was refused.
+	require.NoError(t, g.GoToInputs(ctx, []referenceframe.Input{geometry.JawRadiansFromPct(20)}),
+		"a further jaw command must succeed once the jaw is merely open, not holding")
 }
 
 // TestConcurrentCurrentInputsPollingWithOpenGrab exercises the interleaving the jaw cache design
@@ -705,6 +760,34 @@ func TestRawSetPositionInvalidatesCache(t *testing.T) {
 		"a raw set_position must invalidate the cache")
 }
 
+// TestRawSetPositionClearsCommandedTarget: a raw set_position sends opaque ticks, not a percent,
+// so it cannot update lastCommandedPct -- it must instead clear haveCommanded, so a stale
+// percent-valued target left over from before is never compared against a reading taken after.
+func TestRawSetPositionClearsCommandedTarget(t *testing.T) {
+	ctx := context.Background()
+	fa := newFakeServoArm()
+	g := newTestGripper(t, fa)
+
+	// Establish a real commanded target with a reading far enough away from it to count as
+	// holding.
+	fa.percent = 60
+	_, err := g.Grab(ctx, nil)
+	require.NoError(t, err)
+	st, err := g.IsHoldingSomething(ctx, nil)
+	require.NoError(t, err)
+	require.True(t, st.IsHoldingSomething, "sanity: this setup must look like holding beforehand")
+
+	_, err = g.DoCommand(ctx, map[string]interface{}{
+		"command": "set_position", "servo_position": 2500.0,
+	})
+	require.NoError(t, err)
+
+	st, err = g.IsHoldingSomething(ctx, nil)
+	require.NoError(t, err)
+	assert.False(t, st.IsHoldingSomething,
+		"a raw set_position clears the commanded target; with no evidence, report not holding")
+}
+
 // TestCurrentInputsSurvivesReadFailure: framesystem.CurrentInputs hard-errors the entire machine's
 // frame system when a DoF-bearing component errors, so one dropped serial frame must not abort
 // every arm move.
@@ -781,7 +864,10 @@ func TestStopDuringReadDoesNotStampStaleValue(t *testing.T) {
 func TestGoToInputsNoOpBatchIssuesNoCommand(t *testing.T) {
 	ctx := context.Background()
 	fa := newFakeServoArm()
-	fa.percent = 60 // wide enough that IsHoldingSomething reports true
+	// The constructor's cache prime adopts 60 as both the reading AND the commanded target, so
+	// this alone does not make IsHoldingSomething report holding -- it doesn't matter either way,
+	// since the no-op path below returns before the holding guard is ever consulted.
+	fa.percent = 60
 	g := newTestGripperWithConfig(t, fa, SO101GripperConfig{ArticulatedJaw: true})
 
 	current := geometry.JawRadiansFromPct(60)
@@ -796,16 +882,27 @@ func TestGoToInputsNoOpBatchIssuesNoCommand(t *testing.T) {
 
 // TestGoToInputsRejectsWhileHolding: the planner moves the jaw 4-20%% of its range under
 // obstruction, which on hardware means loosening a grip mid-trajectory.
+//
+// The holding guard now compares against the jaw's last COMMANDED target, not the closed stop, so
+// the setup must actually command the jaw closed (via Grab) before the fake reports it stuck open
+// -- setting fa.percent alone, with no preceding command, would no longer read as holding.
 func TestGoToInputsRejectsWhileHolding(t *testing.T) {
 	ctx := context.Background()
 	fa := newFakeServoArm()
-	fa.percent = 60
 	g := newTestGripperWithConfig(t, fa, SO101GripperConfig{ArticulatedJaw: true})
 
-	err := g.GoToInputs(ctx, []referenceframe.Input{geometry.GripperJointMax})
+	// Command the jaw closed, then have the fake report it stuck at 60%% instead of reaching
+	// closed -- the jaw failed to reach its commanded target, which is real evidence of an
+	// obstruction.
+	fa.percent = 60
+	_, err := g.Grab(ctx, nil)
+	require.NoError(t, err)
+	movesSoFar := countCommands(fa, servocmd.CmdServoMove)
+
+	err = g.GoToInputs(ctx, []referenceframe.Input{geometry.GripperJointMax})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "holding")
-	assert.Zerof(t, countCommands(fa, servocmd.CmdServoMove),
+	assert.Equalf(t, movesSoFar, countCommands(fa, servocmd.CmdServoMove),
 		"a rejected batch must not have moved the jaw")
 }
 

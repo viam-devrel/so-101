@@ -77,6 +77,14 @@ whatever is held; a no-op command (the jaw's current angle, which is what most t
 carry) is never refused and never commands the servo, whether or not something is held — it may
 still issue a `servo_position` read on a cache miss.
 
+"Holding" is inferred by comparing the jaw's current reading against the last percent it was
+*commanded* to reach, not the closed position: if the jaw failed to get there by more than the
+grasp threshold, something must be blocking it, whichever direction it was moving. Comparing
+against the closed position instead is wrong — any merely open jaw then looks held — and did
+exactly that on real hardware until it was fixed. `IsHoldingSomething` follows the same rule and,
+like the guard above, reports NOT holding whenever nothing has been commanded yet (at startup, or
+right after a raw `set_position` in ticks), since there is no commanded target to compare against.
+
 ## Communication
 
 The gripper owns no serial connection of its own: it asks the arm for its servo's live `Moving` state over [`servo_moving`](arm.md#servo-moving), and if the arm cannot answer — including a remote arm running an older module build that does not know the command — it logs at Debug and falls back to whether a gripper command is in flight, rather than returning an error.

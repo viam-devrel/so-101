@@ -108,6 +108,14 @@ type so101Gripper struct {
 	openPosition   float64
 	closedPosition float64
 
+	// lastCommandedPct is the percent value the servo was last told to move to, via
+	// moveToPercent -- the choke point every percent-valued command passes through. It is the
+	// evidence isHoldingAt compares an actual reading against: a jaw that failed to reach where
+	// it was told to go is obstructed. haveCommanded distinguishes "never commanded" from a
+	// legitimate zero-valued command (0% is closed, a real target). Both are guarded by g.mu.
+	lastCommandedPct float64
+	haveCommanded    bool
+
 	speed        float32
 	acceleration float32
 
@@ -193,8 +201,14 @@ func newSO101Gripper(ctx context.Context, deps resource.Dependencies, conf resou
 	}
 
 	if cfg.ArticulatedJaw {
-		if _, err := g.positionPercentCached(ctx); err != nil {
+		if pct, err := g.positionPercentCached(ctx); err != nil {
 			logger.Warnf("could not prime the jaw position cache: %v", err)
+		} else {
+			// The gripper is sitting wherever it is at boot with no command in flight, so
+			// treat that resting position as its own commanded target: actual == commanded,
+			// so IsHoldingSomething/GoToInputs report NOT holding until a real command moves
+			// it. A failed prime just leaves haveCommanded false (see moveToPercent).
+			g.lastCommandedPct, g.haveCommanded = pct, true
 		}
 	}
 
@@ -264,12 +278,19 @@ func (g *so101Gripper) servoDo(
 	return g.arm.DoCommand(ctx, cmd)
 }
 
-// moveToPercent commands the servo. When wait is true it blocks until the servo settles.
+// moveToPercent commands the servo; when wait is true it blocks until the servo settles. It is
+// the single choke point for every percent-valued command, so it is also where lastCommandedPct
+// is recorded -- callers must already hold g.mu (Open, Grab, set_position, the "set" DoCommand
+// branch, and GoToInputs all do). The target is recorded once the move command itself succeeds,
+// whether or not the caller waits and even if the wait-stop times out: the servo was told to go
+// there regardless of whether it settled, or of whether anyone watched it settle.
 func (g *so101Gripper) moveToPercent(ctx context.Context, percent float64, wait bool) error {
+	target := servocmd.ClampPercent(percent)
 	if _, err := g.servoDo(ctx, servocmd.CmdServoMove,
-		map[string]interface{}{"percent": servocmd.ClampPercent(percent)}); err != nil {
+		map[string]interface{}{"percent": target}); err != nil {
 		return err
 	}
+	g.lastCommandedPct, g.haveCommanded = target, true
 	if !wait {
 		return nil
 	}
@@ -366,9 +387,19 @@ func (g *so101Gripper) Open(ctx context.Context, extra map[string]interface{}) e
 const graspThresholdPct = 15.0
 
 // isHoldingAt is the shared grasp policy behind Grab, IsHoldingSomething, and GoToInputs's
-// holding guard: pct sits far enough from closedPct to mean something is between the fingers.
-func isHoldingAt(pct, closedPct float64) bool {
-	return pct-closedPct > graspThresholdPct
+// holding guard: the jaw failed to reach its commanded target by more than graspThresholdPct, so
+// something must be between the fingers blocking it.
+//
+// commandedPct must be the target the jaw was actually just told to move to -- Grab satisfies
+// this by construction (it commands closedPosition immediately before reading), while
+// IsHoldingSomething and GoToInputs use lastCommandedPct, the last percent moveToPercent
+// recorded. Comparing actualPct against the closed stop instead (the pre-fix behavior) is wrong:
+// any merely-open jaw then looks "held", because an open jaw is always far from closed regardless
+// of whether anything is between the fingers. That bug was found on real hardware: once the
+// planner opened the jaw past the threshold, IsHoldingSomething reported holding forever after,
+// and GoToInputs refused every subsequent jaw command, including one to close it back up.
+func isHoldingAt(actualPct, commandedPct float64) bool {
+	return math.Abs(actualPct-commandedPct) > graspThresholdPct
 }
 
 func (g *so101Gripper) Grab(ctx context.Context, extra map[string]interface{}) (bool, error) {
@@ -530,9 +561,13 @@ func (g *so101Gripper) DoCommand(ctx context.Context, cmd map[string]interface{}
 		defer g.isMoving.Store(false)
 
 		// The raw servo_position form goes to the arm as raw ticks; the arm owns the
-		// calibration needed to interpret them, so the gripper no longer converts.
+		// calibration needed to interpret them, so the gripper no longer converts. It bypasses
+		// moveToPercent, so it cannot record a percent-valued commanded target -- clear
+		// haveCommanded instead of leaving a stale one, so the next percent-valued command
+		// re-establishes it rather than isHoldingAt comparing against an opaque target.
 		if servoPos, ok := servocmd.FloatArg(cmd, "servo_position"); ok {
 			_, err := g.servoDo(ctx, servocmd.CmdServoMove, map[string]interface{}{"raw": int(servoPos)})
+			g.haveCommanded = false
 			return map[string]interface{}{"success": err == nil}, err
 		}
 
@@ -681,11 +716,12 @@ func (g *so101Gripper) GoToInputs(ctx context.Context, inputSteps ...[]reference
 		return nil
 	}
 
-	// Not g.IsHoldingSomething: that method takes g.mu itself to read closedPosition safely, and
-	// g.mu is already held here -- calling it would self-deadlock. Read g.closedPosition directly
-	// (safe: the calibrate_positions writer also takes g.mu) against the pct already fetched above.
+	// Not g.IsHoldingSomething: that method takes g.mu itself to read lastCommandedPct safely, and
+	// g.mu is already held here -- calling it would self-deadlock. Read g.lastCommandedPct/
+	// g.haveCommanded directly (safe: moveToPercent's writer also takes g.mu) against the pct
+	// already fetched above. No prior command means no evidence of obstruction -- don't refuse.
 	final := inputSteps[len(inputSteps)-1][0]
-	if isHoldingAt(current, g.closedPosition) {
+	if g.haveCommanded && isHoldingAt(current, g.lastCommandedPct) {
 		g.logger.Infof("refusing planner jaw command while holding: current %.4f rad, requested %.4f rad",
 			currentRad, final)
 		return fmt.Errorf(
@@ -715,10 +751,15 @@ func (g *so101Gripper) Kinematics(ctx context.Context) (referenceframe.Model, er
 	return g.model, nil
 }
 
-// IsHoldingSomething infers a grasp the same way Grab does: the jaw stopped short of closed, so
+// IsHoldingSomething infers a grasp by comparing the jaw's actual position against the last
+// target it was commanded to (see isHoldingAt): it failed to reach where it was told to go, so
 // something is between the fingers. Reads through the cache. This is the standalone public-API
 // path only -- GoToInputs no longer calls it (see the comment there), so taking g.mu here to read
-// closedPosition safely cannot self-deadlock against GoToInputs's own g.mu hold.
+// lastCommandedPct safely cannot self-deadlock against GoToInputs's own g.mu hold.
+//
+// If nothing has ever been commanded, there is no evidence to compare against -- report NOT
+// holding rather than guessing. A false "holding" is the more damaging error: it was observed on
+// hardware latching the gripper open, refusing every subsequent jaw command including closing.
 func (g *so101Gripper) IsHoldingSomething(
 	ctx context.Context, extra map[string]interface{},
 ) (gripper.HoldingStatus, error) {
@@ -727,7 +768,10 @@ func (g *so101Gripper) IsHoldingSomething(
 		return gripper.HoldingStatus{}, err
 	}
 	g.mu.Lock()
-	closed := g.closedPosition
+	commanded, have := g.lastCommandedPct, g.haveCommanded
 	g.mu.Unlock()
-	return gripper.HoldingStatus{IsHoldingSomething: isHoldingAt(pct, closed)}, nil
+	if !have {
+		return gripper.HoldingStatus{IsHoldingSomething: false}, nil
+	}
+	return gripper.HoldingStatus{IsHoldingSomething: isHoldingAt(pct, commanded)}, nil
 }
