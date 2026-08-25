@@ -242,10 +242,11 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
   gripper — confirmed on a live machine — so `articulated_jaw` animates on Open/Grab while the
   default 0-DoF model never will.
   `TestGripperFrameResolvesToTCPInFrameSystem` asserts the end-to-end contract, which is also
-  why users must **not** add a compensating `translation` to the gripper's `frame`. The simulated
-  gripper's `articulated_jaw` config attribute opts into the 1-DoF version to measure exactly
-  that risk (the hardware gripper is unchanged, still always 0-DoF); see the sensitivity gotcha
-  below for what the planner actually did with the freedom.
+  why users must **not** add a compensating `translation` to the gripper's `frame`. Both the
+  simulated and hardware grippers' `articulated_jaw` config attribute opt into the 1-DoF
+  version to measure/drive exactly that risk — the hardware gripper is **0-DoF by default**,
+  with `articulated_jaw` as opt-in; see the sensitivity gotcha below for what the planner
+  actually did with the freedom.
 - **A part's `frame` config and its `kinematics` are two independent things**, and the 3D viewer
   reads frames from the kinematics. Verified against a live machine:
   `RobotService.FrameSystemConfig` reports `follower-gripper`'s `frame.poseInObserverFrame` as
@@ -487,3 +488,8 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
   sweep computing `min + (range*i)/steps` overshoots by 2.22e-16 at `i == steps`, because `*` and
   `/` are left-associative. `GoToInputs` validates against a deliberately wide `jawLimitEpsilon`
   for this reason.
+- **A 1-DoF gripper gets `GoToInputs` on EVERY plan, with an unchanged value.**
+  `services/motion/builtin/builtin.go:687-689` skips a component in a trajectory step only when
+  `len(inputs) == 0`, never when the inputs are unchanged, and a DoF-bearing frame is in every
+  step. So any policy that rejects planner jaw commands must first exclude no-op batches, or it
+  fails every arm move (`TestGoToInputsNoOpBatchIssuesNoCommand`).

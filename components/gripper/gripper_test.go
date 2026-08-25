@@ -806,3 +806,17 @@ func TestGoToInputsAbortsOnStop(t *testing.T) {
 	err := g.GoToInputs(ctx, []referenceframe.Input{geometry.GripperJointMax})
 	assert.Error(t, err, "a stopped batch must report that it did not complete")
 }
+
+// TestOpenDoesNotDeadlock guards the reentrancy hazard: Open/Grab hold g.mu across moveToPercent,
+// which invalidates the cache. Invalidating under g.mu would deadlock on the first call.
+func TestOpenDoesNotDeadlock(t *testing.T) {
+	g := newTestGripperWithConfig(t, newFakeServoArm(), SO101GripperConfig{ArticulatedJaw: true})
+	done := make(chan error, 1)
+	go func() { done <- g.Open(context.Background(), nil) }()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Open deadlocked: cache invalidation must not take g.mu")
+	}
+}
