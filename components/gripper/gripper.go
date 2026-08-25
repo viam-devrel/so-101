@@ -644,6 +644,18 @@ func (g *so101Gripper) GoToInputs(ctx context.Context, inputSteps ...[]reference
 		return nil
 	}
 
+	// g.mu is held from here through the move: the no-op classification and the holding guard
+	// below must be decided against a fresh read taken at execute time, not one taken before the
+	// lock -- otherwise a concurrent Open (which can hold g.mu for up to 2000ms inside
+	// servo_wait_stop) can change the jaw between the decision and the move that acts on it.
+	//
+	// Accepted limitation: a Stop arriving during this read/decide phase is not latched, because
+	// isMoving is still false at that point, so the jaw may move after that Stop lands. Setting
+	// isMoving earlier would suppress legitimate cache stores during the read (see
+	// positionPercentCached's moving guard), so this is accepted rather than fixed.
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
 	current, err := g.positionPercentCached(ctx)
 	if err != nil {
 		return err
@@ -663,12 +675,11 @@ func (g *so101Gripper) GoToInputs(ctx context.Context, inputSteps ...[]reference
 		return nil
 	}
 
-	held, err := g.IsHoldingSomething(ctx, nil)
-	if err != nil {
-		return err
-	}
+	// Not g.IsHoldingSomething: that method takes g.mu itself to read closedPosition safely, and
+	// g.mu is already held here -- calling it would self-deadlock. Read g.closedPosition directly
+	// (safe: the calibrate_positions writer also takes g.mu) against the pct already fetched above.
 	final := inputSteps[len(inputSteps)-1][0]
-	if held.IsHoldingSomething {
+	if isHoldingAt(current, g.closedPosition) {
 		g.logger.Infof("refusing planner jaw command while holding: current %.4f rad, requested %.4f rad",
 			currentRad, final)
 		return fmt.Errorf(
@@ -677,8 +688,6 @@ func (g *so101Gripper) GoToInputs(ctx context.Context, inputSteps ...[]reference
 	}
 	g.logger.Infof("jaw GoToInputs: %d step(s), %.4f -> %.4f rad", len(inputSteps), currentRad, final)
 
-	g.mu.Lock()
-	defer g.mu.Unlock()
 	g.stopped.Store(false) // clear BEFORE isMoving, or a Stop landing between the two is wiped
 	g.isMoving.Store(true)
 	defer g.isMoving.Store(false)
