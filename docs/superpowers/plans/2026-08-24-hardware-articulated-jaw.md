@@ -111,19 +111,48 @@ func newTestGripperWithConfig(t *testing.T, fa *fakeServoArm, cfg SO101GripperCo
 
 Then reduce `newTestGripper` to `return newTestGripperWithConfig(t, fa, SO101GripperConfig{})`.
 
-- [ ] **Step 2: Add a read hook to the fake**
+- [ ] **Step 2: Add hooks to the fake — invoked OUTSIDE `f.mu`**
 
-So a test can act *while* a bus read is in flight. Add `onRead func()` to `fakeServoArm` and call it in the `CmdServoPosition` branch:
+Tests need to act *while* a bus command is in flight. Add `onRead func()` and `onMove func()` to `fakeServoArm`.
+
+**They must be invoked after releasing `f.mu`.** `DoCommand` currently holds `f.mu` for its whole body (`gripper_test.go:106-107`), so a hook that issues another command — `TestGoToInputsAbortsOnStop`'s hook calls `g.Stop`, which calls `servoDo` → `DoCommand` → `f.mu.Lock()` — deadlocks on a non-reentrant mutex. This was verified by reproduction, not theory.
+
+Restructure `DoCommand` to capture the hook and the response under the lock, unlock, then invoke:
 
 ```go
-	case servocmd.CmdServoPosition:
-		if f.onRead != nil {
-			f.onRead()
-		}
-		return map[string]any{"percent": f.percent, "raw": f.raw}, nil
-```
+func (f *fakeServoArm) DoCommand(_ context.Context, cmd map[string]any) (map[string]any, error) {
+	f.mu.Lock()
+	f.commands = append(f.commands, cmd)
 
-The hook runs while the fake holds `f.mu`, so a hook must **not** issue another command through the fake. Task 4's test calls `g.invalidateJawCache()` directly, which takes only `jawMu` — no deadlock.
+	if cmd["command"] == servocmd.CmdServoCapabilities {
+		resp := map[string]any{"servo_commands": true, "servo_ids": f.capabilities}
+		f.mu.Unlock()
+		return resp, nil
+	}
+	if f.doErr != nil {
+		err := f.doErr
+		f.mu.Unlock()
+		return nil, err
+	}
+
+	var hook func()
+	var resp map[string]any
+	switch cmd["command"] {
+	case servocmd.CmdServoPosition:
+		hook, resp = f.onRead, map[string]any{"percent": f.percent, "raw": f.raw}
+	case servocmd.CmdServoMove:
+		hook, resp = f.onMove, map[string]any{}
+	default:
+		resp = map[string]any{}
+	}
+	f.mu.Unlock()
+
+	if hook != nil {
+		hook() // outside the lock: hooks may issue commands or call back into the gripper
+	}
+	return resp, nil
+}
+```
 
 - [ ] **Step 3: Verify**
 
@@ -310,6 +339,10 @@ func TestStopDuringReadDoesNotStampStaleValue(t *testing.T) {
 	fa.percent = 10
 	g := newTestGripperWithConfig(t, fa, SO101GripperConfig{ArticulatedJaw: true})
 
+	// The constructor primed the cache, so drop it first or the next call is a hit and the hook
+	// never runs.
+	g.invalidateJawCache()
+
 	fa.onRead = func() { g.invalidateJawCache() } // lands inside the unlocked window
 	_, err := g.CurrentInputs(ctx)
 	require.NoError(t, err)
@@ -337,7 +370,12 @@ func countCommands(fa *fakeServoArm, name string) int {
 }
 ```
 
-and `setErr` on the fake (guarded by `f.mu`), plus a tiny `clearJawCacheForTest()` on the gripper that zeroes `jawHaveRead`.
+and `setErr` on the fake (guarded by `f.mu`). Put `clearJawCacheForTest()` — which zeroes
+`jawHaveRead` — in `gripper_test.go`, not the production file; same package, and a test-only seam
+belongs with the tests.
+
+**New test imports:** `math` (Task 7's `math.Nextafter`) and `time` (Task 4's `TestJawCacheExpires`,
+Task 8's `TestOpenDoesNotDeadlock`).
 
 - [ ] **Step 2: Run and watch them fail**
 
@@ -410,13 +448,23 @@ func (g *so101Gripper) positionPercentCached(ctx context.Context) (float64, erro
 
 Call `g.invalidateJawCache()` at the top of `servoDo` for every command except `CmdServoPosition` and `CmdServoCapabilities`.
 
-In the constructor, after `probeServoSupport`, prime the cache — a failure is logged, not fatal:
+In the constructor, prime the cache — **after the `g := &so101Gripper{...}` struct literal at
+`gripper.go:147`** (not after `probeServoSupport` at `:128`; `g` does not exist yet there), with
+`now: time.Now` set inside that literal. A failure is logged, not fatal:
 
 ```go
-	if _, err := g.positionPercentCached(ctx); err != nil {
-		logger.Warnf("could not prime the jaw position cache: %v", err)
+	if cfg.ArticulatedJaw {
+		if _, err := g.positionPercentCached(ctx); err != nil {
+			logger.Warnf("could not prime the jaw position cache: %v", err)
+		}
 	}
 ```
+
+**The `articulatedJaw` gate is required, not an optimisation.** `fakeServoArm.issued()` filters only
+`servo_capabilities`, so an unconditional prime adds a `servo_position` to the front of every
+command list and breaks two existing tests — `TestGripperOpenCommandsServoAndWaits` and
+`TestGripperStopIsScopedToItsOwnServo`. A 0-DoF gripper is never asked for `CurrentInputs`, so
+priming it is also a wasted bus read on every construction.
 
 - [ ] **Step 4: Verify**
 
@@ -482,7 +530,7 @@ Expected: FAIL — `undefined: graspThresholdPct`, and the stub reports false th
 
 - [ ] **Step 3: Implement**
 
-Extract the literal from `Grab` (`gripper.go:286`):
+Extract the literal from `Grab` (`gripper.go:285`):
 
 ```go
 // graspThresholdPct is how far short of closed the jaw must stop for Grab to conclude something
@@ -757,24 +805,38 @@ func (g *so101Gripper) GoToInputs(ctx context.Context, inputSteps ...[]reference
 
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.stopped.Store(false) // clear BEFORE isMoving, or a Stop landing between the two is wiped
 	g.isMoving.Store(true)
 	defer g.isMoving.Store(false)
-	g.clearStopped()
 
 	// Only the final target: a position servo never traverses superseded waypoints.
 	if err := g.moveToPercent(ctx, geometry.JawPctFromRadians(final)); err != nil {
 		return err
 	}
-	if g.wasStopped() {
+	if g.stopped.Load() {
 		return errors.New("jaw motion was stopped before completing the trajectory")
 	}
 	return nil
 }
 ```
 
-Add `stopped bool` guarded by `g.mu`, with `clearStopped`/`wasStopped`/`markStopped` helpers, and set it in `Stop` **only while moving** (mirroring `components/simulated/simulated.go:443-453`).
+Add `stopped atomic.Bool` to the struct, matching `isMoving`. **It must be an atomic, not a
+mutex-guarded bool:** `Stop` is called from another goroutine while `GoToInputs` holds `g.mu`, so a
+`markStopped` that took `g.mu` would deadlock. `Stop` takes no `g.mu` today and must not start.
 
-**Careful:** `Stop` is called from another goroutine while `GoToInputs` holds `g.mu`. `markStopped` must not take `g.mu`, or `Stop` deadlocks. Use `atomic.Bool` for `stopped`, matching `isMoving`.
+**`Stop`'s latch must go BEFORE the existing `isMoving` clear.** `Stop`'s first line
+(`gripper.go:302`) is `g.isMoving.Store(false)`, so a guard appended after it can never latch:
+
+```go
+func (g *so101Gripper) Stop(ctx context.Context, extra map[string]interface{}) error {
+	if g.isMoving.Load() {
+		g.stopped.Store(true) // only while moving, or "reached the goal" and "was stopped" blur
+	}
+	g.isMoving.Store(false)
+	_, err := g.servoDo(ctx, servocmd.CmdServoStop, nil)
+	return err
+}
+```
 
 - [ ] **Step 4: Verify**
 
