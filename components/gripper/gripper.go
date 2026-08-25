@@ -497,13 +497,18 @@ func (g *so101Gripper) DoCommand(ctx context.Context, cmd map[string]interface{}
 			return nil, err
 		}
 
+		// calibrate_positions writes these under g.mu; read them the same way.
+		g.mu.Lock()
+		openPos, closedPos := g.openPosition, g.closedPosition
+		g.mu.Unlock()
+
 		return map[string]interface{}{
 			// position_radians is now derived from the percentage rather than read as a
 			// radian value, so single-key get/set round-trips (arm-recorder) keep working.
 			"position_radians":    (percentPos/100.0*2.0 - 1.0) * math.Pi,
 			"position_percentage": percentPos,
-			"open_position":       g.openPosition,
-			"closed_position":     g.closedPosition,
+			"open_position":       openPos,
+			"closed_position":     closedPos,
 		}, nil
 
 	case "set_position":
