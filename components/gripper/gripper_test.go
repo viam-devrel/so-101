@@ -207,6 +207,16 @@ func newTestGripperWithConfig(t *testing.T, fa *fakeServoArm, cfg SO101GripperCo
 	return g.(*so101Gripper)
 }
 
+// newJawGripper builds an articulated-jaw gripper backed by a fake servo arm reporting pct, for
+// tests that don't need the fake arm afterward.
+func newJawGripper(t *testing.T, pct float64) (*fakeServoArm, *so101Gripper) {
+	t.Helper()
+	fa := newFakeServoArm()
+	fa.percent = pct
+	g := newTestGripperWithConfig(t, fa, SO101GripperConfig{ArticulatedJaw: true})
+	return fa, g
+}
+
 // countCommands returns how many times name appears among the commands issued so far.
 func countCommands(fa *fakeServoArm, name string) int {
 	n := 0
@@ -549,9 +559,7 @@ func TestIsHoldingSomethingReportsGrasp(t *testing.T) {
 // 15pp threshold -- so it must read as NOT holding.
 func TestIsHoldingSomethingRespectsCalibratedClosedPosition(t *testing.T) {
 	ctx := context.Background()
-	fa := newFakeServoArm()
-	fa.percent = 30
-	g := newTestGripperWithConfig(t, fa, SO101GripperConfig{ArticulatedJaw: true})
+	_, g := newJawGripper(t, 30)
 
 	_, err := g.DoCommand(ctx, map[string]interface{}{
 		"command": "calibrate_positions", "closed_position": 20.0,
@@ -569,8 +577,7 @@ func TestIsHoldingSomethingRespectsCalibratedClosedPosition(t *testing.T) {
 // another goroutine. Must pass under `go test -race`.
 func TestConcurrentCurrentInputsPollingWithOpenGrab(t *testing.T) {
 	ctx := context.Background()
-	fa := newFakeServoArm()
-	g := newTestGripperWithConfig(t, fa, SO101GripperConfig{ArticulatedJaw: true})
+	_, g := newJawGripper(t, 0)
 
 	stop := make(chan struct{})
 	done := make(chan struct{})
@@ -606,7 +613,7 @@ func TestArticulatedJawConfigHardware(t *testing.T) {
 	t.Run("default is static", func(t *testing.T) {
 		fa := newFakeServoArm()
 		g := newTestGripper(t, fa)
-		assert.Len(t, fa.commands, 1,
+		assert.Empty(t, fa.issued(),
 			"flag off is the shipping default: the constructor must issue only the capabilities "+
 				"probe, no jaw-cache prime")
 
@@ -730,9 +737,7 @@ func TestCurrentInputsErrorsBeforeFirstRead(t *testing.T) {
 func TestHardwareCurrentInputsTracksJaw(t *testing.T) {
 	ctx := context.Background()
 	for _, pct := range []float64{0, 50, 95} {
-		fa := newFakeServoArm()
-		fa.percent = pct
-		g := newTestGripperWithConfig(t, fa, SO101GripperConfig{ArticulatedJaw: true})
+		_, g := newJawGripper(t, pct)
 		in, err := g.CurrentInputs(ctx)
 		require.NoError(t, err)
 		require.Len(t, in, 1)
@@ -855,8 +860,7 @@ func TestGoToInputsValidatesBeforeMoving(t *testing.T) {
 // planner trajectory riding a limit can produce exactly that.
 func TestGoToInputsToleratesULPOvershoot(t *testing.T) {
 	ctx := context.Background()
-	fa := newFakeServoArm()
-	g := newTestGripperWithConfig(t, fa, SO101GripperConfig{ArticulatedJaw: true})
+	_, g := newJawGripper(t, 0)
 	over := math.Nextafter(geometry.GripperJointMax, math.Inf(1))
 	assert.NoError(t, g.GoToInputs(ctx, []referenceframe.Input{over}))
 }

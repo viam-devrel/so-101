@@ -394,12 +394,11 @@ func (g *so101Gripper) Grab(ctx context.Context, extra map[string]interface{}) (
 		return true, nil
 	}
 
-	positionDifference := currentPercent - g.closedPosition
-
 	grabbed := isHoldingAt(currentPercent, g.closedPosition)
 
 	if grabbed {
-		g.logger.Debugf("Gripper successfully grabbed an object (position difference: %.1f%%)", positionDifference)
+		g.logger.Debugf("Gripper successfully grabbed an object (position difference: %.1f%%)",
+			currentPercent-g.closedPosition)
 	} else {
 		g.logger.Debug("Gripper closed but may not have grabbed anything")
 	}
@@ -691,7 +690,8 @@ func (g *so101Gripper) GoToInputs(ctx context.Context, inputSteps ...[]reference
 			currentRad, final)
 		return fmt.Errorf(
 			"gripper is holding something; refusing the planner's request to move the jaw from "+
-				"%.4f to %.4f rad. Release the object or disable articulated_jaw", currentRad, final)
+				"%.4f to %.4f rad -- add the held object to the motion request's WorldState so the "+
+				"planner stops trying to move the jaw", currentRad, final)
 	}
 	g.logger.Infof("jaw GoToInputs: %d step(s), %.4f -> %.4f rad", len(inputSteps), currentRad, final)
 
