@@ -37,19 +37,39 @@ Three things are already in place and are reused rather than rebuilt:
 
 ## The three decisions this design makes
 
-### 1. Reject planner jaw commands while holding
+### 1. Reject planner jaw commands while holding — but only ones that MOVE the jaw
 
-`GoToInputs` consults `IsHoldingSomething` and returns an error if the gripper has a grip,
-rather than loosening it. The motion service surfaces the error and aborts the plan.
+`GoToInputs` returns an error if the gripper has a grip **and** the batch actually asks the
+jaw to move beyond `jawHoldToleranceRad`. A batch whose every step is already within that
+tolerance of the current angle is a no-op: return `nil` without issuing any servo command.
 
-Rejected alternatives: *clamp so the jaw never opens further* — the executed trajectory
-then silently diverges from the planned one, so the collision geometry the planner reasoned
-about no longer matches reality; and *allow with a warning* — which will physically drop
-parts.
+**The scoping is not optional.** `services/motion/builtin/builtin.go:686-688` skips a
+component in a trajectory step only when `len(inputs) == 0` — never when the inputs are
+*unchanged*. A 1-DoF gripper appears in every step of every plan (its frame has DoF, so
+`LinearInputs`' schema includes it), carrying its current jaw value. `TestPlannerJawTravel`
+shows this directly: the `direct` scenario's trajectories carry a `gripper` column in every
+step with `0.0000` travel. An unconditional rejection would therefore fail **every arm move
+made while holding a part** — it would break pick-and-place, the main reason to have a
+gripper at all.
 
-Accepted cost: an arm move can now fail for a reason that looks unrelated to the gripper.
-The error message must say plainly that the gripper is holding something and that the
-planner tried to move the jaw.
+Skipping no-op batches also removes write-side bus load: without it, every arm plan issues
+a `servo_move` per step on the same 1 Mbaud bus the arm is using.
+
+`jawHoldToleranceRad = 0.01` rad (~0.6°). The jaw's range is 1.92 rad and the planner's
+measured travel under obstruction is 0.083-0.383 rad, so this cleanly separates "no-op plus
+float noise" from "the planner genuinely wants the jaw somewhere else". It is deliberately
+much looser than `jawLimitEpsilon` (1e-6), which exists for a different purpose.
+
+Rejected alternatives: *clamp so the jaw never opens further* — the executed trajectory then
+silently diverges from the planned one, so the collision geometry the planner reasoned about
+no longer matches reality; and *allow with a warning* — which will physically drop parts.
+
+Accepted cost: an arm move that genuinely needs jaw motion fails while carrying a part. The
+error must name both facts — the gripper is holding something, and the planner asked to move
+the jaw — and say which angle it asked for.
+
+The rejection is scoped to `GoToInputs` only. `Open`, `Grab` and the `set_position`
+DoCommand are unaffected, so a user can always release a held part.
 
 ### 2. Last-known-good on a failed read
 
@@ -77,13 +97,24 @@ idle. Making it 1-DoF puts it on every motion request, every `TransformPose`, an
 on a live machine — **every 3D-viewer refresh**, because the viewer polls
 `GetCurrentInputs` to animate a jointed gripper.
 
-So: cache the reading for `jawCacheTTL = 50ms`, invalidated immediately by any write path.
-A value can only be stale while nothing is commanding the jaw.
+So: cache the reading for `jawCacheTTL = 50ms`, invalidated by every *mutating* bus command.
 
-**This is the assumption most worth challenging.** The planner may act on jaw geometry up
-to 50 ms old. With invalidation on every write and no external force on the jaw, that is
-believed safe. A const rather than a config attribute until there is evidence it needs
-tuning.
+**Invalidation goes in `servoDo`, not `moveToPercent`.** `servoDo` is the single choke point
+through which every bus command passes; invalidating there catches paths `moveToPercent`
+does not. One such path exists already: `set_position`'s raw form (`gripper.go:396-398`)
+calls `servoDo(CmdServoMove, {"raw": ...})` directly. `CmdServoStop` likewise halts the jaw
+mid-travel. Invalidate on any command that is not a read.
+
+**Do not cache a reading taken while the jaw is moving.** `moveToPercent` returns when
+`servo_wait_stop` reports settled *or* when it times out at `gripperSettleTimeoutMs = 2000`;
+after a timeout the servo may still be moving, so a reading captured then would be frozen for
+a full TTL. Skip storing whenever `isMoving` is set.
+
+**Known residual staleness, accepted and documented:** with torque disabled the jaw is freely
+back-drivable by hand and nothing writes to the bus, so the cache can serve a stale value
+indefinitely. `services/teleop`'s `SetTorqueEnable` acts on the whole 6-servo group, so this
+is reachable in normal operation. The mitigation is that a torque-disabled arm is not under
+planner control; this is called out in `docs/gripper.md` rather than engineered around.
 
 ## Design
 
@@ -104,22 +135,35 @@ Same name and semantics as the simulated gripper's attribute. Passed as
 
 ### Position cache
 
-State on `so101Gripper`, guarded by the existing `g.mu`:
+**Locking discipline is load-bearing here and must not reuse `g.mu`.** `sync.Mutex` is not
+reentrant, and `Open` (`:249`), `Grab` (`:266`) and both `DoCommand` write paths (`:359`,
+`:388`) already `g.mu.Lock()` at entry *before* calling `moveToPercent`. Invalidating under
+`g.mu` from inside that call would deadlock on the very first `Open()`.
+
+So the cache gets its own `jawMu sync.Mutex`, guarding only:
 
 ```go
-jawPct       float64   // last successful reading
-jawReadAt    time.Time // when it was taken
-jawHaveRead  bool      // false until the first success
+jawPct      float64   // last successful reading
+jawReadAt   time.Time // when it was taken
+jawHaveRead bool      // false until the first success
 ```
 
-- `positionPercentCached(ctx)` — returns `jawPct` when `jawHaveRead` and the reading is
-  within `jawCacheTTL`; otherwise reads through `positionPercent`, stores, returns. On a
-  read error: return `jawPct` with a warning if `jawHaveRead`, else return the error.
-- `invalidateJawCache()` — clears freshness (not `jawHaveRead`). Called by `Open`, `Grab`,
-  `moveToPercent`, and `GoToInputs`.
+`jawMu` is **never held across a `DoCommand`**. `positionPercentCached` takes it, checks
+freshness, releases; does the bus read unlocked; re-acquires only to store. Two concurrent
+callers may both read the bus — acceptable, and far better than serializing a viewer poll
+behind an `Open` that is sitting in `servo_wait_stop` for up to 2000 ms. (Today's `jawAngle`
+/ `Geometries` / `get_position` take no lock at all, so this preserves that property.)
 
-Invalidation belongs in `moveToPercent` rather than at each call site, so a future command
-path cannot forget it.
+- `positionPercentCached(ctx)` — returns `jawPct` when `jawHaveRead` and the reading is
+  within `jawCacheTTL`; otherwise reads through `positionPercent`. On success, store unless
+  `isMoving` is set. On error: return `jawPct` with a warning if `jawHaveRead`, else return
+  the error.
+- `invalidateJawCache()` — clears freshness, not `jawHaveRead`. Called from `servoDo` for
+  every non-read command.
+- **Prime the cache with one read at construction.** The constructor already probes servo
+  capabilities; adding a position read closes the "error before the first successful read"
+  window, which otherwise means the first frame-system sweep after a reconfigure on a flaky
+  bus hard-errors the whole machine. A failed prime is logged, not fatal.
 
 ### `IsHoldingSomething`
 
@@ -170,15 +214,23 @@ mutation-tested. In order:
    bounds against the joint limits widened by `jawLimitEpsilon`. A batch that fails halfway
    leaves the jaw somewhere the planner did not intend. (rdk rejects an input exceeding a
    limit by even one ULP, hence the epsilon.)
-3. **Reject if holding** — call `IsHoldingSomething`; on true, return an error naming both
-   facts: the gripper is holding something, and the planner asked to move the jaw.
-4. Clear the `stopped` flag once per batch — not per step, so a mid-batch `Stop` cannot be
-   forgotten by the next step.
-5. Drive each step through `moveToPercent(geometry.JawPctFromRadians(θ))`, awaiting servo
-   settle only on the **final** step. Intermediate targets are waypoints the servo passes
-   through anyway; awaiting each would cost a full `gripperSettleTimeoutMs` window per step.
-6. Check `stopped` between steps and return an error if set, so the motion service learns
-   the trajectory did not complete.
+3. **Detect a no-op batch.** If every step is within `jawHoldToleranceRad` of the current
+   angle, return `nil` immediately, issuing no servo command. This is the common case — the
+   gripper appears in every trajectory step of every plan — so it must be cheap and must not
+   reject.
+4. **Reject if holding**, now that we know the batch really moves the jaw: call
+   `IsHoldingSomething`; on true, return an error naming the held object and the requested
+   angle.
+5. `g.isMoving.Store(true)` with a deferred `false`, and clear `stopped` **once per batch**
+   (not per step, so a mid-batch `Stop` cannot be forgotten by the next step). Setting
+   `isMoving` is required, not incidental: `Stop` only latches `stopped` while moving, so
+   without it `TestGoToInputsAbortsOnStop` would pass vacuously.
+6. **Issue only the final step's target.** Unlike the simulated interpolator, a
+   position-controlled STS3215 simply tracks the most recent command — each `servo_move`
+   supersedes the last, so intermediate targets are never traversed. Sending them would spend
+   N bus writes to no effect, on the bus the arm is actively using. Await settle once.
+7. Check `stopped` before and after the move and return an error if set, so the motion
+   service learns the trajectory did not complete.
 
 ### `Stop`
 
@@ -188,7 +240,17 @@ Sets the `stopped` flag while moving, mirroring `components/simulated/simulated.
 
 ## Testing
 
-All through the existing `fakeServoArm` harness — no hardware.
+All through the `fakeServoArm` harness — no hardware. **Two harness changes are needed and
+must be budgeted, contrary to "no changes required":**
+
+- `newTestGripper` (`gripper_test.go:151-163`) hard-codes `SO101GripperConfig{Arm: ...}` with
+  no way to set `ArticulatedJaw`. It needs to take the config, or gain a variant that does.
+- `jawCacheTTL` as a bare const with no clock seam forces real 50 ms sleeps to test expiry.
+  Prefer an injectable `now func() time.Time` on the struct, defaulting to `time.Now`, so the
+  cache tests are deterministic rather than timing-dependent.
+
+Failing a read is already expressible (`fa.doErr`, which exempts `servo_capabilities` so
+construction still succeeds); reporting a held object is expressible via `fa.percent`.
 
 | Test | Asserts |
 |---|---|
@@ -196,11 +258,14 @@ All through the existing `fakeServoArm` harness — no hardware.
 | `TestJawCacheBoundsBusReads` | N rapid `CurrentInputs` calls inside the TTL produce exactly **one** `servo_position` command on the fake arm |
 | `TestJawCacheInvalidatedByWrites` | a write path forces the next read to hit the bus |
 | `TestCurrentInputsSurvivesReadFailure` | fake arm fails a read ⇒ last-known-good returned, no error; and errors when it has never succeeded |
+| `TestGoToInputsNoOpBatchIssuesNoCommand` | a batch matching the current angle returns nil and issues **no** `servo_move` — the pick-and-place regression guard |
 | `TestGoToInputsRejectsWhileHolding` | fake arm reports a held object ⇒ error, and **no** `servo_move` command issued |
 | `TestGoToInputsValidatesBeforeMoving` | a batch whose second step is invalid issues no `servo_move` at all |
 | `TestGoToInputsAwaitsOnlyFinalStep` | an N-step batch issues N `servo_move` but only one `servo_wait_stop` |
 | `TestIsHoldingSomethingReportsGrasp` | above/below `graspThresholdPct` both directions |
-| `TestGoToInputsAbortsOnStop` | `Stop` mid-batch ⇒ error, remaining steps not issued |
+| `TestGoToInputsAbortsOnStop` | `Stop` mid-batch ⇒ error; and `isMoving` is set during the batch, so the flag can latch at all |
+| `TestOpenDoesNotDeadlock` | `Open`/`Grab` complete with cache invalidation wired in — the reentrancy guard |
+| `TestRawSetPositionInvalidatesCache` | the `servo_position` raw path invalidates, proving `servoDo` is the right choke point |
 
 Every guard must be **mutation-proven**: break it, show the test fails with the intended
 diagnostic, revert. A green test is not evidence it would catch anything — established
@@ -224,6 +289,10 @@ angle turned out to catch nothing.
 | Stale geometry within the TTL window | invalidation on every write; 50 ms; const so it is one place to change |
 | One dropped serial read aborts every arm move | last-known-good; error only before the first success |
 | Planner loosens a grip mid-move | rejection in `GoToInputs`, guarded by `TestGoToInputsRejectsWhileHolding` |
-| Arm move fails confusingly while carrying a part | error names both facts; documented in `docs/gripper.md` |
+| Rejection breaks every plan while holding | scoped to batches that actually move the jaw; `TestGoToInputsNoOpBatchIssuesNoCommand` |
+| Arm move that genuinely moves the jaw fails while carrying | error names the held object and the requested angle; documented in `docs/gripper.md` |
+| Cache invalidation deadlocks against `g.mu` | separate `jawMu`, never held across a `DoCommand`; `TestOpenDoesNotDeadlock` |
+| A write path bypasses invalidation | invalidate in `servoDo`, the single bus choke point; `TestRawSetPositionInvalidatesCache` |
+| Jaw back-driven with torque off | documented, not engineered around — a torque-disabled arm is not under planner control |
 | Bus saturation from viewer polling | `TestJawCacheBoundsBusReads` pins the read count |
 | `Stop` silently advancing a batch | `stopped` flag + `TestGoToInputsAbortsOnStop` |
