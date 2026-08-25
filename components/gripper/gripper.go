@@ -99,6 +99,10 @@ type so101Gripper struct {
 
 	mu       sync.Mutex
 	isMoving atomic.Bool
+	// stopped latches when Stop interrupts an in-flight GoToInputs. Must be an atomic, not
+	// g.mu-guarded: Stop runs from another goroutine while GoToInputs holds g.mu, and sync.Mutex
+	// is not reentrant.
+	stopped atomic.Bool
 
 	// Gripper positions in percentage, 0-100%
 	openPosition   float64
@@ -382,6 +386,9 @@ func (g *so101Gripper) Grab(ctx context.Context, extra map[string]interface{}) (
 // Stop that zeroed velocity on every servo on the shared bus, so stopping the gripper also
 // killed any in-flight arm motion.
 func (g *so101Gripper) Stop(ctx context.Context, extra map[string]interface{}) error {
+	if g.isMoving.Load() {
+		g.stopped.Store(true) // only while moving, or "reached the goal" and "was stopped" blur
+	}
 	g.isMoving.Store(false)
 	_, err := g.servoDo(ctx, servocmd.CmdServoStop, nil)
 	return err
@@ -591,8 +598,86 @@ func (g *so101Gripper) CurrentInputs(ctx context.Context) ([]referenceframe.Inpu
 	return []referenceframe.Input{geometry.JawRadiansFromPct(pct)}, nil
 }
 
-func (g *so101Gripper) GoToInputs(ctx context.Context, inputs ...[]referenceframe.Input) error {
-	return errors.ErrUnsupported
+// jawHoldToleranceRad is how far a commanded jaw angle must differ from the current one to count
+// as actually moving the jaw. 0.01 rad is ~0.5% of the 1.92 rad range and about 6 servo ticks --
+// well above quantization, well below the 0.083-0.383 rad the planner was measured moving under
+// obstruction.
+//
+// Numerically identical to rdk's defaultExecuteEpsilon and COMPLETELY unrelated to it: that one
+// bounds how far a plan's first step may sit from CurrentInputs, on a path Move() does not take.
+const jawHoldToleranceRad = 0.01
+
+func (g *so101Gripper) GoToInputs(ctx context.Context, inputSteps ...[]referenceframe.Input) error {
+	if !g.articulatedJaw {
+		return errors.ErrUnsupported
+	}
+	limits := g.model.DoF()
+	if len(limits) != 1 {
+		return fmt.Errorf("articulated gripper model has %d DoF, want 1", len(limits))
+	}
+	jaw := limits[0]
+
+	// Validate EVERY step before moving any of them.
+	for i, step := range inputSteps {
+		if len(step) != 1 {
+			return fmt.Errorf("step %d: got %d inputs, the jaw takes 1", i, len(step))
+		}
+		if step[0] < jaw.Min-geometry.JawLimitEpsilon || step[0] > jaw.Max+geometry.JawLimitEpsilon {
+			return fmt.Errorf("step %d: jaw angle %.4f rad is outside [%.4f, %.4f]",
+				i, step[0], jaw.Min, jaw.Max)
+		}
+	}
+	if len(inputSteps) == 0 {
+		return nil
+	}
+
+	current, err := g.positionPercentCached(ctx)
+	if err != nil {
+		return err
+	}
+	currentRad := geometry.JawRadiansFromPct(current)
+
+	// A no-op batch is the common case: the gripper appears in every trajectory step of every
+	// plan carrying its unchanged value. It must neither reject nor touch the bus.
+	moves := false
+	for _, step := range inputSteps {
+		if math.Abs(step[0]-currentRad) > jawHoldToleranceRad {
+			moves = true
+			break
+		}
+	}
+	if !moves {
+		return nil
+	}
+
+	held, err := g.IsHoldingSomething(ctx, nil)
+	if err != nil {
+		return err
+	}
+	final := inputSteps[len(inputSteps)-1][0]
+	if held.IsHoldingSomething {
+		g.logger.Infof("refusing planner jaw command while holding: current %.4f rad, requested %.4f rad",
+			currentRad, final)
+		return fmt.Errorf(
+			"gripper is holding something; refusing the planner's request to move the jaw from "+
+				"%.4f to %.4f rad. Release the object or disable articulated_jaw", currentRad, final)
+	}
+	g.logger.Infof("jaw GoToInputs: %d step(s), %.4f -> %.4f rad", len(inputSteps), currentRad, final)
+
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.stopped.Store(false) // clear BEFORE isMoving, or a Stop landing between the two is wiped
+	g.isMoving.Store(true)
+	defer g.isMoving.Store(false)
+
+	// Only the final target: a position servo never traverses superseded waypoints.
+	if err := g.moveToPercent(ctx, geometry.JawPctFromRadians(final), true); err != nil {
+		return err
+	}
+	if g.stopped.Load() {
+		return errors.New("jaw motion was stopped before completing the trajectory")
+	}
+	return nil
 }
 
 // Kinematics returns the gripper's static model, whose leaf frame is the TCP between the jaw

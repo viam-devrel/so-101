@@ -3,6 +3,7 @@ package gripper
 import (
 	"context"
 	"errors"
+	"math"
 	"sync"
 	"testing"
 	"time"
@@ -698,4 +699,110 @@ func TestStopDuringReadDoesNotStampStaleValue(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, n+1, countCommands(fa, servocmd.CmdServoPosition),
 		"a reading invalidated mid-flight must not have been stamped fresh")
+}
+
+// TestGoToInputsNoOpBatchIssuesNoCommand is the pick-and-place regression guard, and the most
+// important test in this file. builtin.go skips a component in a trajectory step only when
+// len(inputs) == 0 -- never when unchanged -- so a 1-DoF gripper appears in EVERY step of EVERY
+// plan carrying its current jaw value. Rejecting those would fail every arm move made while
+// holding a part.
+func TestGoToInputsNoOpBatchIssuesNoCommand(t *testing.T) {
+	ctx := context.Background()
+	fa := newFakeServoArm()
+	fa.percent = 60 // wide enough that IsHoldingSomething reports true
+	g := newTestGripperWithConfig(t, fa, SO101GripperConfig{ArticulatedJaw: true})
+
+	current := geometry.JawRadiansFromPct(60)
+	require.NoError(t, g.GoToInputs(ctx,
+		[]referenceframe.Input{current},
+		[]referenceframe.Input{current + jawHoldToleranceRad/2},
+	), "a no-op batch must succeed even while holding")
+
+	assert.Zerof(t, countCommands(fa, servocmd.CmdServoMove),
+		"a no-op batch must not touch the bus; issued %v", fa.issued())
+}
+
+// TestGoToInputsRejectsWhileHolding: the planner moves the jaw 4-20%% of its range under
+// obstruction, which on hardware means loosening a grip mid-trajectory.
+func TestGoToInputsRejectsWhileHolding(t *testing.T) {
+	ctx := context.Background()
+	fa := newFakeServoArm()
+	fa.percent = 60
+	g := newTestGripperWithConfig(t, fa, SO101GripperConfig{ArticulatedJaw: true})
+
+	err := g.GoToInputs(ctx, []referenceframe.Input{geometry.GripperJointMax})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "holding")
+	assert.Zerof(t, countCommands(fa, servocmd.CmdServoMove),
+		"a rejected batch must not have moved the jaw")
+}
+
+// TestGoToInputsMovesWhenNotHolding is the complement -- the guard must not block ordinary use.
+func TestGoToInputsMovesWhenNotHolding(t *testing.T) {
+	ctx := context.Background()
+	fa := newFakeServoArm()
+	fa.percent = 0 // closed, nothing held
+	g := newTestGripperWithConfig(t, fa, SO101GripperConfig{ArticulatedJaw: true})
+
+	require.NoError(t, g.GoToInputs(ctx, []referenceframe.Input{geometry.GripperJointMax}))
+	assert.Equal(t, 1, countCommands(fa, servocmd.CmdServoMove))
+}
+
+// TestGoToInputsIssuesOnlyFinalTarget: a position-controlled STS3215 tracks the most recent
+// command, so intermediate targets are never traversed. Sending them spends bus writes -- on the
+// bus the arm is actively using -- for no change in behaviour.
+func TestGoToInputsIssuesOnlyFinalTarget(t *testing.T) {
+	ctx := context.Background()
+	fa := newFakeServoArm()
+	g := newTestGripperWithConfig(t, fa, SO101GripperConfig{ArticulatedJaw: true})
+
+	steps := [][]referenceframe.Input{}
+	for _, pct := range []float64{20, 40, 60, 80} {
+		steps = append(steps, []referenceframe.Input{geometry.JawRadiansFromPct(pct)})
+	}
+	require.NoError(t, g.GoToInputs(ctx, steps...))
+
+	assert.Equal(t, 1, countCommands(fa, servocmd.CmdServoMove))
+	assert.Equal(t, 1, countCommands(fa, servocmd.CmdServoWaitStop))
+	cmd := fa.lastCommand(servocmd.CmdServoMove)
+	assert.InDelta(t, 80.0, cmd["percent"], 0.01, "must command the FINAL step's target")
+}
+
+// TestGoToInputsValidatesBeforeMoving: a batch that fails halfway leaves the jaw somewhere the
+// planner did not intend.
+func TestGoToInputsValidatesBeforeMoving(t *testing.T) {
+	ctx := context.Background()
+	fa := newFakeServoArm()
+	g := newTestGripperWithConfig(t, fa, SO101GripperConfig{ArticulatedJaw: true})
+
+	err := g.GoToInputs(ctx,
+		[]referenceframe.Input{geometry.JawRadiansFromPct(50)},
+		[]referenceframe.Input{geometry.GripperJointMax + 0.5}, // invalid
+	)
+	require.Error(t, err)
+	assert.Zerof(t, countCommands(fa, servocmd.CmdServoMove),
+		"nothing may move when any step is invalid")
+}
+
+// TestGoToInputsToleratesULPOvershoot: rdk rejects an input over a limit by even one ULP, and a
+// planner trajectory riding a limit can produce exactly that.
+func TestGoToInputsToleratesULPOvershoot(t *testing.T) {
+	ctx := context.Background()
+	fa := newFakeServoArm()
+	g := newTestGripperWithConfig(t, fa, SO101GripperConfig{ArticulatedJaw: true})
+	over := math.Nextafter(geometry.GripperJointMax, math.Inf(1))
+	assert.NoError(t, g.GoToInputs(ctx, []referenceframe.Input{over}))
+}
+
+// TestGoToInputsAbortsOnStop. Note GoToInputs must set isMoving, or Stop never latches and this
+// passes vacuously.
+func TestGoToInputsAbortsOnStop(t *testing.T) {
+	ctx := context.Background()
+	fa := newFakeServoArm()
+	g := newTestGripperWithConfig(t, fa, SO101GripperConfig{ArticulatedJaw: true})
+
+	fa.onRead = nil
+	fa.onMove = func() { _ = g.Stop(context.Background(), nil) } // fires mid-batch
+	err := g.GoToInputs(ctx, []referenceframe.Input{geometry.GripperJointMax})
+	assert.Error(t, err, "a stopped batch must report that it did not complete")
 }
