@@ -90,11 +90,13 @@ you did not ask for while planning an unrelated arm move. Measured over 10 seeds
 the jaw at all, while plans forced through an obstacle move it 4%-20% of its range, usually
 wandering back to near its starting angle by the end.
 
-**Watch for the execute-epsilon hazard.** `services/motion/builtin/builtin.go:633` rejects a plan
-whose first trajectory step differs from the component's `CurrentInputs` by more than `0.01`, and
-aborts the whole move — including the arm's move — when it does. A jaw still travelling from an
-earlier `Open`/`Grab` call is enough to trip this (`TestExecuteEpsilonTripsOnMovingJaw`). Wait for
-the gripper to finish moving before starting a plan.
+**The execute-epsilon hazard (plan/execute split only).** `services/motion/builtin/builtin.go:633`
+rejects a plan whose first trajectory step differs from the component's `CurrentInputs` by more than
+`0.01`, aborting the whole move — and a jaw still travelling from an earlier `Open`/`Grab` is enough
+to exceed that (`TestExecuteEpsilonTripsOnMovingJaw`). **This does not fire on the normal `Move()`
+path**, which passes `math.MaxFloat64` as the epsilon (`builtin.go:260`); it applies only when a
+caller drives the plan/execute split explicitly via the `executeCheckStart` DoCommand. If you use
+that path, let the jaw settle before executing.
 
 Jaw inputs (`GoToInputs`/`CurrentInputs`) are in **radians** end to end — the gripper's gRPC API
 passes raw `float64` values with no unit conversion, unlike the arm API's degrees.

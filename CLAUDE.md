@@ -288,6 +288,11 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
   polling a position read failed outright (nothing retries), the same transient that would
   abort a move from `WaitForServosToStop`'s own poll -- another reason not to poll `IsMoving`
   in a tight loop.
+- **`defaultExecuteEpsilon` is inert on the normal `Move()` path.** `services/motion/builtin`'s
+  `Move` passes `math.MaxFloat64` as the execute epsilon (`builtin.go:260`); the `0.01` default
+  (`builtin.go:77`) applies only when a caller supplies `executeCheckStart` via the plan/execute
+  DoCommand split. So the "first trajectory step must match CurrentInputs" check — and the
+  mid-travel-jaw hazard it creates — does not abort an ordinary arm move.
 - **`Speed: 0` means MAXIMUM, not stopped**, and **`Acc: 0` means UNLIMITED, not zero** — both
   Feetech register sentinels are the opposite of what they look like, and both have already
   caused real bugs in this project. A short-travel joint scaled down by a small `k` can round
