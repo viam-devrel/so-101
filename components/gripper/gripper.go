@@ -10,6 +10,7 @@ import (
 	"math"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"go.viam.com/rdk/components/arm"
 	"go.viam.com/rdk/components/gripper"
@@ -105,6 +106,18 @@ type so101Gripper struct {
 
 	speed        float32
 	acceleration float32
+
+	// jawMu guards the position cache ONLY. It is deliberately not g.mu: Open/Grab/DoCommand hold
+	// g.mu across moveToPercent, and sync.Mutex is not reentrant, so invalidating under g.mu would
+	// deadlock. jawMu is never held across a DoCommand -- a viewer poll must not block behind an
+	// Open sitting in servo_wait_stop.
+	jawMu       sync.Mutex
+	jawPct      float64
+	jawReadAt   time.Time
+	jawHaveRead bool
+	jawGen      uint64
+
+	now func() time.Time // injectable for tests; time.Now in production
 }
 
 func init() {
@@ -164,6 +177,13 @@ func newSO101Gripper(ctx context.Context, deps resource.Dependencies, conf resou
 		acceleration:   50,
 		openPosition:   95.0,
 		closedPosition: 0.0,
+		now:            time.Now,
+	}
+
+	if cfg.ArticulatedJaw {
+		if _, err := g.positionPercentCached(ctx); err != nil {
+			logger.Warnf("could not prime the jaw position cache: %v", err)
+		}
 	}
 
 	logger.Debugf("SO-101 gripper initialized with servo ID %d, open=%.1f%%, closed=%.1f%%",
@@ -214,10 +234,17 @@ func servoIDsFromCapabilities(res map[string]interface{}) []int {
 	}
 }
 
-// servoDo sends one servo_* command for this gripper's servo.
+// servoDo sends one servo_* command for this gripper's servo. Every command except a position
+// read or the capabilities probe invalidates the jaw cache -- excluding CmdServoPosition is not
+// just an optimization: if a read's own servoDo bumped the generation counter, the cache would
+// discard the very reading it just took and never populate at all.
 func (g *so101Gripper) servoDo(
 	ctx context.Context, command string, args map[string]interface{},
 ) (map[string]interface{}, error) {
+	if command != servocmd.CmdServoPosition && command != servocmd.CmdServoCapabilities {
+		g.invalidateJawCache()
+	}
+
 	cmd := map[string]interface{}{"command": command, "servo_id": g.servoID}
 	for k, v := range args {
 		cmd[k] = v
@@ -255,6 +282,48 @@ func (g *so101Gripper) positionPercent(ctx context.Context) (float64, error) {
 // gripperSettleTimeoutMs bounds the wait for the gripper servo to stop moving. It replaces
 // the fixed 500ms sleep the previous implementation used after every command.
 const gripperSettleTimeoutMs = 2000
+
+// jawCacheTTL bounds how stale a jaw reading may be. It expires on wall clock regardless of
+// writes, so invalidation only ever shortens staleness -- including a jaw back-driven by hand
+// with torque off.
+const jawCacheTTL = 50 * time.Millisecond
+
+func (g *so101Gripper) invalidateJawCache() {
+	g.jawMu.Lock()
+	defer g.jawMu.Unlock()
+	g.jawReadAt = time.Time{}
+	g.jawGen++
+}
+
+// positionPercentCached returns the jaw opening, reading the bus at most once per jawCacheTTL.
+func (g *so101Gripper) positionPercentCached(ctx context.Context) (float64, error) {
+	g.jawMu.Lock()
+	if g.jawHaveRead && !g.jawReadAt.IsZero() && g.now().Sub(g.jawReadAt) < jawCacheTTL {
+		pct := g.jawPct
+		g.jawMu.Unlock()
+		return pct, nil
+	}
+	gen, havePrev, prev := g.jawGen, g.jawHaveRead, g.jawPct
+	g.jawMu.Unlock()
+
+	pct, err := g.positionPercent(ctx) // bus read, jawMu NOT held
+	if err != nil {
+		if havePrev {
+			g.logger.Warnf("jaw position read failed, serving last known good %.1f%%: %v", prev, err)
+			return prev, nil
+		}
+		return 0, err
+	}
+
+	g.jawMu.Lock()
+	defer g.jawMu.Unlock()
+	// Discard if the jaw was commanded while this read was in flight, or if it is still moving --
+	// moveToPercent returns on a servo_wait_stop timeout too, after which the servo may be settling.
+	if g.jawGen == gen && !g.isMoving.Load() {
+		g.jawPct, g.jawReadAt, g.jawHaveRead = pct, g.now(), true
+	}
+	return pct, nil
+}
 
 func (g *so101Gripper) Open(ctx context.Context, extra map[string]interface{}) error {
 	g.mu.Lock()
@@ -504,8 +573,21 @@ func (g *so101Gripper) Close(ctx context.Context) error {
 	return nil
 }
 
+// CurrentInputs reports the jaw joint angle for the articulated (1-DoF) model. Unsupported for
+// the default static model -- see BuildGripperModel's jawDoF branch.
+//
+// Minimal implementation for Task 4 (the position cache): it wires positionPercentCached through
+// to satisfy the cache's own tests. Task 6 covers CurrentInputs's full contract; do not read this
+// as that task done.
 func (g *so101Gripper) CurrentInputs(ctx context.Context) ([]referenceframe.Input, error) {
-	return nil, errors.ErrUnsupported
+	if !g.articulatedJaw {
+		return nil, errors.ErrUnsupported
+	}
+	pct, err := g.positionPercentCached(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return []referenceframe.Input{geometry.JawRadiansFromPct(pct)}, nil
 }
 
 func (g *so101Gripper) GoToInputs(ctx context.Context, inputs ...[]referenceframe.Input) error {

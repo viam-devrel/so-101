@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -538,4 +539,124 @@ func TestArticulatedJawConfigHardware(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, m.DoF(), 1)
 	})
+}
+
+// clearJawCacheForTest drops jawHaveRead, simulating a never-successful start. Test-only seam;
+// belongs with the tests, not the production file.
+func (g *so101Gripper) clearJawCacheForTest() {
+	g.jawMu.Lock()
+	defer g.jawMu.Unlock()
+	g.jawHaveRead = false
+	g.jawReadAt = time.Time{}
+}
+
+// TestJawCacheBoundsBusReads pins the reason the cache exists: every read is a DoCommand round
+// trip plus a serial read on a bus shared with five arm servos, and the 3D viewer polls
+// CurrentInputs continuously.
+func TestJawCacheBoundsBusReads(t *testing.T) {
+	ctx := context.Background()
+	fa := newFakeServoArm()
+	g := newTestGripperWithConfig(t, fa, SO101GripperConfig{ArticulatedJaw: true})
+
+	before := countCommands(fa, servocmd.CmdServoPosition)
+	for i := 0; i < 20; i++ {
+		_, err := g.CurrentInputs(ctx)
+		require.NoError(t, err)
+	}
+	assert.Equalf(t, before, countCommands(fa, servocmd.CmdServoPosition),
+		"20 calls inside the TTL should have hit the bus zero extra times")
+}
+
+// TestJawCacheExpires uses the injectable clock rather than sleeping.
+func TestJawCacheExpires(t *testing.T) {
+	ctx := context.Background()
+	fa := newFakeServoArm()
+	g := newTestGripperWithConfig(t, fa, SO101GripperConfig{ArticulatedJaw: true})
+
+	base := time.Now()
+	g.now = func() time.Time { return base }
+	_, err := g.CurrentInputs(ctx)
+	require.NoError(t, err)
+	n := countCommands(fa, servocmd.CmdServoPosition)
+
+	g.now = func() time.Time { return base.Add(jawCacheTTL + time.Millisecond) }
+	_, err = g.CurrentInputs(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, n+1, countCommands(fa, servocmd.CmdServoPosition), "expired cache must re-read")
+}
+
+// TestRawSetPositionInvalidatesCache proves servoDo is the right choke point: this path bypasses
+// moveToPercent entirely.
+func TestRawSetPositionInvalidatesCache(t *testing.T) {
+	ctx := context.Background()
+	fa := newFakeServoArm()
+	g := newTestGripperWithConfig(t, fa, SO101GripperConfig{ArticulatedJaw: true})
+
+	_, err := g.CurrentInputs(ctx)
+	require.NoError(t, err)
+	n := countCommands(fa, servocmd.CmdServoPosition)
+
+	_, err = g.DoCommand(ctx, map[string]interface{}{
+		"command": "set_position", "servo_position": 2500.0,
+	})
+	require.NoError(t, err)
+
+	_, err = g.CurrentInputs(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, n+1, countCommands(fa, servocmd.CmdServoPosition),
+		"a raw set_position must invalidate the cache")
+}
+
+// TestCurrentInputsSurvivesReadFailure: framesystem.CurrentInputs hard-errors the entire machine's
+// frame system when a DoF-bearing component errors, so one dropped serial frame must not abort
+// every arm move.
+func TestCurrentInputsSurvivesReadFailure(t *testing.T) {
+	ctx := context.Background()
+	fa := newFakeServoArm()
+	fa.percent = 40
+	g := newTestGripperWithConfig(t, fa, SO101GripperConfig{ArticulatedJaw: true})
+
+	good, err := g.CurrentInputs(ctx)
+	require.NoError(t, err)
+
+	fa.setErr(errors.New("bus timeout"))
+	g.invalidateJawCache()
+	after, err := g.CurrentInputs(ctx)
+	require.NoError(t, err, "a dropped read must not break the frame system")
+	assert.InDelta(t, good[0], after[0], 1e-12, "should serve the last known good reading")
+}
+
+// TestCurrentInputsErrorsBeforeFirstRead is the one case where erroring is correct.
+func TestCurrentInputsErrorsBeforeFirstRead(t *testing.T) {
+	fa := newFakeServoArm()
+	g := newTestGripperWithConfig(t, fa, SO101GripperConfig{ArticulatedJaw: true})
+	fa.setErr(errors.New("bus down"))
+	g.clearJawCacheForTest() // drops jawHaveRead, simulating a never-successful start
+	_, err := g.CurrentInputs(context.Background())
+	assert.Error(t, err, "with no reading ever taken there is nothing honest to return")
+}
+
+// TestStopDuringReadDoesNotStampStaleValue closes the window opened by releasing jawMu across the
+// bus read: an invalidation landing mid-read must not be overwritten by the in-flight pre-write
+// value and stamped fresh.
+func TestStopDuringReadDoesNotStampStaleValue(t *testing.T) {
+	ctx := context.Background()
+	fa := newFakeServoArm()
+	fa.percent = 10
+	g := newTestGripperWithConfig(t, fa, SO101GripperConfig{ArticulatedJaw: true})
+
+	// The constructor primed the cache, so drop it first or the next call is a hit and the hook
+	// never runs.
+	g.invalidateJawCache()
+
+	fa.onRead = func() { g.invalidateJawCache() } // lands inside the unlocked window
+	_, err := g.CurrentInputs(ctx)
+	require.NoError(t, err)
+	fa.onRead = nil
+
+	n := countCommands(fa, servocmd.CmdServoPosition)
+	_, err = g.CurrentInputs(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, n+1, countCommands(fa, servocmd.CmdServoPosition),
+		"a reading invalidated mid-flight must not have been stamped fresh")
 }
