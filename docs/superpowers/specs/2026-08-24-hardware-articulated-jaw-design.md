@@ -2,7 +2,8 @@
 
 **Date:** 2026-08-24
 **Status:** Design, approved for planning
-**Scope:** `components/gripper`, `docs/gripper.md`, `CLAUDE.md`
+**Scope:** `components/gripper`, `components/simulated` and `internal/geometry` (relocating
+`jawLimitEpsilon`), `docs/gripper.md`, `CLAUDE.md`
 
 ## Purpose
 
@@ -55,6 +56,15 @@ gripper at all.
 Skipping no-op batches also removes write-side bus load: without it, every arm plan issues
 a `servo_move` per step on the same 1 Mbaud bus the arm is using.
 
+**"Current angle" means a fresh `positionPercentCached` read at execute time, not the value
+the plan started from.** That matters: if the servo's reported position drifts more than the
+tolerance between plan time and execute time — plausible under load with a part clamped
+between the fingers — a genuine no-op batch is misclassified as jaw-moving and rejected,
+resurrecting the pick-and-place regression intermittently. The fake arm reports an exact
+percent, so no unit test can catch this. Mitigation: log at info level whenever a batch is
+classified as jaw-moving while holding, including the current and requested angles, so the
+first hardware run shows whether 0.01 rad is the right number.
+
 `jawHoldToleranceRad = 0.01` rad (~0.6°). The jaw's range is 1.92 rad and the planner's
 measured travel under obstruction is 0.083-0.383 rad, so this cleanly separates "no-op plus
 float noise" from "the planner genuinely wants the jaw somewhere else". It is deliberately
@@ -70,6 +80,19 @@ the jaw — and say which angle it asked for.
 
 The rejection is scoped to `GoToInputs` only. `Open`, `Grab` and the `set_position`
 DoCommand are unaffected, so a user can always release a held part.
+
+**Two consequences that follow from this and should not be "fixed" without thought.** First,
+the dominant measured case is an out-and-back batch (8/10 seeds return near their start).
+That is *not* a no-op — an intermediate step exceeds tolerance — so while holding it is
+rejected despite net jaw motion of ~zero. That is intended: the planner did ask to open the
+jaw mid-trajectory. Do not change step 3 to compare only the final step.
+
+Second, issuing only the final target (step 6) means the executed jaw path diverges from the
+planned mid-trajectory geometry — the same objection used above to reject *clamping*. The
+difference is that a position-controlled STS3215 never traverses superseded waypoints, so
+that divergence exists whether or not the intermediate targets are sent; clamping would have
+additionally changed the *endpoint*. Sending them would cost N bus writes for no change in
+behaviour.
 
 ### 2. Last-known-good on a failed read
 
@@ -110,11 +133,12 @@ mid-travel. Invalidate on any command that is not a read.
 after a timeout the servo may still be moving, so a reading captured then would be frozen for
 a full TTL. Skip storing whenever `isMoving` is set.
 
-**Known residual staleness, accepted and documented:** with torque disabled the jaw is freely
-back-drivable by hand and nothing writes to the bus, so the cache can serve a stale value
-indefinitely. `services/teleop`'s `SetTorqueEnable` acts on the whole 6-servo group, so this
-is reachable in normal operation. The mitigation is that a torque-disabled arm is not under
-planner control; this is called out in `docs/gripper.md` rather than engineered around.
+**Back-driving is bounded, not unbounded.** With torque disabled the jaw is freely
+back-drivable by hand while nothing writes to the bus (`services/teleop`'s `SetTorqueEnable`
+acts on the whole 6-servo group). This is *not* a special case: `jawCacheTTL` expires on wall
+clock regardless of writes, so such a reading is stale for at most 50 ms like any other.
+Invalidation only ever shortens staleness; it never extends it. Recorded so nobody engineers
+around a non-problem or infers an exception to the TTL that does not exist.
 
 ## Design
 
@@ -158,8 +182,15 @@ behind an `Open` that is sitting in `servo_wait_stop` for up to 2000 ms. (Today'
   within `jawCacheTTL`; otherwise reads through `positionPercent`. On success, store unless
   `isMoving` is set. On error: return `jawPct` with a warning if `jawHaveRead`, else return
   the error.
-- `invalidateJawCache()` — clears freshness, not `jawHaveRead`. Called from `servoDo` for
-  every non-read command.
+- `invalidateJawCache()` — clears freshness, not `jawHaveRead`, and bumps a generation
+  counter. Called from `servoDo` for every non-read command.
+- **A generation counter is required, not optional.** Because `jawMu` is released across the
+  bus read, an invalidation landing inside that window would otherwise be overwritten by the
+  in-flight pre-write value and stamped fresh — 50 ms of confidently-wrong geometry, exactly
+  what this decision exists to prevent. Capture the generation before the read; at store time,
+  discard the result if it changed. The `isMoving` store-guard covers `Open`/`Grab`/
+  `GoToInputs`/`set_position` (all set it before `servoDo`) but **not `Stop`**, which clears
+  `isMoving` at `gripper.go:302` *before* issuing `servo_stop` at `:303`.
 - **Prime the cache with one read at construction.** The constructor already probes servo
   capabilities; adding a position read closes the "error before the first successful read"
   window, which otherwise means the first frame-system sweep after a reconfigure on a flaky
@@ -261,9 +292,10 @@ construction still succeeds); reporting a held object is expressible via `fa.per
 | `TestGoToInputsNoOpBatchIssuesNoCommand` | a batch matching the current angle returns nil and issues **no** `servo_move` — the pick-and-place regression guard |
 | `TestGoToInputsRejectsWhileHolding` | fake arm reports a held object ⇒ error, and **no** `servo_move` command issued |
 | `TestGoToInputsValidatesBeforeMoving` | a batch whose second step is invalid issues no `servo_move` at all |
-| `TestGoToInputsAwaitsOnlyFinalStep` | an N-step batch issues N `servo_move` but only one `servo_wait_stop` |
+| `TestGoToInputsIssuesOnlyFinalTarget` | an N-step batch issues exactly **one** `servo_move` (the last step's target) and one `servo_wait_stop` |
 | `TestIsHoldingSomethingReportsGrasp` | above/below `graspThresholdPct` both directions |
 | `TestGoToInputsAbortsOnStop` | `Stop` mid-batch ⇒ error; and `isMoving` is set during the batch, so the flag can latch at all |
+| `TestStopDuringReadDoesNotStampStaleValue` | an invalidation landing mid-read is discarded by the generation check |
 | `TestOpenDoesNotDeadlock` | `Open`/`Grab` complete with cache invalidation wired in — the reentrancy guard |
 | `TestRawSetPositionInvalidatesCache` | the `servo_position` raw path invalidates, proving `servoDo` is the right choke point |
 
