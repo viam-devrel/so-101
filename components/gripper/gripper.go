@@ -261,13 +261,15 @@ func servoIDsFromCapabilities(res map[string]interface{}) []int {
 }
 
 // servoDo sends one servo_* command for this gripper's servo. Every command except a position
-// read or the capabilities probe invalidates the jaw cache -- excluding CmdServoPosition is not
-// just an optimization: if a read's own servoDo bumped the generation counter, the cache would
-// discard the very reading it just took and never populate at all.
+// read, a load read, or the capabilities probe invalidates the jaw cache -- excluding
+// CmdServoPosition is not just an optimization: if a read's own servoDo bumped the generation
+// counter, the cache would discard the very reading it just took and never populate at all.
+// CmdServoLoad is excluded for the same reason it isn't a write: reading load moves nothing.
 func (g *so101Gripper) servoDo(
 	ctx context.Context, command string, args map[string]interface{},
 ) (map[string]interface{}, error) {
-	if command != servocmd.CmdServoPosition && command != servocmd.CmdServoCapabilities {
+	if command != servocmd.CmdServoPosition && command != servocmd.CmdServoCapabilities &&
+		command != servocmd.CmdServoLoad {
 		g.invalidateJawCache()
 	}
 
@@ -578,6 +580,16 @@ func (g *so101Gripper) DoCommand(ctx context.Context, cmd map[string]interface{}
 
 		err := g.moveToPercent(ctx, targetPercent, servocmd.WaitArg(cmd))
 		return map[string]interface{}{"success": err == nil}, err
+
+	case "get_load":
+		// Exists purely to make the raw signed load register sample-able (e.g. from the CLI).
+		// Not used to infer whether the gripper is holding something.
+		res, err := g.servoDo(ctx, servocmd.CmdServoLoad, nil)
+		if err != nil {
+			return nil, err
+		}
+		load, _ := servocmd.NumArg(res, "load")
+		return map[string]interface{}{"load": load}, nil
 
 	case "controller_status":
 		// The arm owns the controller now, so forward and re-shape to this component's

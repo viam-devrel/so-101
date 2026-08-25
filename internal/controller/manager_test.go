@@ -78,6 +78,17 @@ func TestSyncReadPositionsDecodesInsideTheHandle(t *testing.T) {
 		"decoding belongs inside the handle; exposing Protocol() would re-leak the bus")
 }
 
+func TestServoLoadReadsPresentLoadRegister(t *testing.T) {
+	ft := testfake.NewFakeTransport()
+	// Load is little-endian sign-magnitude at RegPresentLoad; encode +50.
+	ft.SetRegister(6, feetech.RegPresentLoad.Address, testfake.EncodeWordLE(50))
+	h := testHandle(t, ft)
+
+	load, err := h.ServoLoad(context.Background(), 6)
+	require.NoError(t, err)
+	assert.Equal(t, 50, load)
+}
+
 func TestPingServoReachesOneServo(t *testing.T) {
 	h := testHandle(t, testfake.NewFakeTransport())
 	model, err := h.PingServo(context.Background(), 3)

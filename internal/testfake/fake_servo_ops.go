@@ -23,6 +23,8 @@ type FakeServoOps struct {
 	Moving    bool
 	MovingErr error
 	MovingIDs []int
+	Load      int
+	LoadErr   error
 }
 
 func (f *FakeServoOps) MoveServoPercent(_ context.Context, id int, percent float64, speed int) error {
@@ -56,4 +58,11 @@ func (f *FakeServoOps) WaitForServosToStop(_ context.Context, ids []int, timeout
 func (f *FakeServoOps) AnyServoMoving(_ context.Context, ids []int) (bool, error) {
 	f.MovingIDs = ids
 	return f.Moving, f.MovingErr
+}
+
+func (f *FakeServoOps) ServoLoad(_ context.Context, id int) (int, error) {
+	if f.LoadErr != nil {
+		return 0, f.LoadErr
+	}
+	return f.Load, nil
 }

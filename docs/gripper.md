@@ -203,6 +203,25 @@ Response:
 `set` clamps to 0–100 and takes the same `wait` key with the same `true` default as
 `set_position`. Unlike `set_position` it returns the clamped `position` rather than a
 `success` boolean, and it has no raw-tick form.
+### Get Load
+
+Read the servo's raw signed present-load register (sign-magnitude, not a percentage):
+
+```json
+{
+  "command": "get_load"
+}
+```
+
+Response:
+
+```json
+{
+  "load": -412
+}
+```
+
+This exists so load can be sampled (e.g. from the CLI) while investigating grasp behavior. It plays no part in the gripper's own holding decision -- see "Holding" above.
 
 ### Controller Status
 

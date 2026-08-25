@@ -20,6 +20,7 @@ const (
 	CmdServoPosition     = "servo_position"
 	CmdServoStop         = "servo_stop"
 	CmdServoWaitStop     = "servo_wait_stop"
+	CmdServoLoad         = "servo_load"
 )
 
 // ServoOps is the single-servo surface HandleServoCommand needs. Keeping dispatch behind
@@ -32,6 +33,9 @@ type ServoOps interface {
 	StopServo(ctx context.Context, id int) error
 	WaitForServosToStop(ctx context.Context, ids []int, timeoutMs int) error
 	AnyServoMoving(ctx context.Context, ids []int) (bool, error)
+	// ServoLoad reads the servo's raw signed present-load register. It exists to make load
+	// measurable (e.g. from the CLI); nothing in this module derives grasp state from it.
+	ServoLoad(ctx context.Context, id int) (load int, err error)
 }
 
 // IsServoCommand reports whether a DoCommand belongs to this family, so the arm can route
@@ -175,6 +179,13 @@ func HandleServoCommand(
 			return nil, err
 		}
 		return map[string]any{"percent": percent, "raw": raw}, nil
+
+	case CmdServoLoad:
+		load, err := ops.ServoLoad(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"load": load}, nil
 
 	case CmdServoStop:
 		if err := ops.StopServo(ctx, id); err != nil {

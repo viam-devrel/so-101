@@ -436,6 +436,49 @@ func TestGripperDrivesRealDispatcherEndToEnd(t *testing.T) {
 	assert.Equal(t, 12.5, got["position_percentage"])
 }
 
+// TestGripperGetLoadReturnsRawSignedLoad drives the real servocmd dispatcher (not the
+// fakeServoArm) end to end, same as TestGripperDrivesRealDispatcherEndToEnd, to prove get_load
+// actually connects through servo_load rather than just being wired against a mock.
+func TestGripperGetLoadReturnsRawSignedLoad(t *testing.T) {
+	ops := &testfake.FakeServoOps{Load: -412}
+	da := &dispatchingArm{name: arm.Named("real-dispatch"), ops: ops}
+	deps := resource.Dependencies{da.name: da}
+	conf := resource.Config{
+		Name:                "gripper",
+		API:                 gripper.API,
+		Model:               SO101GripperModel,
+		ConvertedAttributes: &SO101GripperConfig{Arm: da.name.Name},
+	}
+	res, err := newSO101Gripper(context.Background(), deps, conf, logging.NewTestLogger(t))
+	require.NoError(t, err)
+	g := res.(*so101Gripper)
+
+	got, err := g.DoCommand(context.Background(), map[string]any{"command": "get_load"})
+	require.NoError(t, err)
+	assert.Equal(t, -412, got["load"])
+}
+
+// TestGripperGetLoadPropagatesError proves a servo_load failure surfaces to the caller rather
+// than being swallowed.
+func TestGripperGetLoadPropagatesError(t *testing.T) {
+	boom := errors.New("bus is on fire")
+	ops := &testfake.FakeServoOps{LoadErr: boom}
+	da := &dispatchingArm{name: arm.Named("real-dispatch"), ops: ops}
+	deps := resource.Dependencies{da.name: da}
+	conf := resource.Config{
+		Name:                "gripper",
+		API:                 gripper.API,
+		Model:               SO101GripperModel,
+		ConvertedAttributes: &SO101GripperConfig{Arm: da.name.Name},
+	}
+	res, err := newSO101Gripper(context.Background(), deps, conf, logging.NewTestLogger(t))
+	require.NoError(t, err)
+	g := res.(*so101Gripper)
+
+	_, err = g.DoCommand(context.Background(), map[string]any{"command": "get_load"})
+	require.ErrorIs(t, err, boom)
+}
+
 // Grab infers a grasp from position error. Under the old 500/3500 default an *empty* jaw
 // resting at its closed stop normalized to 51.6%, clearing the 15% threshold, so Grab
 // returned true whether or not it held anything.
