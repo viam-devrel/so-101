@@ -342,6 +342,10 @@ func (g *so101Gripper) Open(ctx context.Context, extra map[string]interface{}) e
 	return nil
 }
 
+// graspThresholdPct is how far short of closed the jaw must stop for Grab to conclude something
+// is between the fingers.
+const graspThresholdPct = 15.0
+
 func (g *so101Gripper) Grab(ctx context.Context, extra map[string]interface{}) (bool, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -362,9 +366,8 @@ func (g *so101Gripper) Grab(ctx context.Context, extra map[string]interface{}) (
 	}
 
 	positionDifference := currentPercent - g.closedPosition
-	threshold := 15.0
 
-	grabbed := positionDifference > threshold
+	grabbed := positionDifference > graspThresholdPct
 
 	if grabbed {
 		g.logger.Debugf("Gripper successfully grabbed an object (position difference: %.1f%%)", positionDifference)
@@ -600,6 +603,15 @@ func (g *so101Gripper) Kinematics(ctx context.Context) (referenceframe.Model, er
 	return g.model, nil
 }
 
-func (g *so101Gripper) IsHoldingSomething(ctx context.Context, extra map[string]interface{}) (gripper.HoldingStatus, error) {
-	return gripper.HoldingStatus{}, nil
+// IsHoldingSomething infers a grasp the same way Grab does: the jaw stopped short of closed, so
+// something is between the fingers. Reads through the cache -- GoToInputs calls this on every
+// planner-issued batch.
+func (g *so101Gripper) IsHoldingSomething(
+	ctx context.Context, extra map[string]interface{},
+) (gripper.HoldingStatus, error) {
+	pct, err := g.positionPercentCached(ctx)
+	if err != nil {
+		return gripper.HoldingStatus{}, err
+	}
+	return gripper.HoldingStatus{IsHoldingSomething: pct-g.closedPosition > graspThresholdPct}, nil
 }

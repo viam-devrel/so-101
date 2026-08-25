@@ -515,6 +515,32 @@ func TestGripperPercentWritesHonorTheWaitFlag(t *testing.T) {
 	}
 }
 
+// TestIsHoldingSomethingReportsGrasp: Grab already infers a grasp from the jaw stopping short of
+// closed. IsHoldingSomething was a stub that always said "not holding"; GoToInputs's safety guard
+// depends on it telling the truth.
+func TestIsHoldingSomethingReportsGrasp(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name    string
+		percent float64
+		holding bool
+	}{
+		{"jaw fully closed", 0, false},
+		{"just under the threshold", graspThresholdPct - 1, false},
+		{"just over the threshold", graspThresholdPct + 1, true},
+		{"jaw wide open on a big part", 60, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fa := newFakeServoArm()
+			fa.percent = tc.percent
+			g := newTestGripperWithConfig(t, fa, SO101GripperConfig{ArticulatedJaw: true})
+			st, err := g.IsHoldingSomething(ctx, nil)
+			require.NoError(t, err)
+			assert.Equal(t, tc.holding, st.IsHoldingSomething)
+		})
+	}
+}
+
 // TestArticulatedJawConfigHardware covers the flag end to end. The ErrUnsupported half matters as
 // much as the enabled half: robot/framesystem's CurrentInputs walks every frame with DoF and hard-
 // errors if the component is not InputEnabled, so a 1-DoF model with unwired inputs would break
