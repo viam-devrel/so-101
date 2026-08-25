@@ -115,9 +115,17 @@ type so101Gripper struct {
 	// g.mu across moveToPercent, and sync.Mutex is not reentrant, so invalidating under g.mu would
 	// deadlock. jawMu is never held across a DoCommand -- a viewer poll must not block behind an
 	// Open sitting in servo_wait_stop.
-	jawMu       sync.Mutex
-	jawPct      float64
-	jawReadAt   time.Time
+	jawMu sync.Mutex
+	// jawPct is the last known-good reading. It is meaningful only when jawHaveRead is true --
+	// 0 is itself a legal reading, so jawHaveRead (not a zero check here) is what distinguishes
+	// "never read" from "read zero".
+	jawPct float64
+	// jawReadAt is when jawPct was last refreshed from the bus; zero means "no fresh reading".
+	// invalidateJawCache zeroes this to force a re-read but deliberately leaves jawHaveRead set,
+	// so a dropped re-read can still fall back to the last known good jawPct.
+	jawReadAt time.Time
+	// jawHaveRead is true once any read has ever succeeded, and survives invalidation (see
+	// jawReadAt) so last-known-good keeps serving across it.
 	jawHaveRead bool
 	jawGen      uint64
 
@@ -304,13 +312,13 @@ func (g *so101Gripper) invalidateJawCache() {
 // positionPercentCached returns the jaw opening, reading the bus at most once per jawCacheTTL.
 func (g *so101Gripper) positionPercentCached(ctx context.Context) (float64, error) {
 	g.jawMu.Lock()
-	if g.jawHaveRead && !g.jawReadAt.IsZero() && g.now().Sub(g.jawReadAt) < jawCacheTTL {
-		pct := g.jawPct
-		g.jawMu.Unlock()
-		return pct, nil
-	}
+	fresh := !g.jawReadAt.IsZero() && g.now().Sub(g.jawReadAt) < jawCacheTTL
 	gen, havePrev, prev := g.jawGen, g.jawHaveRead, g.jawPct
 	g.jawMu.Unlock()
+
+	if fresh {
+		return prev, nil
+	}
 
 	pct, err := g.positionPercent(ctx) // bus read, jawMu NOT held
 	if err != nil {
