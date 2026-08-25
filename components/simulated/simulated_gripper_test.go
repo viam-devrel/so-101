@@ -294,7 +294,7 @@ func TestGoToInputsValidation(t *testing.T) {
 		assert.Error(t, g.GoToInputs(ctx, []referenceframe.Input{geometry.GripperJointMin - 0.5}))
 	})
 
-	// Pins the chosen ULP-overshoot handling (see jawLimitEpsilon in simulated_gripper.go): a
+	// Pins the chosen ULP-overshoot handling (see geometry.JawLimitEpsilon): a
 	// value 1 ULP above the limit -- exactly what Task 4's left-associative sweep produced --
 	// must not be rejected as out of bounds.
 	t.Run("accepts a 1-ULP overshoot at the limit", func(t *testing.T) {

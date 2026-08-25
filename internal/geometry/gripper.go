@@ -80,6 +80,16 @@ func JawPctFromRadians(rad float64) float64 {
 	return math.Max(0, math.Min(100, pct))
 }
 
+// JawLimitEpsilon tolerates a planner-issued input that lands just outside a joint limit due to
+// float rounding (e.g. left-associative (range*i)/steps in the angle sweep, which overshoots by
+// ~2.22e-16 -- one ULP -- at i==steps). rdk's frame system rejects an input outside its limit by
+// even that 1 ULP.
+//
+// 1e-6 is deliberately far wider than a ULP (about 4.5e9 ULP at GripperJointMax) -- it absorbs
+// ordinary float rounding, not machine precision, so do not "tighten" it toward a literal ULP.
+// What bounds the jaw is JawPctFromRadians's saturation to 0/100, not this epsilon's width.
+const JawLimitEpsilon = 1e-6
+
 // gripperStaticMeshNames returns the static body mesh names for a gripper variant. The
 // follower's body is one piece; the leader's is the wrist-roll part (which connects to the
 // arm) plus the handle attached to it.
