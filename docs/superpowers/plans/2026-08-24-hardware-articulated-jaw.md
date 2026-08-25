@@ -727,7 +727,8 @@ func TestGoToInputsAbortsOnStop(t *testing.T) {
 }
 ```
 
-Add `onMove func()` to the fake, called in the `CmdServoMove` branch, mirroring `onRead`.
+`onMove` was already added in Task 2, invoked **outside** `f.mu`. Do not move its invocation
+inside the lock — that is the deadlock this plan already fixed once.
 
 - [ ] **Step 2: Run and watch them fail**
 
@@ -844,7 +845,10 @@ Run: `go test ./components/gripper/ -v && go test -race ./components/gripper/`
 
 - [ ] **Step 5: Mutation-prove the two guards that matter**
 
-1. Remove the no-op early return → `TestGoToInputsNoOpBatchIssuesNoCommand` must fail. **This is the pick-and-place regression; record the output.**
+1. Remove the no-op early return → `TestGoToInputsNoOpBatchIssuesNoCommand` must fail. **This is
+   the pick-and-place regression; record the output.** Note it fails via the holding rejection
+   (`Received unexpected error`) rather than the `assert.Zerof` count line, because `fa.percent
+   = 60` carries the batch as far as the holding check. That is still a correct diagnostic.
 2. Remove the holding check → `TestGoToInputsRejectsWhileHolding` must fail.
 
 - [ ] **Step 6: Commit**
