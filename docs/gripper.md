@@ -85,6 +85,17 @@ exactly that on real hardware until it was fixed. `IsHoldingSomething` follows t
 like the guard above, reports NOT holding whenever nothing has been commanded yet (at startup, or
 right after a raw `set_position` in ticks), since there is no commanded target to compare against.
 
+**How "holding" is determined.** The gripper latches a grasp when a command completes, rather than
+inferring it from the jaw's position on demand. Two things measured on real hardware make the
+live inference impossible: a thin part held in the jaw reads ~0.8% open, indistinguishable from an
+empty closed jaw; and the servo's overload flag, which fires while it clamps, clears after about
+30 seconds even though the part stays held. So a close latches a grasp if the jaw stops short of
+its target or the servo overloads clamping, and an open that reaches its target clears it. An
+overload while closing is reported as success, not an error -- clamping is what a close is for.
+A raw `set_position` (servo ticks) deliberately leaves the latch alone: an opaque target is no
+evidence of release, and dropping the latch there would disable the grasp-retention guard while a
+part is still held. Use `Open` to release.
+
 ## Communication
 
 The gripper owns no serial connection of its own: it asks the arm for its servo's live `Moving` state over [`servo_moving`](arm.md#servo-moving), and if the arm cannot answer — including a remote arm running an older module build that does not know the command — it logs at Debug and falls back to whether a gripper command is in flight, rather than returning an error.

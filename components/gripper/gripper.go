@@ -8,10 +8,12 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/hipsterbrown/feetech-servo/feetech"
 	"go.viam.com/rdk/components/arm"
 	"go.viam.com/rdk/components/gripper"
 	"go.viam.com/rdk/logging"
@@ -115,6 +117,10 @@ type so101Gripper struct {
 	// legitimate zero-valued command (0% is closed, a real target). Both are guarded by g.mu.
 	lastCommandedPct float64
 	haveCommanded    bool
+	// holdingLatched is whether the gripper is holding something. Latched at command time by
+	// updateHoldingLatch rather than inferred live -- see that function for why neither position
+	// nor overload can answer the question on demand.
+	holdingLatched bool
 
 	speed        float32
 	acceleration float32
@@ -298,6 +304,17 @@ func (g *so101Gripper) moveToPercent(ctx context.Context, percent float64, wait 
 	}
 	_, err := g.servoDo(ctx, servocmd.CmdServoWaitStop,
 		map[string]interface{}{"timeout_ms": gripperSettleTimeoutMs})
+	g.updateHoldingLatch(ctx, target, err)
+
+	// An overload while CLOSING is not a failure: the jaw clamped onto something, which is the
+	// successful outcome of a close, and updateHoldingLatch has already recorded the grasp. On
+	// hardware this is what a real Grab looks like -- the servo strains, every register read starts
+	// failing, and reporting that as an error would make grabbing a part indistinguishable from a
+	// broken bus. Opening is different: an overload there means the jaw is obstructed and the move
+	// genuinely did not do what was asked, so it stays an error.
+	if isOverload(err) && target-g.closedPosition <= graspThresholdPct {
+		return nil
+	}
 	return err
 }
 
@@ -404,6 +421,78 @@ func isHoldingAt(actualPct, commandedPct float64) bool {
 	return math.Abs(actualPct-commandedPct) > graspThresholdPct
 }
 
+// isOverload reports whether err is the servo refusing an operation because it is straining past
+// its torque limit -- on a gripper, clamping down on something.
+//
+// Two detection paths, both needed. When the arm is a local dependency the module hands over the
+// real Go error and feetech.ServoError carries typed status flags. When the arm is remote the
+// error crosses the servocmd DoCommand boundary as gRPC status text, so the flags are gone and
+// only the rendered string survives; feetech.StatusError.Error() writes "overload" for that bit.
+func isOverload(err error) bool {
+	if err == nil {
+		return false
+	}
+	var se *feetech.ServoError
+	if errors.As(err, &se) && se.Status&feetech.ErrOverload != 0 {
+		return true
+	}
+	var st feetech.StatusError
+	if errors.As(err, &st) && st&feetech.ErrOverload != 0 {
+		return true
+	}
+	return strings.Contains(err.Error(), "overload")
+}
+
+// updateHoldingLatch records whether the gripper is holding something, given the target a move was
+// just commanded to and any error that move produced. Callers must hold g.mu.
+//
+// The latch exists because neither available signal answers "am I holding?" on demand, as measured
+// on real hardware:
+//
+//   - Position is blind to thin objects. With a part genuinely held the jaw read 0.83% open --
+//     indistinguishable from an empty closed jaw, so no position threshold can see it.
+//   - Overload is transient. The servo sets it while straining to reach a target it cannot, then
+//     clears it once it settles into holding torque; the part stayed gripped for minutes after the
+//     flag went away.
+//
+// So holding is established at command time and held until something releases it.
+func (g *so101Gripper) updateHoldingLatch(ctx context.Context, commandedPct float64, moveErr error) {
+	closing := commandedPct-g.closedPosition <= graspThresholdPct
+
+	// Overload during a close is a grasp, and for a thin object it is the ONLY evidence there is.
+	// During an open it means something is obstructing the jaw, which is not a grasp.
+	if isOverload(moveErr) {
+		if closing {
+			g.logger.Warnf("jaw overloaded closing to %.1f%%: treating as a grasp, not re-commanding", commandedPct)
+			g.holdingLatched = true
+		} else {
+			g.logger.Warnf("jaw overloaded opening to %.1f%%: obstructed, not re-commanding", commandedPct)
+		}
+		return
+	}
+	if moveErr != nil {
+		return // some other failure: no new evidence either way, leave the latch alone
+	}
+
+	actual, err := g.positionPercent(ctx)
+	if err != nil {
+		if isOverload(err) && closing {
+			g.logger.Warnf("jaw overloaded after closing to %.1f%%: treating as a grasp", commandedPct)
+			g.holdingLatched = true
+		}
+		return
+	}
+
+	switch {
+	case closing && isHoldingAt(actual, commandedPct):
+		// Told to close, stopped short: something is between the fingers.
+		g.holdingLatched = true
+	case !closing && !isHoldingAt(actual, commandedPct) && actual-g.closedPosition > graspThresholdPct:
+		// Opened past the grasp threshold and reached the target: whatever was held is released.
+		g.holdingLatched = false
+	}
+}
+
 func (g *so101Gripper) Grab(ctx context.Context, extra map[string]interface{}) (bool, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -417,25 +506,17 @@ func (g *so101Gripper) Grab(ctx context.Context, extra map[string]interface{}) (
 		return false, fmt.Errorf("failed to close gripper: %w", err)
 	}
 
-	currentPercent, err := g.positionPercent(ctx)
-	if err != nil {
-		g.logger.Warnf("Failed to read gripper position after grab: %v", err)
-		// Deliberately optimistic: the move itself succeeded, only the confirming read failed, so
-		// assume the grab landed rather than reporting false and risking a caller releasing a real
-		// part. IsHoldingSomething instead returns the error -- it has no "the move worked" signal
-		// to fall back on.
-		return true, nil
-	}
-
-	grabbed := isHoldingAt(currentPercent, g.closedPosition)
-
+	// moveToPercent already settled the latch via updateHoldingLatch, using both signals: the jaw
+	// stopping short of closed, and an overload while clamping. Reading it back here rather than
+	// re-deriving it is what keeps Grab and IsHoldingSomething from disagreeing -- on hardware they
+	// once returned true and false for the same physical grasp, one instant apart, because Grab was
+	// optimistic about a failed read while IsHoldingSomething served a stale position.
+	grabbed := g.holdingLatched
 	if grabbed {
-		g.logger.Debugf("Gripper successfully grabbed an object (position difference: %.1f%%)",
-			currentPercent-g.closedPosition)
+		g.logger.Debug("Gripper grabbed an object")
 	} else {
 		g.logger.Debug("Gripper closed but may not have grabbed anything")
 	}
-
 	return grabbed, nil
 }
 
@@ -728,12 +809,10 @@ func (g *so101Gripper) GoToInputs(ctx context.Context, inputSteps ...[]reference
 		return nil
 	}
 
-	// Not g.IsHoldingSomething: that method takes g.mu itself to read lastCommandedPct safely, and
-	// g.mu is already held here -- calling it would self-deadlock. Read g.lastCommandedPct/
-	// g.haveCommanded directly (safe: moveToPercent's writer also takes g.mu) against the pct
-	// already fetched above. No prior command means no evidence of obstruction -- don't refuse.
+	// The latch, not a live read (see updateHoldingLatch). Not g.IsHoldingSomething either: that
+	// takes g.mu itself and g.mu is already held here, so calling it would self-deadlock.
 	final := inputSteps[len(inputSteps)-1][0]
-	if g.haveCommanded && isHoldingAt(current, g.lastCommandedPct) {
+	if g.holdingLatched {
 		g.logger.Infof("refusing planner jaw command while holding: current %.4f rad, requested %.4f rad",
 			currentRad, final)
 		return fmt.Errorf(
@@ -775,15 +854,11 @@ func (g *so101Gripper) Kinematics(ctx context.Context) (referenceframe.Model, er
 func (g *so101Gripper) IsHoldingSomething(
 	ctx context.Context, extra map[string]interface{},
 ) (gripper.HoldingStatus, error) {
-	pct, err := g.positionPercentCached(ctx)
-	if err != nil {
-		return gripper.HoldingStatus{}, err
-	}
+	// Reads the latch rather than the servo: holding is established when a command completes and
+	// stays true until something opens the jaw. Querying position here produced both live failures
+	// -- an open empty jaw reporting held, and a clamped part reporting free while the servo was
+	// overloaded and every read was failing.
 	g.mu.Lock()
-	commanded, have := g.lastCommandedPct, g.haveCommanded
-	g.mu.Unlock()
-	if !have {
-		return gripper.HoldingStatus{IsHoldingSomething: false}, nil
-	}
-	return gripper.HoldingStatus{IsHoldingSomething: isHoldingAt(pct, commanded)}, nil
+	defer g.mu.Unlock()
+	return gripper.HoldingStatus{IsHoldingSomething: g.holdingLatched}, nil
 }
