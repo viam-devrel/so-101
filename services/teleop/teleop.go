@@ -188,6 +188,7 @@ func (tp *so101Teleop) syncOnce(ctx context.Context) error {
 		if _, err := tp.followerGripper.DoCommand(ctx, map[string]interface{}{
 			"command":    "set_position",
 			"percentage": gripperPct,
+			"wait":       false,
 		}); err != nil {
 			return fmt.Errorf("write follower gripper: %w", err)
 		}
