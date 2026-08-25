@@ -486,7 +486,7 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
   `.Orientation().EulerAngles()` before encoding; `TestJawMountOrientationIsEuler` guards it.
 - **rdk rejects a joint input that exceeds a limit by even one ULP** (`input out of bounds`). A
   sweep computing `min + (range*i)/steps` overshoots by 2.22e-16 at `i == steps`, because `*` and
-  `/` are left-associative. `GoToInputs` validates against a deliberately wide `jawLimitEpsilon`
+  `/` are left-associative. `GoToInputs` validates against a deliberately wide `geometry.JawLimitEpsilon`
   for this reason.
 - **A 1-DoF gripper gets `GoToInputs` on EVERY plan, with an unchanged value.**
   `services/motion/builtin/builtin.go:687-689` skips a component in a trajectory step only when

@@ -321,8 +321,13 @@ func (g *so101Gripper) positionPercentCached(ctx context.Context) (float64, erro
 
 	g.jawMu.Lock()
 	defer g.jawMu.Unlock()
-	// Discard if the jaw was commanded while this read was in flight, or if it is still moving --
-	// moveToPercent returns on a servo_wait_stop timeout too, after which the servo may be settling.
+	// Discard if the jaw was commanded while this read was in flight, or if it is still moving.
+	// The moving guard's real purpose is narrower than it looks: it is not the servo_wait_stop
+	// timeout case (moveToPercent returning on timeout doesn't stamp anything -- the caller's own
+	// defer isMoving.Store(false) fires microseconds later, and a read landing after that is not
+	// covered here at all; it can still stamp a mid-flight value, bounded by the TTL to 50ms). What
+	// this guard actually covers is the narrow window between a move's last servoDo and the
+	// caller's isMoving.Store(false) defer.
 	if g.jawGen == gen && !g.isMoving.Load() {
 		g.jawPct, g.jawReadAt, g.jawHaveRead = pct, g.now(), true
 	}

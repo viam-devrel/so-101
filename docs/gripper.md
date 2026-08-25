@@ -67,13 +67,15 @@ cost of a `GoToInputs` call on every trajectory step of every plan (see the gotc
 repo's `CLAUDE.md`).
 
 With it on, the gripper is `InputEnabled` and reports the jaw angle in **radians** from
-`CurrentInputs`. That reading is cached and may be up to 50 ms stale.
+`CurrentInputs`. That reading is cached and may be up to 50 ms stale; if the bus is down, it
+instead serves the last known good reading, which can be arbitrarily stale.
 
 The planner is free to move the jaw during an ordinary arm move — it is part of the same
 trajectory as the arm joints, not a separate grasp action. A command that would actually move
 the jaw **while the gripper is holding something** is refused with an error, to avoid dropping
 whatever is held; a no-op command (the jaw's current angle, which is what most trajectory steps
-carry) is never refused and never touches the bus, whether or not something is held.
+carry) is never refused and never commands the servo, whether or not something is held — it may
+still issue a `servo_position` read on a cache miss.
 
 ## Communication
 
