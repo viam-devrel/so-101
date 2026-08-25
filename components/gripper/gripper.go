@@ -634,24 +634,9 @@ func (g *so101Gripper) GoToInputs(ctx context.Context, inputSteps ...[]reference
 	if !g.articulatedJaw {
 		return errors.ErrUnsupported
 	}
-	limits := g.model.DoF()
-	if len(limits) != 1 {
-		return fmt.Errorf("articulated gripper model has %d DoF, want 1", len(limits))
-	}
-	jaw := limits[0]
-
 	// Validate EVERY step before moving any of them.
-	for i, step := range inputSteps {
-		if len(step) != 1 {
-			return fmt.Errorf("step %d: got %d inputs, the jaw takes 1", i, len(step))
-		}
-		if step[0] < jaw.Min-geometry.JawLimitEpsilon || step[0] > jaw.Max+geometry.JawLimitEpsilon {
-			return fmt.Errorf("step %d: jaw angle %.4f rad is outside [%.4f, %.4f]",
-				i, step[0], jaw.Min, jaw.Max)
-		}
-	}
-	if len(inputSteps) == 0 {
-		return nil
+	if err := geometry.ValidateJawSteps(g.model, inputSteps); err != nil {
+		return err
 	}
 
 	// g.mu is held from here through the move: the no-op classification and the holding guard

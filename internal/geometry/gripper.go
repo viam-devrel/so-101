@@ -90,6 +90,32 @@ func JawPctFromRadians(rad float64) float64 {
 // What bounds the jaw is JawPctFromRadians's saturation to 0/100, not this epsilon's width.
 const JawLimitEpsilon = 1e-6
 
+// ValidateJawSteps checks a GoToInputs batch against a single-jaw model: exactly one DoF,
+// one input per step, each within the joint limits widened by JawLimitEpsilon. An empty
+// batch is valid. Shared so the two grippers cannot drift apart on input policy.
+func ValidateJawSteps(model referenceframe.Model, steps [][]referenceframe.Input) error {
+	if len(steps) == 0 {
+		return nil
+	}
+	limits := model.DoF()
+	if len(limits) != 1 {
+		// The len(step) arity check below only protects against a mismatched step -- it does not
+		// protect indexing limits[0] when limits itself is empty (0 != 0 passes the arity check).
+		return fmt.Errorf("gripper jaw model has %d DoF, want exactly 1", len(limits))
+	}
+	jaw := limits[0]
+	for i, step := range steps {
+		if len(step) != 1 {
+			return fmt.Errorf("step %d: got %d inputs, the jaw takes 1", i, len(step))
+		}
+		if step[0] < jaw.Min-JawLimitEpsilon || step[0] > jaw.Max+JawLimitEpsilon {
+			return fmt.Errorf("step %d: jaw angle %.6f rad is outside [%.6f, %.6f]",
+				i, step[0], jaw.Min, jaw.Max)
+		}
+	}
+	return nil
+}
+
 // gripperStaticMeshNames returns the static body mesh names for a gripper variant. The
 // follower's body is one piece; the leader's is the wrist-roll part (which connects to the
 // arm) plus the handle attached to it.

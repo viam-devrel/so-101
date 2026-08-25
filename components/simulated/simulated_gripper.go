@@ -414,22 +414,8 @@ func (g *simulatedSO101Gripper) GoToInputs(ctx context.Context, inputSteps ...[]
 	if !g.articulatedJaw {
 		return errors.ErrUnsupported
 	}
-	limits := g.model.DoF()
-	if len(limits) != 1 {
-		// Unreachable while articulatedJaw implies exactly 1 DoF, but the len(step) arity check
-		// below only protects against a mismatched step -- it does not protect indexing
-		// limits[0] when limits itself is empty (0 != 0 passes the arity check).
-		return fmt.Errorf("gripper jaw model has %d DoF, want exactly 1", len(limits))
-	}
-	jawLimits := limits[0]
-	for i, step := range inputSteps {
-		if len(step) != 1 {
-			return fmt.Errorf("step %d: got %d inputs, the jaw takes 1", i, len(step))
-		}
-		if step[0] < jawLimits.Min-geometry.JawLimitEpsilon || step[0] > jawLimits.Max+geometry.JawLimitEpsilon {
-			return fmt.Errorf("step %d: jaw angle %.6f rad is outside [%.6f, %.6f]",
-				i, step[0], jawLimits.Min, jawLimits.Max)
-		}
+	if err := geometry.ValidateJawSteps(g.model, inputSteps); err != nil {
+		return err
 	}
 
 	g.recordJawTrajectory(inputSteps)
