@@ -14,6 +14,7 @@ import (
 	"so_arm/internal/geometry"
 	"so_arm/internal/planning"
 	"so_arm/internal/servo"
+	"so_arm/internal/servocmd"
 )
 
 // calculateJointLimits dynamically calculates joint limits from calibration data
@@ -236,18 +237,6 @@ func (s *so101) moveJointsUniform(ctx context.Context, to []float64, speedDegsPe
 	return s.controller.WaitForServosToStop(ctx, s.armServoIDs, servo.MaxMoveTimeoutMs)
 }
 
-// parseWaitExtra reads the optional "wait" bool from a DoCommand/extra map.
-// Absent or non-bool values default to true so the motion planner and existing
-// callers keep the blocking behavior; teleop passes wait=false to stream setpoints.
-func parseWaitExtra(extra map[string]interface{}) bool {
-	if extra != nil {
-		if w, ok := extra["wait"].(bool); ok {
-			return w
-		}
-	}
-	return true
-}
-
 func (s *so101) MoveToJointPositions(ctx context.Context, positions []referenceframe.Input, extra map[string]interface{}) error {
 	s.mu.Lock()
 	s.exitManualLocked("motion command received")
@@ -284,10 +273,10 @@ func (s *so101) MoveToJointPositions(ctx context.Context, positions []referencef
 			"uniform speed: %v", err)
 		// No arm.MoveOptions here, so caps is always nil -- kept for symmetry with
 		// MoveThroughJointPositions' fallback.
-		return s.moveJointsUniform(ctx, clamped, servo.UniformSpeedUnderCaps(speed, nil), accel, parseWaitExtra(extra))
+		return s.moveJointsUniform(ctx, clamped, servo.UniformSpeedUnderCaps(speed, nil), accel, servocmd.WaitArg(extra))
 	}
 
-	return s.moveJoints(ctx, current, clamped, speed, accel, nil, parseWaitExtra(extra))
+	return s.moveJoints(ctx, current, clamped, speed, accel, nil, servocmd.WaitArg(extra))
 }
 
 func (s *so101) MoveThroughJointPositions(ctx context.Context, positions [][]referenceframe.Input, options *arm.MoveOptions, extra map[string]interface{}) error {

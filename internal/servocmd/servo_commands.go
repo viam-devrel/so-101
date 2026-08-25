@@ -84,6 +84,15 @@ func ClampPercent(p float64) float64 {
 	return p
 }
 
+// WaitArg reads the optional "wait" bool from a command or extra map. Absent or
+// non-bool values default to true, so every existing caller keeps blocking.
+func WaitArg(cmd map[string]any) bool {
+	if w, ok := cmd["wait"].(bool); ok {
+		return w
+	}
+	return true
+}
+
 // availableServoIDs returns the servos on the bus that the arm does not drive itself, and
 // which are therefore available to a gripper. Deriving this from the arm's own servo set
 // (rather than hardcoding 6) is what lets a 4-DOF arm configured with servo_ids [1,2,3,4]

@@ -407,3 +407,67 @@ func TestGrabReportsHeldWhenTheJawStopsShortOfClosed(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, grabbed, "a jaw held open by an object is holding something")
 }
+
+// Grab reads the position back to decide its boolean return, so without the settle wait it
+// samples a jaw still in flight. Assert on the emitted command: the grab-classification
+// tests cannot catch a missing wait, because fakeServoArm returns a static f.percent that
+// CmdServoMove never changes.
+func TestGrabWaitsForTheJawToSettle(t *testing.T) {
+	fa := newFakeServoArm()
+	g := newTestGripper(t, fa)
+
+	_, err := g.Grab(context.Background(), nil)
+	require.NoError(t, err)
+
+	assert.NotNil(t, fa.lastCommand(servocmd.CmdServoWaitStop),
+		"Grab reads the position back, so its wait is load-bearing")
+}
+
+// A caller streaming setpoints faster than the jaw travels passes "wait": false, and gets
+// the move commanded with no settle wait behind it. The raw servo_position form is absent
+// here on purpose: it never waited, so there is nothing for the flag to gate.
+func TestGripperPercentWritesHonorTheWaitFlag(t *testing.T) {
+	cases := []struct {
+		name     string
+		cmd      map[string]any
+		wantWait bool
+	}{
+		{
+			name:     "set shorthand with wait false skips the settle wait",
+			cmd:      map[string]any{"set": 42.0, "wait": false},
+			wantWait: false,
+		},
+		{
+			name:     "set shorthand without the flag still waits",
+			cmd:      map[string]any{"set": 42.0},
+			wantWait: true,
+		},
+		{
+			name:     "set_position with wait false skips the settle wait",
+			cmd:      map[string]any{"command": "set_position", "percentage": 42.0, "wait": false},
+			wantWait: false,
+		},
+		{
+			name:     "set_position without the flag still waits",
+			cmd:      map[string]any{"command": "set_position", "percentage": 42.0},
+			wantWait: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fa := newFakeServoArm()
+			g := newTestGripper(t, fa)
+
+			_, err := g.DoCommand(context.Background(), tc.cmd)
+			require.NoError(t, err)
+
+			require.NotNil(t, fa.lastCommand(servocmd.CmdServoMove),
+				"the move must be commanded either way")
+
+			waited := fa.lastCommand(servocmd.CmdServoWaitStop) != nil
+			assert.Equal(t, tc.wantWait, waited,
+				"issued commands: %v", fa.issued())
+		})
+	}
+}
