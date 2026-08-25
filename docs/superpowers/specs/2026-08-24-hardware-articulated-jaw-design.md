@@ -280,6 +280,11 @@ must be budgeted, contrary to "no changes required":**
   Prefer an injectable `now func() time.Time` on the struct, defaulting to `time.Now`, so the
   cache tests are deterministic rather than timing-dependent.
 
+- `fakeServoArm` is fully synchronous with no seam, so `TestStopDuringReadDoesNotStampStaleValue`
+  cannot land an invalidation *inside* the unlocked bus-read window. It needs a hook — a callback
+  or a blocking channel the fake enters while handling `servo_position` — to fire `Stop` mid-read
+  deterministically.
+
 Failing a read is already expressible (`fa.doErr`, which exempts `servo_capabilities` so
 construction still succeeds); reporting a held object is expressible via `fa.percent`.
 
@@ -296,7 +301,7 @@ construction still succeeds); reporting a held object is expressible via `fa.per
 | `TestIsHoldingSomethingReportsGrasp` | above/below `graspThresholdPct` both directions |
 | `TestGoToInputsAbortsOnStop` | `Stop` mid-batch ⇒ error; and `isMoving` is set during the batch, so the flag can latch at all |
 | `TestStopDuringReadDoesNotStampStaleValue` | an invalidation landing mid-read is discarded by the generation check |
-| `TestOpenDoesNotDeadlock` | `Open`/`Grab` complete with cache invalidation wired in — the reentrancy guard |
+| `TestOpenDoesNotDeadlock` | `Open`/`Grab` complete with cache invalidation wired in — the reentrancy guard. Must run the call in a goroutine and `select` on a done channel with a short timeout: a deadlock otherwise fails by hanging until `go test`'s 10-minute panic, which cannot satisfy the mutation-proof rule |
 | `TestRawSetPositionInvalidatesCache` | the `servo_position` raw path invalidates, proving `servoDo` is the right choke point |
 
 Every guard must be **mutation-proven**: break it, show the test fails with the intended
@@ -325,6 +330,6 @@ angle turned out to catch nothing.
 | Arm move that genuinely moves the jaw fails while carrying | error names the held object and the requested angle; documented in `docs/gripper.md` |
 | Cache invalidation deadlocks against `g.mu` | separate `jawMu`, never held across a `DoCommand`; `TestOpenDoesNotDeadlock` |
 | A write path bypasses invalidation | invalidate in `servoDo`, the single bus choke point; `TestRawSetPositionInvalidatesCache` |
-| Jaw back-driven with torque off | documented, not engineered around — a torque-disabled arm is not under planner control |
+| Jaw back-driven with torque off | bounded by the 50 ms TTL like any other read; no special case |
 | Bus saturation from viewer polling | `TestJawCacheBoundsBusReads` pins the read count |
 | `Stop` silently advancing a batch | `stopped` flag + `TestGoToInputsAbortsOnStop` |
