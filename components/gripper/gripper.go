@@ -350,6 +350,12 @@ func (g *so101Gripper) Open(ctx context.Context, extra map[string]interface{}) e
 // is between the fingers.
 const graspThresholdPct = 15.0
 
+// isHoldingAt is the shared grasp policy behind Grab, IsHoldingSomething, and GoToInputs's
+// holding guard: pct sits far enough from closedPct to mean something is between the fingers.
+func isHoldingAt(pct, closedPct float64) bool {
+	return pct-closedPct > graspThresholdPct
+}
+
 func (g *so101Gripper) Grab(ctx context.Context, extra map[string]interface{}) (bool, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -366,12 +372,16 @@ func (g *so101Gripper) Grab(ctx context.Context, extra map[string]interface{}) (
 	currentPercent, err := g.positionPercent(ctx)
 	if err != nil {
 		g.logger.Warnf("Failed to read gripper position after grab: %v", err)
+		// Deliberately optimistic: the move itself succeeded, only the confirming read failed, so
+		// assume the grab landed rather than reporting false and risking a caller releasing a real
+		// part. IsHoldingSomething instead returns the error -- it has no "the move worked" signal
+		// to fall back on.
 		return true, nil
 	}
 
 	positionDifference := currentPercent - g.closedPosition
 
-	grabbed := positionDifference > graspThresholdPct
+	grabbed := isHoldingAt(currentPercent, g.closedPosition)
 
 	if grabbed {
 		g.logger.Debugf("Gripper successfully grabbed an object (position difference: %.1f%%)", positionDifference)
@@ -529,6 +539,7 @@ func (g *so101Gripper) DoCommand(ctx context.Context, cmd map[string]interface{}
 		return out, nil
 
 	case "calibrate_positions":
+		g.mu.Lock()
 		if openPos, ok := cmd["open_position"].(float64); ok {
 			if openPos >= 0 && openPos <= 100 {
 				g.openPosition = openPos
@@ -539,13 +550,15 @@ func (g *so101Gripper) DoCommand(ctx context.Context, cmd map[string]interface{}
 				g.closedPosition = closedPos
 			}
 		}
+		openPos, closedPos := g.openPosition, g.closedPosition
+		g.mu.Unlock()
 
-		g.logger.Debugf("Gripper positions calibrated: open=%.1f%%, closed=%.1f%%", g.openPosition, g.closedPosition)
+		g.logger.Debugf("Gripper positions calibrated: open=%.1f%%, closed=%.1f%%", openPos, closedPos)
 
 		return map[string]interface{}{
 			"success":         true,
-			"open_position":   g.openPosition,
-			"closed_position": g.closedPosition,
+			"open_position":   openPos,
+			"closed_position": closedPos,
 		}, nil
 
 	case "set_motion_params":
@@ -687,8 +700,9 @@ func (g *so101Gripper) Kinematics(ctx context.Context) (referenceframe.Model, er
 }
 
 // IsHoldingSomething infers a grasp the same way Grab does: the jaw stopped short of closed, so
-// something is between the fingers. Reads through the cache -- GoToInputs calls this on every
-// planner-issued batch.
+// something is between the fingers. Reads through the cache. This is the standalone public-API
+// path only -- GoToInputs no longer calls it (see the comment there), so taking g.mu here to read
+// closedPosition safely cannot self-deadlock against GoToInputs's own g.mu hold.
 func (g *so101Gripper) IsHoldingSomething(
 	ctx context.Context, extra map[string]interface{},
 ) (gripper.HoldingStatus, error) {
@@ -696,5 +710,8 @@ func (g *so101Gripper) IsHoldingSomething(
 	if err != nil {
 		return gripper.HoldingStatus{}, err
 	}
-	return gripper.HoldingStatus{IsHoldingSomething: pct-g.closedPosition > graspThresholdPct}, nil
+	g.mu.Lock()
+	closed := g.closedPosition
+	g.mu.Unlock()
+	return gripper.HoldingStatus{IsHoldingSomething: isHoldingAt(pct, closed)}, nil
 }
