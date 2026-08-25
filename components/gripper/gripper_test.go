@@ -662,6 +662,19 @@ func TestCurrentInputsErrorsBeforeFirstRead(t *testing.T) {
 	assert.Error(t, err, "with no reading ever taken there is nothing honest to return")
 }
 
+func TestHardwareCurrentInputsTracksJaw(t *testing.T) {
+	ctx := context.Background()
+	for _, pct := range []float64{0, 50, 95} {
+		fa := newFakeServoArm()
+		fa.percent = pct
+		g := newTestGripperWithConfig(t, fa, SO101GripperConfig{ArticulatedJaw: true})
+		in, err := g.CurrentInputs(ctx)
+		require.NoError(t, err)
+		require.Len(t, in, 1)
+		assert.InDelta(t, geometry.JawRadiansFromPct(pct), in[0], 1e-9)
+	}
+}
+
 // TestStopDuringReadDoesNotStampStaleValue closes the window opened by releasing jawMu across the
 // bus read: an invalidation landing mid-read must not be overwritten by the in-flight pre-write
 // value and stamped fresh.

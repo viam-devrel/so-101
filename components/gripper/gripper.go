@@ -577,11 +577,9 @@ func (g *so101Gripper) Close(ctx context.Context) error {
 }
 
 // CurrentInputs reports the jaw joint angle for the articulated (1-DoF) model. Unsupported for
-// the default static model -- see BuildGripperModel's jawDoF branch.
-//
-// Minimal implementation for Task 4 (the position cache): it wires positionPercentCached through
-// to satisfy the cache's own tests. Task 6 covers CurrentInputs's full contract; do not read this
-// as that task done.
+// the default static model -- see BuildGripperModel's jawDoF branch. Reads through the position
+// cache (positionPercentCached), so a dropped bus read serves the last known good value rather
+// than erroring the whole frame system.
 func (g *so101Gripper) CurrentInputs(ctx context.Context) ([]referenceframe.Input, error) {
 	if !g.articulatedJaw {
 		return nil, errors.ErrUnsupported
