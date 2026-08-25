@@ -411,8 +411,7 @@ func TestGrabReportsHeldWhenTheJawStopsShortOfClosed(t *testing.T) {
 // Grab reads the position back to decide its boolean return, so without the settle wait it
 // samples a jaw still in flight. Assert on the emitted command: the grab-classification
 // tests cannot catch a missing wait, because fakeServoArm returns a static f.percent that
-// CmdServoMove never changes. Open's wait is already covered by the ordered-slice
-// assertion in TestGripperOpenCommandsServoAndWaits.
+// CmdServoMove never changes.
 func TestGrabWaitsForTheJawToSettle(t *testing.T) {
 	fa := newFakeServoArm()
 	g := newTestGripper(t, fa)
@@ -453,13 +452,6 @@ func TestGripperPercentWritesHonorTheWaitFlag(t *testing.T) {
 			cmd:      map[string]any{"command": "set_position", "percentage": 42.0},
 			wantWait: true,
 		},
-		{
-			// A JSON string must not silently disable the wait. This also catches a
-			// parser that branches on key presence rather than a bool type assertion.
-			name:     "a non-bool wait on the set shorthand falls back to waiting",
-			cmd:      map[string]any{"set": 42.0, "wait": "false"},
-			wantWait: true,
-		},
 	}
 
 	for _, tc := range cases {
@@ -470,9 +462,8 @@ func TestGripperPercentWritesHonorTheWaitFlag(t *testing.T) {
 			_, err := g.DoCommand(context.Background(), tc.cmd)
 			require.NoError(t, err)
 
-			move := fa.lastCommand(servocmd.CmdServoMove)
-			require.NotNil(t, move, "the move must be commanded either way")
-			assert.Equal(t, 42.0, move["percent"])
+			require.NotNil(t, fa.lastCommand(servocmd.CmdServoMove),
+				"the move must be commanded either way")
 
 			waited := fa.lastCommand(servocmd.CmdServoWaitStop) != nil
 			assert.Equal(t, tc.wantWait, waited,

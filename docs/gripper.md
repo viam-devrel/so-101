@@ -127,10 +127,9 @@ seconds). Pass `false` to return as soon as the move is commanded:
 
 `wait: false` is for callers issuing setpoints faster than the jaw can physically travel — a
 control loop at 10 Hz, say — where waiting for a setpoint that is about to be superseded is
-pure latency rather than safety. On that path `IsMoving()` reports the servo's own `Moving`
-register, since no call is left in flight to ask; against a remote arm running an older
-module build with no `servo_moving` support, it reports `false` while the jaw is still
-travelling.
+pure latency rather than safety. `IsMoving()` then falls back to the servo's own `Moving`
+register (see [arm.md](arm.md)) — but against a remote arm running an older module build with
+no `servo_moving` support it reports `false` while the jaw is still travelling.
 
 The response's `position` echoes the clamped setpoint, not a measured position — under
 `wait: false` the jaw has not arrived yet. Use `{"get": true}` or `get_position` for feedback.

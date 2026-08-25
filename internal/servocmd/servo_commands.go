@@ -87,10 +87,8 @@ func ClampPercent(p float64) float64 {
 // WaitArg reads the optional "wait" bool from a command or extra map. Absent or
 // non-bool values default to true, so every existing caller keeps blocking.
 func WaitArg(cmd map[string]any) bool {
-	if cmd != nil {
-		if w, ok := cmd["wait"].(bool); ok {
-			return w
-		}
+	if w, ok := cmd["wait"].(bool); ok {
+		return w
 	}
 	return true
 }
