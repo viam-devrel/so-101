@@ -95,6 +95,8 @@ type fakeServoArm struct {
 	moving         bool           // returned by servo_moving, unless movingResponse is set
 	movingResponse map[string]any // overrides the servo_moving response entirely, for shape tests
 	onServoMoving  func()         // called on a servo_moving command, before it is answered
+	onRead func() // invoked (outside f.mu) after a servo_position command, if set
+	onMove func() // invoked (outside f.mu) after a servo_move command, if set
 }
 
 func newFakeServoArm() *fakeServoArm {
@@ -108,29 +110,51 @@ func (f *fakeServoArm) Name() resource.Name { return f.name }
 
 func (f *fakeServoArm) DoCommand(_ context.Context, cmd map[string]any) (map[string]any, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.commands = append(f.commands, cmd)
 
 	if cmd["command"] == servocmd.CmdServoCapabilities {
-		return map[string]any{"servo_commands": true, "servo_ids": f.capabilities}, nil
+		resp := map[string]any{"servo_commands": true, "servo_ids": f.capabilities}
+		f.mu.Unlock()
+		return resp, nil
 	}
 	if cmd["command"] == servocmd.CmdServoMoving && f.onServoMoving != nil {
 		f.onServoMoving()
 	}
 	if f.doErr != nil {
-		return nil, f.doErr
+		err := f.doErr
+		f.mu.Unlock()
+		return nil, err
 	}
+
+	var hook func()
+	var resp map[string]any
 	switch cmd["command"] {
 	case servocmd.CmdServoPosition:
-		return map[string]any{"percent": f.percent, "raw": f.raw}, nil
+		hook, resp = f.onRead, map[string]any{"percent": f.percent, "raw": f.raw}
 	case servocmd.CmdServoMoving:
 		if f.movingResponse != nil {
-			return f.movingResponse, nil
+			resp = f.movingResponse
+		} else {
+			resp = map[string]any{"moving": f.moving}
 		}
-		return map[string]any{"moving": f.moving}, nil
+	case servocmd.CmdServoMove:
+		hook, resp = f.onMove, map[string]any{}
 	default:
-		return map[string]any{}, nil
+		resp = map[string]any{}
 	}
+	f.mu.Unlock()
+
+	if hook != nil {
+		hook() // outside the lock: hooks may issue commands or call back into the gripper
+	}
+	return resp, nil
+}
+
+// setErr sets the error returned for every subsequent non-capabilities command.
+func (f *fakeServoArm) setErr(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.doErr = err
 }
 
 // issued returns the command names sent so far, in order, ignoring the constructor probe.
@@ -162,16 +186,33 @@ func (f *fakeServoArm) lastCommand(name string) map[string]any {
 
 func newTestGripper(t *testing.T, fa *fakeServoArm) *so101Gripper {
 	t.Helper()
+	return newTestGripperWithConfig(t, fa, SO101GripperConfig{})
+}
+
+func newTestGripperWithConfig(t *testing.T, fa *fakeServoArm, cfg SO101GripperConfig) *so101Gripper {
+	t.Helper()
+	cfg.Arm = fa.name.Name
 	deps := resource.Dependencies{fa.name: fa}
 	conf := resource.Config{
 		Name:                "gripper",
 		API:                 gripper.API,
 		Model:               SO101GripperModel,
-		ConvertedAttributes: &SO101GripperConfig{Arm: fa.name.Name},
+		ConvertedAttributes: &cfg,
 	}
 	g, err := newSO101Gripper(context.Background(), deps, conf, logging.NewTestLogger(t))
 	require.NoError(t, err)
 	return g.(*so101Gripper)
+}
+
+// countCommands returns how many times name appears among the commands issued so far.
+func countCommands(fa *fakeServoArm, name string) int {
+	n := 0
+	for _, c := range fa.issued() {
+		if c == name {
+			n++
+		}
+	}
+	return n
 }
 
 func TestGripperConstructorResolvesArmDependency(t *testing.T) {
