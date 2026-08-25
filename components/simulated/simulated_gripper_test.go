@@ -426,11 +426,13 @@ func TestGetPositionReportsJaw(t *testing.T) {
 	assert.InDelta(t, geometry.GripperJointMax, resp["jaw_angle_rad"].(float64), 1e-9)
 }
 
-// TestExecuteEpsilonTripsOnMovingJaw documents the sharpest practical consequence of making the
-// gripper InputEnabled. services/motion/builtin/builtin.go:633 rejects a plan whose FIRST
-// trajectory step differs from CurrentInputs by more than defaultExecuteEpsilon (0.01), and
-// aborts the whole move -- the ARM's move -- when it does. A jaw still travelling from an
-// earlier Open() is enough to trip it.
+// TestExecuteEpsilonTripsOnMovingJaw documents a consequence of making the gripper InputEnabled.
+// services/motion/builtin/builtin.go:633 rejects a plan whose FIRST trajectory step differs from
+// CurrentInputs by more than defaultExecuteEpsilon (0.01) and aborts the whole move; a jaw still
+// travelling from an earlier Open() exceeds that.
+//
+// Scope: this check is reached only via the executeCheckStart plan/execute DoCommand split.
+// Move() passes math.MaxFloat64 (builtin.go:260), so an ordinary arm move is NOT affected.
 func TestExecuteEpsilonTripsOnMovingJaw(t *testing.T) {
 	const defaultExecuteEpsilon = 0.01 // services/motion/builtin/builtin.go:77
 
