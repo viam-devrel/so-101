@@ -270,7 +270,9 @@ func (g *so101Gripper) moveToPercent(ctx context.Context, percent float64, wait 
 	return err
 }
 
-// positionPercent reads the servo's current opening as a percentage.
+// positionPercent reads the servo's current opening as a percentage, always hitting the bus.
+// Use this only where the caller must distinguish a failed read from a stale one (Grab,
+// get_position); everything else should use positionPercentCached.
 func (g *so101Gripper) positionPercent(ctx context.Context) (float64, error) {
 	res, err := g.servoDo(ctx, servocmd.CmdServoPosition, nil)
 	if err != nil {
@@ -431,13 +433,15 @@ func (g *so101Gripper) IsMoving(ctx context.Context) (bool, error) {
 }
 
 // jawAngle maps the gripper's current open percentage onto the URDF gripper-joint
-// range. If the live position cannot be read it assumes the gripper is closed.
+// range. Reads through the cache -- Geometries() (its only caller) is polled continuously
+// by the 3D viewer, so a dropped read serves last-known-good rather than snapping the
+// rendered jaw shut.
 func (g *so101Gripper) jawAngle(ctx context.Context) float64 {
-	percent, err := g.positionPercent(ctx)
+	pct, err := g.positionPercentCached(ctx)
 	if err != nil {
 		return geometry.GripperJointMin
 	}
-	return geometry.JawRadiansFromPct(percent)
+	return geometry.JawRadiansFromPct(pct)
 }
 
 // Geometries serves the gripper as meshes: a static body and a moving part posed by
