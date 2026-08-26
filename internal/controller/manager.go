@@ -407,6 +407,10 @@ func (h *ControllerHandle) Stop(ctx context.Context) error {
 // Scoped to the requested servos so an in-flight gripper move on the shared bus cannot block
 // an arm move's completion wait. Each poll goes through AnyServoMoving: one SyncRead of the
 // Moving register instead of a read per servo.
+//
+// Motion is waited FOR before it is waited OUT: a servo takes a few milliseconds to raise its
+// Moving register after a goal write, so polling straight for "stopped" returns before the
+// servo has budged. See waitForMotion.
 func (h *ControllerHandle) WaitForServosToStop(ctx context.Context, servoIDs []int, timeoutMs int) error {
 	sess := h.entry.session.Load()
 	if sess == nil {
@@ -420,29 +424,30 @@ func (h *ControllerHandle) WaitForServosToStop(ctx context.Context, servoIDs []i
 		}
 	}
 
-	deadline := time.Now().Add(time.Duration(timeoutMs) * time.Millisecond)
-	ticker := time.NewTicker(50 * time.Millisecond)
-	defer ticker.Stop()
-
-	for {
+	anyMoving := func(ctx context.Context) (bool, error) {
 		moving, err := h.AnyServoMoving(ctx, ids)
 		if err != nil {
-			return fmt.Errorf("failed to read moving state for servos %v: %w", ids, err)
+			return false, fmt.Errorf("failed to read moving state for servos %v: %w", ids, err)
 		}
-		if !moving {
-			return nil
-		}
-		if time.Now().After(deadline) {
-			h.logger.Warnf("WaitForServosToStop: servos %v still moving after %dms timeout", ids, timeoutMs)
-			return nil
-		}
-
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-ticker.C:
-		}
+		return moving, nil
 	}
+
+	started, stopped, err := waitForMotion(ctx, anyMoving,
+		motionStartWindow, time.Duration(timeoutMs)*time.Millisecond)
+	if err != nil {
+		return err
+	}
+	if !started {
+		// A goal already satisfied, or travel too short to observe. Nothing to wait for -- but say
+		// so at debug level, because a caller seeing this for a move it expected to take time is
+		// looking at a servo that never accepted the goal.
+		h.logger.Debugf("WaitForServosToStop: servos %v never reported motion; treating as complete", ids)
+		return nil
+	}
+	if !stopped {
+		h.logger.Warnf("WaitForServosToStop: servos %v still moving after %dms timeout", ids, timeoutMs)
+	}
+	return nil
 }
 
 func (h *ControllerHandle) Ping(ctx context.Context) error {

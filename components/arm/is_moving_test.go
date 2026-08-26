@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.viam.com/rdk/components/arm"
+	"go.viam.com/rdk/logging"
 
 	"so_arm/internal/controller"
 	"so_arm/internal/testfake"
@@ -27,7 +28,7 @@ func testArmHandle(t *testing.T, ft feetech.Transport) *controller.ControllerHan
 	)
 	h, err := reg.AcquireController(
 		arm.Named("test-arm-"+t.Name()),
-		&controller.SoArm101Config{Port: "/dev/fake0", Timeout: 50 * time.Millisecond},
+		&controller.SoArm101Config{Port: "/dev/fake0", Timeout: 50 * time.Millisecond, Logger: logging.NewTestLogger(t)},
 		controller.DefaultSO101FullCalibration, true,
 	)
 	require.NoError(t, err)
