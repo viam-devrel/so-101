@@ -3,8 +3,11 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
+
+	"github.com/hipsterbrown/feetech-servo/feetech"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -117,4 +120,54 @@ func TestWaitForMotionHonoursContextCancellation(t *testing.T) {
 	_, _, err := waitForMotion(ctx, moving, time.Second, 30*time.Second)
 	assert.ErrorIs(t, err, context.DeadlineExceeded)
 	assert.Less(t, time.Since(start), 5*time.Second, "cancellation must cut the wait short")
+}
+
+// TestIsConditionErrorDistinguishesConditionsFromFailures: a servo reporting overload answered the
+// question -- the library just refuses to hand back the payload. Treating that as a failed read
+// aborts moves that are physically fine. Measured on hardware: an Open that opened the jaw
+// correctly returned "failed to read moving state ... [overload]", which left the gripper's grasp
+// latch stuck set with an empty jaw.
+func TestIsConditionErrorDistinguishesConditionsFromFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"typed overload", &feetech.ServoError{ID: 6, Op: "read", Status: feetech.ErrOverload}, true},
+		{"typed overheat", &feetech.ServoError{ID: 6, Op: "read", Status: feetech.ErrOverheat}, true},
+		{"bare StatusError overload", feetech.ErrOverload, true},
+		{"remote string form", errors.New("failed to read moving state for servo 6: servo status error: [overload]"), true},
+		{"wrapped typed", fmt.Errorf("wrapped: %w", &feetech.ServoError{ID: 6, Status: feetech.ErrVoltage}), true},
+		{"genuine comms failure", errors.New("read tcp: connection reset by peer"), false},
+		{"timeout", context.DeadlineExceeded, false},
+		{"checksum is a request-rejection, not a condition",
+			&feetech.ServoError{ID: 6, Op: "read", Status: feetech.ErrChecksum}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, isConditionError(tc.err))
+		})
+	}
+}
+
+// TestWaitForMotionKeepsWaitingThroughOverload: while a servo is overloaded every register read
+// fails, so motion is unobservable. The wait must keep going rather than abort -- the move is
+// underway and the caller's timeout bounds it.
+func TestWaitForMotionKeepsWaitingThroughOverload(t *testing.T) {
+	overload := &feetech.ServoError{ID: 6, Op: "read moving", Status: feetech.ErrOverload}
+	calls := 0
+	moving := func(context.Context) (bool, error) {
+		calls++
+		if calls <= 3 {
+			return false, overload // unobservable while clamping
+		}
+		return false, nil // overload cleared, settled
+	}
+	// The real wrapper WaitForServosToStop installs -- not a copy of it, so removing the
+	// tolerance from production code fails this test.
+	started, stopped, err := waitForMotion(context.Background(),
+		tolerateConditions(moving), time.Second, time.Second)
+	require.NoError(t, err, "an overload must not abort the wait")
+	assert.True(t, started, "unobservable motion still counts as started")
+	assert.True(t, stopped, "and the wait completes once it becomes observable again")
 }

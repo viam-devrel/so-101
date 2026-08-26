@@ -2,7 +2,11 @@ package controller
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"time"
+
+	"github.com/hipsterbrown/feetech-servo/feetech"
 )
 
 const (
@@ -83,5 +87,49 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 		return ctx.Err()
 	case <-t.C:
 		return nil
+	}
+}
+
+// isConditionError reports whether err is a servo describing its own physical condition --
+// overload, overheat, voltage -- rather than a communication failure. The servo answered; the
+// library discards the payload because a status flag is set.
+//
+// Stopgap. feetech's ConditionStatus makes this precise and returns the data too; until a release
+// carries it, match the typed error where the arm is local and the rendered string where it has
+// crossed the servocmd DoCommand boundary from a remote arm.
+func isConditionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	const conditions = feetech.ErrOverload | feetech.ErrOverheat | feetech.ErrVoltage
+	var se *feetech.ServoError
+	if errors.As(err, &se) && se.Status&conditions != 0 {
+		return true
+	}
+	var st feetech.StatusError
+	if errors.As(err, &st) && st&conditions != 0 {
+		return true
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "overload") || strings.Contains(msg, "overheat") ||
+		strings.Contains(msg, "voltage")
+}
+
+// tolerateConditions wraps a motion probe so that a servo reporting a physical condition --
+// overload while clamping, overheat -- counts as "still moving" instead of aborting the wait.
+//
+// The servo answered; the library discards the payload because a status flag is set, so motion is
+// unobservable but the move is underway. Measured on hardware: without this an Open that opened
+// the jaw correctly returned "failed to read moving state ... [overload]", which left the
+// gripper's grasp latch stuck set with an empty jaw until a second command cleared it.
+//
+// Genuine transport failures still propagate -- those are not the servo talking.
+func tolerateConditions(probe func(context.Context) (bool, error)) func(context.Context) (bool, error) {
+	return func(ctx context.Context) (bool, error) {
+		moving, err := probe(ctx)
+		if isConditionError(err) {
+			return true, nil
+		}
+		return moving, err
 	}
 }
