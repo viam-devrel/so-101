@@ -4,7 +4,7 @@ go 1.25.9
 
 require (
 	github.com/golang/geo v0.0.0-20230421003525-6adc56603217
-	github.com/hipsterbrown/feetech-servo v0.6.1
+	github.com/hipsterbrown/feetech-servo v0.7.0
 	github.com/pkg/errors v0.9.1
 	github.com/stretchr/testify v1.11.1
 	go.bug.st/serial v1.6.4

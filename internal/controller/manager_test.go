@@ -84,9 +84,29 @@ func TestServoLoadReadsPresentLoadRegister(t *testing.T) {
 	ft.SetRegister(6, feetech.RegPresentLoad.Address, testfake.EncodeWordLE(50))
 	h := testHandle(t, ft)
 
-	load, err := h.ServoLoad(context.Background(), 6)
+	load, condition, err := h.ServoLoad(context.Background(), 6)
 	require.NoError(t, err)
 	assert.Equal(t, 50, load)
+	assert.Zero(t, condition, "a healthy servo reports no condition")
+}
+
+// TestServoReadsSurviveAConditionFlag is the point of adopting ConditionStatus. An overloaded
+// servo answers correctly and sets a status flag; the old code turned that into a bare error and
+// threw the reading away, leaving callers blind exactly when something interesting was happening.
+func TestServoReadsSurviveAConditionFlag(t *testing.T) {
+	ft := testfake.NewFakeTransport()
+	ft.SetRegister(6, feetech.RegPresentLoad.Address, testfake.EncodeWordLE(404))
+	ft.SetStatus(6, feetech.ErrOverload)
+	h := testHandle(t, ft)
+
+	load, condition, err := h.ServoLoad(context.Background(), 6)
+	require.NoError(t, err, "a condition must not be reported as a failed read")
+	assert.Equal(t, 404, load, "the reading is valid and must survive")
+	assert.NotZero(t, condition&feetech.ErrOverload, "and the condition must be reported alongside it")
+
+	_, _, posCondition, err := h.ServoPositionPercent(context.Background(), 6)
+	require.NoError(t, err, "position reads must survive a condition too")
+	assert.NotZero(t, posCondition&feetech.ErrOverload)
 }
 
 func TestPingServoReachesOneServo(t *testing.T) {

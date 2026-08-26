@@ -106,6 +106,9 @@ type fakeServoArm struct {
 	// effect (observed on hardware -- a torque-enable and a goal write both reported overload and
 	// both moved the jaw).
 	readErr error
+	// condition is attached to a successful servo_position response, the way an overloaded
+	// servo answers correctly while reporting that it is straining.
+	condition string
 }
 
 func newFakeServoArm() *fakeServoArm {
@@ -144,7 +147,11 @@ func (f *fakeServoArm) DoCommand(_ context.Context, cmd map[string]any) (map[str
 			f.mu.Unlock()
 			return nil, err
 		}
-		hook, resp = f.onRead, map[string]any{"percent": f.percent, "raw": f.raw}
+		resp = map[string]any{"percent": f.percent, "raw": f.raw}
+		if f.condition != "" {
+			resp[servocmd.ConditionKey] = f.condition
+		}
+		hook = f.onRead
 	case servocmd.CmdServoMoving:
 		if f.movingResponse != nil {
 			resp = f.movingResponse
@@ -1260,4 +1267,43 @@ func (f *fakeServoArm) setReadErr(err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.readErr = err
+}
+
+func (f *fakeServoArm) setCondition(c string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.condition = c
+}
+
+// TestGraspLatchFromConditionField is the adopted path: an overloaded servo answers correctly and
+// reports its condition as a response field, rather than the read failing. That field must drive
+// the retroactive grasp latch exactly as a failed read used to -- otherwise adopting
+// ConditionStatus silently disables grasp detection while every fake-driven test keeps passing.
+func TestGraspLatchFromConditionField(t *testing.T) {
+	ctx := context.Background()
+	fa := newFakeServoArm()
+	fa.percent = 0 // the jaw reaches its target: nothing looks wrong when the move completes
+	g := newTestGripper(t, fa)
+
+	_, err := g.Grab(ctx, nil)
+	require.NoError(t, err)
+	st, err := g.IsHoldingSomething(ctx, nil)
+	require.NoError(t, err)
+	require.False(t, st.IsHoldingSomething, "nothing to see yet")
+
+	// The servo starts reporting overload -- reads still succeed, they just carry the flag.
+	fa.setCondition("overload")
+
+	st, err = g.IsHoldingSomething(ctx, nil)
+	require.NoError(t, err, "a condition is data, not an error")
+	assert.True(t, st.IsHoldingSomething,
+		"a condition reported alongside a good reading must latch the grasp")
+
+	// And it clears once the jaw is open and unstrained.
+	fa.setCondition("")
+	fa.percent = 95
+	require.NoError(t, g.Open(ctx, nil))
+	st, err = g.IsHoldingSomething(ctx, nil)
+	require.NoError(t, err)
+	assert.False(t, st.IsHoldingSomething, "unstrained and open means released")
 }

@@ -327,15 +327,26 @@ func (g *so101Gripper) moveToPercent(ctx context.Context, percent float64, wait 
 // Use this only where the caller must distinguish a failed read from a stale one (Grab,
 // get_position); everything else should use positionPercentCached.
 func (g *so101Gripper) positionPercent(ctx context.Context) (float64, error) {
+	pct, _, err := g.positionPercentCondition(ctx)
+	return pct, err
+}
+
+// positionPercentCondition reads the opening and reports any servo condition the arm attached to
+// the reading. A condition does NOT invalidate the value -- an overloaded servo answers correctly
+// while reporting that it is straining, which for a gripper is the evidence that it is holding
+// something. The flags travel as a response field rather than as an error precisely so they
+// survive the DoCommand boundary to a remote arm, where a typed error would not.
+func (g *so101Gripper) positionPercentCondition(ctx context.Context) (float64, string, error) {
 	res, err := g.servoDo(ctx, servocmd.CmdServoPosition, nil)
 	if err != nil {
-		return 0, err
+		return 0, "", err
 	}
 	pct, ok := servocmd.FloatArg(res, "percent")
 	if !ok {
-		return 0, fmt.Errorf("no position data available")
+		return 0, "", fmt.Errorf("no position data available")
 	}
-	return pct, nil
+	condition, _ := servocmd.ConditionArg(res)
+	return pct, condition, nil
 }
 
 // gripperSettleTimeoutMs bounds the wait for the gripper servo to stop moving. It replaces
@@ -365,8 +376,10 @@ func (g *so101Gripper) positionPercentCached(ctx context.Context) (float64, erro
 		return prev, nil
 	}
 
-	pct, err := g.positionPercent(ctx) // bus read, jawMu NOT held
+	pct, condition, err := g.positionPercentCondition(ctx) // bus read, jawMu NOT held
 	if err != nil {
+		// A read that fails outright can still be a condition on an older arm that has not
+		// adopted the condition field; keep believing it.
 		if isOverload(err) {
 			g.jawMu.Lock()
 			g.jawConditionSeen = true
@@ -388,7 +401,7 @@ func (g *so101Gripper) positionPercentCached(ctx context.Context) (float64, erro
 	// covered here at all; it can still stamp a mid-flight value, bounded by the TTL to 50ms). What
 	// this guard actually covers is the narrow window between a move's last servoDo and the
 	// caller's isMoving.Store(false) defer.
-	g.jawConditionSeen = false
+	g.jawConditionSeen = condition != ""
 	if g.jawGen == gen && !g.isMoving.Load() {
 		g.jawPct, g.jawReadAt, g.jawHaveRead = pct, g.now(), true
 	}
@@ -432,13 +445,20 @@ func isHoldingAt(actualPct, commandedPct float64) bool {
 	return math.Abs(actualPct-commandedPct) > graspThresholdPct
 }
 
-// isOverload reports whether err is the servo refusing an operation because it is straining past
-// its torque limit -- on a gripper, clamping down on something.
+// isOverload reports whether err is a servo condition surfacing as an error rather than as data.
 //
-// Two detection paths, both needed. When the arm is a local dependency the module hands over the
-// real Go error and feetech.ServoError carries typed status flags. When the arm is remote the
-// error crosses the servocmd DoCommand boundary as gRPC status text, so the flags are gone and
-// only the rendered string survives; feetech.StatusError.Error() writes "overload" for that bit.
+// This is now a COMPATIBILITY path, not the primary one. Since feetech v0.7.0 a condition no
+// longer costs the reading: internal/controller keeps the value and reports the flags, and
+// servocmd carries them in the response's condition field (servocmd.ConditionKey), which is what
+// positionPercentCondition reads. That path works identically whether the arm is local or remote,
+// because a field survives the DoCommand boundary where a typed error does not.
+//
+// An error can still arrive carrying a condition when the arm this gripper depends on is a REMOTE
+// machine running an older build of this module -- one that predates the condition field and still
+// turns a status flag into a failure. Matching the rendered text is the only option there, since
+// the typed error was flattened to gRPC status text on the way over.
+//
+// Delete this once no supported arm build can still error on a condition.
 func isOverload(err error) bool {
 	if err == nil {
 		return false

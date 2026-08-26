@@ -137,7 +137,11 @@ func TestIsConditionErrorDistinguishesConditionsFromFailures(t *testing.T) {
 		{"typed overload", &feetech.ServoError{ID: 6, Op: "read", Status: feetech.ErrOverload}, true},
 		{"typed overheat", &feetech.ServoError{ID: 6, Op: "read", Status: feetech.ErrOverheat}, true},
 		{"bare StatusError overload", feetech.ErrOverload, true},
-		{"remote string form", errors.New("failed to read moving state for servo 6: servo status error: [overload]"), true},
+		// The rendered string form is deliberately NOT a condition here. This layer talks to
+		// feetech directly and always has the typed error; text only appears after crossing the
+		// servocmd DoCommand boundary, and that path now carries flags as a response field
+		// instead (servocmd.ConditionKey), which is what made the string matching unnecessary.
+		{"rendered text is not a typed condition", errors.New("servo status error: [overload]"), false},
 		{"wrapped typed", fmt.Errorf("wrapped: %w", &feetech.ServoError{ID: 6, Status: feetech.ErrVoltage}), true},
 		{"genuine comms failure", errors.New("read tcp: connection reset by peer"), false},
 		{"timeout", context.DeadlineExceeded, false},

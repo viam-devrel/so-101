@@ -2,8 +2,6 @@ package controller
 
 import (
 	"context"
-	"errors"
-	"strings"
 	"time"
 
 	"github.com/hipsterbrown/feetech-servo/feetech"
@@ -91,37 +89,22 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 }
 
 // isConditionError reports whether err is a servo describing its own physical condition --
-// overload, overheat, voltage -- rather than a communication failure. The servo answered; the
-// library discards the payload because a status flag is set.
+// overload, overheat, voltage -- rather than a communication failure or a rejected request.
 //
-// Stopgap. feetech's ConditionStatus makes this precise and returns the data too; until a release
-// carries it, match the typed error where the arm is local and the rendered string where it has
-// crossed the servocmd DoCommand boundary from a remote arm.
+// ConditionStatus is the authority: it returns ok only when the data alongside err is safe to
+// use, which is exactly the question being asked here.
 func isConditionError(err error) bool {
-	if err == nil {
-		return false
-	}
-	const conditions = feetech.ErrOverload | feetech.ErrOverheat | feetech.ErrVoltage
-	var se *feetech.ServoError
-	if errors.As(err, &se) && se.Status&conditions != 0 {
-		return true
-	}
-	var st feetech.StatusError
-	if errors.As(err, &st) && st&conditions != 0 {
-		return true
-	}
-	msg := err.Error()
-	return strings.Contains(msg, "overload") || strings.Contains(msg, "overheat") ||
-		strings.Contains(msg, "voltage")
+	_, ok := feetech.ConditionStatus(err)
+	return ok
 }
 
 // tolerateConditions wraps a motion probe so that a servo reporting a physical condition --
 // overload while clamping, overheat -- counts as "still moving" instead of aborting the wait.
 //
-// The servo answered; the library discards the payload because a status flag is set, so motion is
-// unobservable but the move is underway. Measured on hardware: without this an Open that opened
-// the jaw correctly returned "failed to read moving state ... [overload]", which left the
-// gripper's grasp latch stuck set with an empty jaw until a second command cleared it.
+// The servo answered; we simply cannot observe the Moving register's meaning while it is unhappy,
+// and the move is underway. Measured on hardware: without this an Open that opened the jaw
+// correctly returned "failed to read moving state ... [overload]", which left the gripper's grasp
+// latch stuck set with an empty jaw until a second command cleared it.
 //
 // Genuine transport failures still propagate -- those are not the servo talking.
 func tolerateConditions(probe func(context.Context) (bool, error)) func(context.Context) (bool, error) {

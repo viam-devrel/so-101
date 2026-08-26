@@ -213,7 +213,9 @@ func (h *ControllerHandle) MoveServoRaw(ctx context.Context, id, raw int) error 
 
 // ServoPositionPercent reads one servo's position as both a percentage of its calibrated
 // range and the underlying raw tick value.
-func (h *ControllerHandle) ServoPositionPercent(ctx context.Context, id int) (percent float64, rawOut int, err error) {
+func (h *ControllerHandle) ServoPositionPercent(
+	ctx context.Context, id int,
+) (percent float64, rawOut int, condition feetech.StatusError, err error) {
 	err = h.withSessionRead(func(sess *busSession) error {
 		cs, ok := sess.servos[id]
 		if !ok {
@@ -225,7 +227,12 @@ func (h *ControllerHandle) ServoPositionPercent(ctx context.Context, id int) (pe
 		}
 
 		raw, err := servo.Position(ctx)
-		if err != nil {
+		if flags, ok := feetech.ConditionStatus(err); ok {
+			// The servo answered and the reading is good; it is just reporting its own condition
+			// (overload while clamping, overheat). Discarding the value here is what left callers
+			// blind exactly when something interesting was happening.
+			condition = flags
+		} else if err != nil {
 			return fmt.Errorf("failed to read position for servo %d: %w", id, err)
 		}
 		rawOut = raw
@@ -241,27 +248,31 @@ func (h *ControllerHandle) ServoPositionPercent(ctx context.Context, id int) (pe
 		percent = normalizedToPercent(cal, normalized)
 		return nil
 	})
-	return percent, rawOut, err
+	return percent, rawOut, condition, err
 }
 
 // ServoLoad reads one servo's raw signed present-load register. Modelled on
 // ServoPositionPercent -- a single withSessionRead bus transaction against sess.group.ServoByID.
 // Exists to make load measurable (e.g. sampled from the CLI via the gripper's get_load
 // DoCommand); nothing in this module derives grasp/holding state from it.
-func (h *ControllerHandle) ServoLoad(ctx context.Context, id int) (load int, err error) {
+func (h *ControllerHandle) ServoLoad(
+	ctx context.Context, id int,
+) (load int, condition feetech.StatusError, err error) {
 	err = h.withSessionRead(func(sess *busSession) error {
 		servo := sess.group.ServoByID(id)
 		if servo == nil {
 			return fmt.Errorf("servo %d not available", id)
 		}
 		l, err := servo.Load(ctx)
-		if err != nil {
+		if flags, ok := feetech.ConditionStatus(err); ok {
+			condition = flags
+		} else if err != nil {
 			return fmt.Errorf("failed to read load for servo %d: %w", id, err)
 		}
 		load = l
 		return nil
 	})
-	return load, err
+	return load, condition, err
 }
 
 // StopServo halts a single servo. Unlike Stop, it leaves every other servo on the bus
