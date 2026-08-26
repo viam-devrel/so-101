@@ -1163,3 +1163,50 @@ func TestGraspLatchRefusesPlannerJawCommand(t *testing.T) {
 	assert.NoError(t, g.GoToInputs(ctx, []referenceframe.Input{geometry.JawRadiansFromPct(50)}),
 		"once released, planner jaw commands must work again")
 }
+
+// TestGraspLatchUpgradesOnLateOverload is the hardware case that motivated refreshHoldingLatch.
+// An STS3215 raises overload only after protection_time -- 2s of sustained strain -- so a close
+// that lands on an object looks normal at the instant motion stops: the position read succeeds and
+// shows the jaw at its target. The evidence arrives seconds later, after the latch has already
+// been decided. Measured on a real gripper: Grab returned false, and the servo was overloaded one
+// second afterwards and stayed that way.
+func TestGraspLatchUpgradesOnLateOverload(t *testing.T) {
+	ctx := context.Background()
+	fa := newFakeServoArm()
+	// The jaw reaches its commanded target, so nothing looks wrong when the move completes.
+	fa.percent = 0
+	g := newTestGripper(t, fa)
+
+	grabbed, err := g.Grab(ctx, nil)
+	require.NoError(t, err)
+	require.False(t, grabbed, "at decision time the jaw is at target -- nothing to see yet")
+
+	st, err := g.IsHoldingSomething(ctx, nil)
+	require.NoError(t, err)
+	require.False(t, st.IsHoldingSomething)
+
+	// Now the servo starts reporting overload, as it does once protection_time elapses.
+	fa.setErr(overloadErrTyped())
+
+	st, err = g.IsHoldingSomething(ctx, nil)
+	require.NoError(t, err, "a condition must not surface as an error here")
+	assert.True(t, st.IsHoldingSomething,
+		"an overload appearing after the close must latch the grasp retroactively")
+}
+
+// TestGraspLatchIgnoresLateOverloadAfterOpening: straining while OPENING is obstruction, not a
+// grasp, and must not latch -- otherwise a jaw jammed on the way open reports holding forever.
+func TestGraspLatchIgnoresLateOverloadAfterOpening(t *testing.T) {
+	ctx := context.Background()
+	fa := newFakeServoArm()
+	fa.percent = 95
+	g := newTestGripper(t, fa)
+
+	require.NoError(t, g.Open(ctx, nil))
+	fa.setErr(overloadErrTyped())
+
+	st, err := g.IsHoldingSomething(ctx, nil)
+	require.NoError(t, err)
+	assert.False(t, st.IsHoldingSomething,
+		"the last command opened the jaw, so straining is obstruction rather than a grasp")
+}
