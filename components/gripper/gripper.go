@@ -480,30 +480,49 @@ func isOverload(err error) bool {
 //
 // So a condition observed on any later read, while the last thing commanded was a close, latches
 // the grasp retroactively. Callers must hold g.mu.
-// graspMayBePending reports whether a late-arriving condition could still change the answer:
-// nothing is latched yet, and the last command was a close. Takes g.mu itself, so callers must
-// not hold it.
-func (g *so101Gripper) graspMayBePending() bool {
+// latchNeedsFreshRead reports whether a bus read could still change the latch, in either
+// direction: a close whose grasp has not shown up yet, or an open whose release could not be
+// confirmed because the servo was still straining when the move finished. Takes g.mu itself, so
+// callers must not hold it.
+func (g *so101Gripper) latchNeedsFreshRead() bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	return !g.holdingLatched && g.haveCommanded &&
-		g.lastCommandedPct-g.closedPosition <= graspThresholdPct
+	if !g.haveCommanded {
+		return false
+	}
+	closing := g.lastCommandedPct-g.closedPosition <= graspThresholdPct
+	if closing {
+		return !g.holdingLatched // a grasp may still appear
+	}
+	return g.holdingLatched // an open may still turn out to have released
 }
 
 func (g *so101Gripper) refreshHoldingLatch() {
-	if g.holdingLatched || !g.haveCommanded {
+	if !g.haveCommanded {
 		return
 	}
-	if g.lastCommandedPct-g.closedPosition > graspThresholdPct {
-		return // the last command opened the jaw; straining is obstruction, not a grasp
-	}
 	g.jawMu.Lock()
-	seen := g.jawConditionSeen
+	seen, pct, havePct := g.jawConditionSeen, g.jawPct, g.jawHaveRead
 	g.jawMu.Unlock()
-	if seen {
+
+	closing := g.lastCommandedPct-g.closedPosition <= graspThresholdPct
+
+	// A close whose grasp only became visible later.
+	if closing && !g.holdingLatched && seen {
 		g.logger.Infof("jaw reported a servo condition after closing to %.1f%%: latching a grasp",
 			g.lastCommandedPct)
 		g.holdingLatched = true
+		return
+	}
+
+	// An open whose release could not be confirmed at the time. Opening away from a clamped part
+	// keeps the servo straining until the grip actually lets go, so updateHoldingLatch's read
+	// fails and it cannot clear the latch. Once the strain is gone and the jaw is demonstrably
+	// open, the part is released -- otherwise the gripper stays latched with an empty open jaw and
+	// refuses every planner command, which is what happened on hardware.
+	if !closing && g.holdingLatched && !seen && havePct && pct-g.closedPosition > graspThresholdPct {
+		g.logger.Infof("jaw open at %.1f%% with no strain: clearing the grasp latch", pct)
+		g.holdingLatched = false
 	}
 }
 
@@ -914,7 +933,7 @@ func (g *so101Gripper) IsHoldingSomething(
 	// close -- force a fresh read rather than trusting the cache. The whole point is to notice a
 	// condition that appeared AFTER the move completed, and a cached value from before it would
 	// hide exactly that. Otherwise the cached path is fine and this costs nothing.
-	if g.graspMayBePending() {
+	if g.latchNeedsFreshRead() {
 		g.invalidateJawCache()
 	}
 	_, _ = g.positionPercentCached(ctx)
