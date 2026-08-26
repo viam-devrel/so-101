@@ -97,6 +97,13 @@ A raw `set_position` (servo ticks) deliberately leaves the latch alone: an opaqu
 evidence of release, and dropping the latch there would disable the grasp-retention guard while a
 part is still held. Use `Open` to release.
 
+**Servo conditions appear as data, not failures.** `get_position` and `get_load` may include a
+`condition` field (for example `"overload"`) when the servo is reporting its own state — straining
+against a held object, overheating. A condition does **not** mean the reading is invalid: the servo
+answered correctly and is telling you why it is unhappy. It is also how a grasp on a thin object is
+detected at all, since such an object can close the jaw to a position indistinguishable from empty.
+The field is absent when there is nothing to report.
+
 ## Communication
 
 The gripper owns no serial connection of its own: it asks the arm for its servo's live `Moving` state over [`servo_moving`](arm.md#servo-moving), and if the arm cannot answer — including a remote arm running an older module build that does not know the command — it logs at Debug and falls back to whether a gripper command is in flight, rather than returning an error.
