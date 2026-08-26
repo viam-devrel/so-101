@@ -307,10 +307,11 @@ func (g *so101Gripper) moveToPercent(ctx context.Context, percent float64, wait 
 	g.updateHoldingLatch(ctx, target, err)
 
 	// An overload while CLOSING is not a failure: the jaw clamped onto something, which is the
-	// successful outcome of a close, and updateHoldingLatch has already recorded the grasp. On
-	// hardware this is what a real Grab looks like -- the servo strains, every register read starts
-	// failing, and reporting that as an error would make grabbing a part indistinguishable from a
-	// broken bus. Opening is different: an overload there means the jaw is obstructed and the move
+	// successful outcome of a close, and updateHoldingLatch has already recorded the grasp. While
+	// the flag is up every register read fails, so reporting it as an error would make grabbing a
+	// part indistinguishable from a broken bus. This is the uncommon path -- a stock STS3215 does
+	// not trip overload under a normal grip -- but it is the one where failing loudly would be
+	// most wrong. Opening is different: an overload there means the jaw is obstructed and the move
 	// genuinely did not do what was asked, so it stays an error.
 	if isOverload(err) && target-g.closedPosition <= graspThresholdPct {
 		return nil
@@ -451,9 +452,11 @@ func isOverload(err error) bool {
 //
 //   - Position is blind to thin objects. With a part genuinely held the jaw read 0.83% open --
 //     indistinguishable from an empty closed jaw, so no position threshold can see it.
-//   - Overload is transient. The servo sets it while straining to reach a target it cannot, then
-//     clears it once it settles into holding torque; the part stayed gripped for minutes after the
-//     flag went away.
+//   - Overload is unreliable as a grasp signal. Measured against an STS3215's stock protection
+//     registers, a hard clamp on a part draws only ~40% torque while overload_torque trips at 80%,
+//     so a normal grip never raises the flag at all. When it does fire it is a level, not an edge:
+//     it tracks the standing condition and clears when the goal is released, not when the servo
+//     settles. So it is corroborating evidence at best, never the primary signal.
 //
 // So holding is established at command time and held until something releases it.
 func (g *so101Gripper) updateHoldingLatch(ctx context.Context, commandedPct float64, moveErr error) {

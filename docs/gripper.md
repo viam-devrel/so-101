@@ -88,8 +88,9 @@ right after a raw `set_position` in ticks), since there is no commanded target t
 **How "holding" is determined.** The gripper latches a grasp when a command completes, rather than
 inferring it from the jaw's position on demand. Two things measured on real hardware make the
 live inference impossible: a thin part held in the jaw reads ~0.8% open, indistinguishable from an
-empty closed jaw; and the servo's overload flag, which fires while it clamps, clears after about
-30 seconds even though the part stays held. So a close latches a grasp if the jaw stops short of
+empty closed jaw; and the servo's overload flag is not dependable -- a stock STS3215 trips
+overload at 80% torque while a hard clamp draws only ~40%, so a normal grip never raises it, and
+when it does fire it tracks the standing condition rather than marking a moment. So a close latches a grasp if the jaw stops short of
 its target or the servo overloads clamping, and an open that reaches its target clears it. An
 overload while closing is reported as success, not an error -- clamping is what a close is for.
 A raw `set_position` (servo ticks) deliberately leaves the latch alone: an opaque target is no
