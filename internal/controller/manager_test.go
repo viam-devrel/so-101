@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/hipsterbrown/feetech-servo/feetech"
 	"github.com/stretchr/testify/assert"
@@ -107,6 +108,29 @@ func TestServoReadsSurviveAConditionFlag(t *testing.T) {
 	_, _, posCondition, err := h.ServoPositionPercent(context.Background(), 6)
 	require.NoError(t, err, "position reads must survive a condition too")
 	assert.NotZero(t, posCondition&feetech.ErrOverload)
+
+	// The batched Moving read is the one every blocking move polls. It used to discard the
+	// reading too, which is why WaitForServosToStop needed a wrapper treating an overload as
+	// "assume still moving" and ran to its full timeout on a jaw that had already stopped.
+	ft.SetRegister(6, feetech.RegMoving.Address, []byte{1})
+	moving, movingCondition, err := h.AnyServoMoving(context.Background(), []int{6})
+	require.NoError(t, err, "moving reads must survive a condition too")
+	assert.True(t, moving, "the Moving bit is valid and must survive")
+	assert.NotZero(t, movingCondition&feetech.ErrOverload)
+}
+
+// A clamping servo sets its overload flag while answering normally. The wait must end when the
+// servo actually stops, not when the caller's timeout expires -- that timeout is seconds, and it
+// used to be the only thing ending an Open or Grab that overloaded.
+func TestWaitForServosToStopEndsOnAStoppedServoDespiteACondition(t *testing.T) {
+	ft := testfake.NewFakeTransport()
+	ft.SetRegister(6, feetech.RegMoving.Address, []byte{0})
+	ft.SetStatus(6, feetech.ErrOverload)
+	h := testHandle(t, ft)
+
+	start := time.Now()
+	require.NoError(t, h.WaitForServosToStop(context.Background(), []int{6}, 5000))
+	assert.Less(t, time.Since(start), 2*time.Second, "must not wait out the 5s timeout")
 }
 
 func TestPingServoReachesOneServo(t *testing.T) {
@@ -124,7 +148,7 @@ func TestServoPresentReportsConfiguredServos(t *testing.T) {
 
 func TestAnyServoMovingReportsFalseWhenAllStopped(t *testing.T) {
 	h := testHandle(t, testfake.NewFakeTransport())
-	moving, err := h.AnyServoMoving(context.Background(), []int{1, 2, 3})
+	moving, _, err := h.AnyServoMoving(context.Background(), []int{1, 2, 3})
 	require.NoError(t, err)
 	assert.False(t, moving)
 }
@@ -134,7 +158,7 @@ func TestAnyServoMovingReportsTrueWhenOneIsMoving(t *testing.T) {
 	ft.SetRegister(2, feetech.RegMoving.Address, []byte{1})
 	h := testHandle(t, ft)
 
-	moving, err := h.AnyServoMoving(context.Background(), []int{1, 2, 3})
+	moving, _, err := h.AnyServoMoving(context.Background(), []int{1, 2, 3})
 	require.NoError(t, err)
 	assert.True(t, moving)
 }

@@ -20,13 +20,14 @@ type FakeServoOps struct {
 
 	Percent float64
 	Raw     int
-	// Condition and LoadCondition are servo condition flags returned alongside a good reading,
-	// the way an overloaded servo reports while still answering correctly.
-	Condition     feetech.StatusError
-	LoadCondition feetech.StatusError
-	MoveErr       error
-	PosErr        error
-	MoveRaws      []int
+	// Condition, LoadCondition and MovingCondition are servo condition flags returned alongside
+	// a good reading, the way an overloaded servo reports while still answering correctly.
+	Condition       feetech.StatusError
+	LoadCondition   feetech.StatusError
+	MovingCondition feetech.StatusError
+	MoveErr         error
+	PosErr          error
+	MoveRaws        []int
 
 	Moving    bool
 	MovingErr error
@@ -63,9 +64,12 @@ func (f *FakeServoOps) WaitForServosToStop(_ context.Context, ids []int, timeout
 	return nil
 }
 
-func (f *FakeServoOps) AnyServoMoving(_ context.Context, ids []int) (bool, error) {
+func (f *FakeServoOps) AnyServoMoving(_ context.Context, ids []int) (bool, feetech.StatusError, error) {
 	f.MovingIDs = ids
-	return f.Moving, f.MovingErr
+	if f.MovingErr != nil {
+		return false, 0, f.MovingErr
+	}
+	return f.Moving, f.MovingCondition, nil
 }
 
 func (f *FakeServoOps) ServoLoad(_ context.Context, id int) (int, feetech.StatusError, error) {

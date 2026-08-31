@@ -3,8 +3,6 @@ package controller
 import (
 	"context"
 	"time"
-
-	"github.com/hipsterbrown/feetech-servo/feetech"
 )
 
 const (
@@ -85,34 +83,5 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 		return ctx.Err()
 	case <-t.C:
 		return nil
-	}
-}
-
-// isConditionError reports whether err is a servo describing its own physical condition --
-// overload, overheat, voltage -- rather than a communication failure or a rejected request.
-//
-// ConditionStatus is the authority: it returns ok only when the data alongside err is safe to
-// use, which is exactly the question being asked here.
-func isConditionError(err error) bool {
-	_, ok := feetech.ConditionStatus(err)
-	return ok
-}
-
-// tolerateConditions wraps a motion probe so that a servo reporting a physical condition --
-// overload while clamping, overheat -- counts as "still moving" instead of aborting the wait.
-//
-// The servo answered; we simply cannot observe the Moving register's meaning while it is unhappy,
-// and the move is underway. Measured on hardware: without this an Open that opened the jaw
-// correctly returned "failed to read moving state ... [overload]", which left the gripper's grasp
-// latch stuck set with an empty jaw until a second command cleared it.
-//
-// Genuine transport failures still propagate -- those are not the servo talking.
-func tolerateConditions(probe func(context.Context) (bool, error)) func(context.Context) (bool, error) {
-	return func(ctx context.Context) (bool, error) {
-		moving, err := probe(ctx)
-		if isConditionError(err) {
-			return true, nil
-		}
-		return moving, err
 	}
 }

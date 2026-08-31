@@ -37,7 +37,7 @@ type ServoOps interface {
 	ServoPositionPercent(ctx context.Context, id int) (percent float64, raw int, condition feetech.StatusError, err error)
 	StopServo(ctx context.Context, id int) error
 	WaitForServosToStop(ctx context.Context, ids []int, timeoutMs int) error
-	AnyServoMoving(ctx context.Context, ids []int) (bool, error)
+	AnyServoMoving(ctx context.Context, ids []int) (moving bool, condition feetech.StatusError, err error)
 	// ServoLoad reads the servo's raw signed present-load register. It exists to make load
 	// measurable (e.g. from the CLI); nothing in this module derives grasp state from it.
 	ServoLoad(ctx context.Context, id int) (load int, condition feetech.StatusError, err error)
@@ -199,11 +199,11 @@ func HandleServoCommand(
 		return map[string]any{}, nil
 
 	case CmdServoMoving:
-		moving, err := ops.AnyServoMoving(ctx, []int{id})
+		moving, condition, err := ops.AnyServoMoving(ctx, []int{id})
 		if err != nil {
 			return nil, err
 		}
-		return map[string]any{"moving": moving}, nil
+		return withCondition(map[string]any{"moving": moving}, condition), nil
 
 	case CmdServoWaitStop:
 		timeoutMs, ok := NumArg(cmd, "timeout_ms")

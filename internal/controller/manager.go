@@ -437,21 +437,20 @@ func (h *ControllerHandle) WaitForServosToStop(ctx context.Context, servoIDs []i
 
 	// One SyncRead per poll rather than a read per servo: measured at 1.27-1.30ms against
 	// ~5.4-5.7ms for five individual Moving reads, on a bus this poll shares with arm motion.
+	//
+	// The condition flags are dropped here on purpose. AnyServoMoving now keeps the reading they
+	// used to invalidate, so an overloaded servo's Moving bit is observable and there is nothing
+	// left for this loop to tolerate; callers that act on conditions read them off the position
+	// path. A move that clamps therefore ends when the servo stops, not at the caller's timeout.
 	anyMoving := func(ctx context.Context) (bool, error) {
-		moving, err := h.AnyServoMoving(ctx, ids)
+		moving, _, err := h.AnyServoMoving(ctx, ids)
 		if err != nil {
-			// Condition errors are handled by tolerateConditions below, which wraps this probe.
-			// A servo reporting a physical condition (overload while clamping, overheat) still
-			// answered -- treating that as a failed wait aborts a move that is physically fine.
-			// Measured on hardware, an Open that opened the jaw correctly returned "failed to
-			// read moving state ... [overload]", which then prevented the grasp latch from
-			// clearing and left the gripper refusing planner commands with an empty jaw.
 			return false, fmt.Errorf("failed to read moving state for servos %v: %w", ids, err)
 		}
 		return moving, nil
 	}
 
-	started, stopped, err := waitForMotion(ctx, tolerateConditions(anyMoving),
+	started, stopped, err := waitForMotion(ctx, anyMoving,
 		motionStartWindow, time.Duration(timeoutMs)*time.Millisecond)
 	if err != nil {
 		return err
@@ -668,10 +667,20 @@ func (h *ControllerHandle) SyncReadPositions(ctx context.Context, ids []int) (ou
 
 // AnyServoMoving reports whether any of the given servos is still executing a move,
 // in one SyncRead of the Moving register rather than a read per servo.
-func (h *ControllerHandle) AnyServoMoving(ctx context.Context, ids []int) (moving bool, err error) {
+//
+// A servo reporting its own physical condition (overload while clamping, overheat) still
+// answered: SyncRead hands back the payload alongside the flag, so the Moving bit is read
+// normally and the flag is reported in condition instead of being thrown away with the value.
+// Discarding it made an overloaded servo unobservable exactly while something interesting was
+// happening. A rejected request or a missing response is still an error -- there is no reading.
+func (h *ControllerHandle) AnyServoMoving(
+	ctx context.Context, ids []int,
+) (moving bool, condition feetech.StatusError, err error) {
 	err = h.withSessionRead(func(sess *busSession) error {
 		data, err := sess.bus.SyncRead(ctx, feetech.RegMoving.Address, int(feetech.RegMoving.Size), ids)
-		if err != nil {
+		if flags, ok := feetech.ConditionStatus(err); ok {
+			condition = flags
+		} else if err != nil {
 			return err
 		}
 		for _, id := range ids {
@@ -682,7 +691,7 @@ func (h *ControllerHandle) AnyServoMoving(ctx context.Context, ids []int) (movin
 		}
 		return nil
 	})
-	return moving, err
+	return moving, condition, err
 }
 
 // PingServo pings one servo and returns its model number.
