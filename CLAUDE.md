@@ -158,11 +158,19 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
   and made planned paths skip their obstacle avoidance, while every unit test stayed green —
   `components/simulated` loops over a *blocking* `MoveToJointPositions`, so playback worked in
   simulation. `dwellUntilNear` (`components/arm/motion.go`) fixes it by holding each
-  intermediate waypoint until the arm is within `waypoint_dwell_tolerance_deg` of it. The
-  tolerance is load-bearing in both directions: too tight and no waypoint is ever satisfied
+  intermediate waypoint until the arm is within `waypoint_lookahead_deg` of it. The
+  lookahead is load-bearing in both directions: too tight and no waypoint is ever satisfied
   (servo steady-state error), too loose and the goal runs so far ahead the pacing stops
   gating. The dwell is deliberately *not* `WaitForServosToStop` — a stop at every waypoint is
   not a trajectory.
+- **`Stop` must cancel the move, not just zero velocity.** A paced waypoint stream runs for
+  seconds, so `arm.Stop` calls `opMgr.CancelRunning` *before* `controller.Stop`; the reverse
+  order lets the dwell loop write its next goal after the zero and the arm resumes.
+  `MoveToJointPositions` / `MoveThroughJointPositions` register via `opMgr.New`.
+  `MoveToPosition` deliberately does **not**: it delegates to the motion service, which calls
+  back into `MoveThroughJointPositions` over gRPC, and the op marker is a `context.Value` that
+  cannot cross that boundary — the outer op would be cancelled by its own callback.
+  `TestStopCancelsARunningWaypointStream` pins this.
 - **The arm and the calibration sensor still share the bus without excluding each other.**
   One mutex serializes individual operations, so their transactions cannot interleave, but
   nothing stops an arm move during a calibration workflow. `Discover` holds that mutex for

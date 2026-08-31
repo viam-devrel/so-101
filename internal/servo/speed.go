@@ -36,21 +36,17 @@ const (
 	MaxMoveTimeoutMs = 15000
 )
 
-// Waypoint-dwell tolerance bounds, in degrees. The dwell holds an intermediate waypoint
-// until every joint is this close to it, and only then commands the next one.
+// Waypoint-lookahead bounds, in degrees: how far ahead of the arm the commanded goal is
+// allowed to run. The dwell holds an intermediate waypoint until every joint is this close
+// to it, and only then commands the next one.
 const (
-	// DefaultDwellToleranceDeg is ~23 steps at the STS3215's 0.088 deg resolution: loose
-	// enough to clear the steady-state error a gravity-loaded joint parks with, tight enough
-	// that the commanded goal never runs further than this ahead of the arm.
-	//
-	// The goal leading the arm by a little is the whole point -- it is what keeps a waypoint
-	// stream ONE continuous motion. A joint whose goal is 2 deg away never decelerates to a
-	// stop before the goal jumps ahead again, so the arm cruises at roughly sqrt(accel*tol)
-	// instead of running a full accelerate-decelerate ramp per waypoint. That also makes
-	// this attribute the playback-speed knob: raising it goes faster and cuts more corner.
-	DefaultDwellToleranceDeg = 2.0
-	MinDwellToleranceDeg     = 0.1
-	MaxDwellToleranceDeg     = 45.0
+	// DefaultLookaheadDeg is ~23 steps at the STS3215's 0.088 deg resolution: loose enough to
+	// clear the steady-state error a gravity-loaded joint parks with, tight enough to keep the
+	// arm on the path. A goal that always leads a little is what keeps a stream one continuous
+	// motion, so this is also the playback-speed knob -- see docs/arm.md, "Waypoint streams".
+	DefaultLookaheadDeg = 2.0
+	MinLookaheadDeg     = 0.1
+	MaxLookaheadDeg     = 45.0
 )
 
 // DegPerSecToStepsPerSec converts an angular speed in degrees/second to the servo

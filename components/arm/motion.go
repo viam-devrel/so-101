@@ -235,27 +235,27 @@ func (s *so101) moveJoints(
 
 // dwellPollInterval is how often the waypoint dwell re-reads joint positions. One read is a
 // single SyncRead (~1ms on feetech-servo v0.6.1), and the interval only costs anything when
-// the arm has NOT yet reached the tolerance -- the first read of each dwell is immediate.
+// the arm has NOT yet reached the lookahead -- the first read of each dwell is immediate.
 // WaitForServosToStop's 50ms would put a hard 50ms floor on every waypoint it has to wait
 // for, which on a path densified 10x from a 10 Hz recording is minutes of pure polling.
 const dwellPollInterval = 10 * time.Millisecond
 
-// dwellUntilNear holds an intermediate waypoint until every joint is within tolDeg of it,
+// dwellUntilNear holds an intermediate waypoint until every joint is within lookaheadDeg of it,
 // then returns the last position read so the caller can use it as the next segment's travel
 // reference.
 //
 // Deliberately NOT WaitForServosToStop: a servo keeps its velocity across a goal rewrite, so
 // returning while the arm is still moving -- merely close enough -- is what makes a waypoint
-// stream one continuous motion rather than a full stop at every waypoint. The tolerance is
-// the leash: the commanded goal never runs more than tolDeg ahead of the arm, which both
-// bounds how much corner the stream can cut and sets the pace (see
-// servo.DefaultDwellToleranceDeg).
+// stream one continuous motion rather than a full stop at every waypoint. The lookahead is
+// the leash: the commanded goal never runs more than lookaheadDeg ahead of the arm, which
+// both bounds how much corner the stream can cut and sets the pace (see
+// servo.DefaultLookaheadDeg).
 //
 // Best-effort on the timeout, like WaitForServosToStop: it logs and returns the last read
 // rather than failing a move that is merely lagging. A read FAILURE is fatal, though --
 // without position feedback the dwell degenerates into the flythrough it exists to replace,
 // and every remaining segment would be scaled against a stale travel reference.
-func (s *so101) dwellUntilNear(ctx context.Context, goal []float64, tolDeg float64, timeoutMs int) ([]float64, error) {
+func (s *so101) dwellUntilNear(ctx context.Context, goal []float64, lookaheadDeg float64, timeoutMs int) ([]float64, error) {
 	deadline := time.Now().Add(time.Duration(timeoutMs) * time.Millisecond)
 	ticker := time.NewTicker(dwellPollInterval)
 	defer ticker.Stop()
@@ -270,14 +270,14 @@ func (s *so101) dwellUntilNear(ctx context.Context, goal []float64, tolDeg float
 		}
 
 		_, remainingDeg := servo.JointTravelsDeg(current, goal)
-		if remainingDeg <= tolDeg {
+		if remainingDeg <= lookaheadDeg {
 			return current, nil
 		}
 		if time.Now().After(deadline) {
 			// Debug, not Warn: on a dense path a lagging waypoint is routine, and one log
 			// line per waypoint would bury everything else.
-			s.logger.Debugf("waypoint dwell: still %.2f deg away after %dms (tolerance "+
-				"%.2f deg), moving to the next waypoint", remainingDeg, timeoutMs, tolDeg)
+			s.logger.Debugf("waypoint dwell: still %.2f deg away after %dms (lookahead "+
+				"%.2f deg), moving to the next waypoint", remainingDeg, timeoutMs, lookaheadDeg)
 			return current, nil
 		}
 
@@ -316,6 +316,9 @@ func (s *so101) moveJointsUniform(ctx context.Context, to []float64, speedDegsPe
 }
 
 func (s *so101) MoveToJointPositions(ctx context.Context, positions []referenceframe.Input, extra map[string]interface{}) error {
+	ctx, done := s.opMgr.New(ctx)
+	defer done()
+
 	s.mu.Lock()
 	s.exitManualLocked("motion command received")
 	s.mu.Unlock()
@@ -360,6 +363,11 @@ func (s *so101) MoveToJointPositions(ctx context.Context, positions []referencef
 }
 
 func (s *so101) MoveThroughJointPositions(ctx context.Context, positions [][]referenceframe.Input, options *arm.MoveOptions, extra map[string]interface{}) error {
+	// Registers the stream so Stop can cancel it. Not done in MoveToPosition: it calls back
+	// into here through the motion service, and the op marker cannot cross gRPC.
+	ctx, done := s.opMgr.New(ctx)
+	defer done()
+
 	s.mu.Lock()
 	s.exitManualLocked("motion command received")
 	s.mu.Unlock()
@@ -394,11 +402,11 @@ func (s *so101) MoveThroughJointPositions(ctx context.Context, positions [][]ref
 	// next segment's travel reference, so this is the only read a single-waypoint call
 	// makes. GoToInputs routinely emits single-waypoint streams, which would otherwise have
 	// no travel reference at all.
+	// Fatal, unlike the single-move path: with no feedback there is no dwell, and an unpaced
+	// stream executes only its final waypoint.
 	from, err := s.currentJoints(ctx)
 	if err != nil {
-		s.logger.Warnf("failed to read positions for coordinated move, falling back to "+
-			"uniform speed and flythrough waypoints: %v", err)
-		from = nil
+		return fmt.Errorf("failed to read positions to pace a waypoint stream: %w", err)
 	}
 
 	for idx, jointPositions := range positions {
@@ -407,19 +415,6 @@ func (s *so101) MoveThroughJointPositions(ctx context.Context, positions [][]ref
 			return err
 		}
 		isLast := idx == len(positions)-1
-
-		if from == nil {
-			// No position feedback, so no dwell is possible and this degrades to the old
-			// flythrough: every SetGoals overwrites the previous goal within milliseconds,
-			// so only the final waypoint is actually executed. Warned once above.
-			if err := s.moveJointsUniform(ctx, clamped, servo.UniformSpeedUnderCaps(speed, caps), accel, isLast); err != nil {
-				return err
-			}
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			continue
-		}
 
 		dwellTimeout, err := s.moveJoints(ctx, from, clamped, speed, accel, caps, isLast)
 		if err != nil {
@@ -433,7 +428,7 @@ func (s *so101) MoveThroughJointPositions(ctx context.Context, positions [][]ref
 			break
 		}
 
-		// Hold this waypoint until the arm has actually reached it (within tolerance)
+		// Hold this waypoint until the arm has actually reached it (within the lookahead)
 		// before writing the next. Without this the whole stream lands on the bus in a few
 		// tens of milliseconds, each SetGoals superseding the last, and the arm executes
 		// only the final waypoint -- a recorded trajectory replays as a straight line from
@@ -444,7 +439,7 @@ func (s *so101) MoveThroughJointPositions(ctx context.Context, positions [][]ref
 		// ACTUALLY is, which matters because a joint whose travel is concentrated earlier
 		// in the path would otherwise show a near-zero delta and be floored to 1 step/s
 		// while its goal is still far away.
-		from, err = s.dwellUntilNear(ctx, clamped, s.dwellToleranceDeg, dwellTimeout)
+		from, err = s.dwellUntilNear(ctx, clamped, s.lookaheadDeg, dwellTimeout)
 		if err != nil {
 			return err
 		}
@@ -473,6 +468,10 @@ func (s *so101) JointPositions(ctx context.Context, extra map[string]interface{}
 }
 
 func (s *so101) Stop(ctx context.Context, extra map[string]interface{}) error {
+	// Cancel before zeroing velocity, and block until the move returns: a running waypoint
+	// stream would otherwise write its next goal after the zero and the arm would resume.
+	s.opMgr.CancelRunning(ctx)
+
 	s.mu.Lock()
 	s.exitManualLocked("stop command received")
 	s.mu.Unlock()

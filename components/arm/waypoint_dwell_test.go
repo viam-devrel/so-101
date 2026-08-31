@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.viam.com/rdk/logging"
+	"go.viam.com/rdk/operation"
 	"go.viam.com/rdk/referenceframe"
 
 	"so_arm/internal/servo"
@@ -32,12 +33,13 @@ func dwellTestArm(t *testing.T, script [][]float64) (*so101, func() int) {
 	t.Helper()
 	calls := 0
 	s := &so101{
-		logger:            logging.NewTestLogger(t),
-		controller:        testArmHandle(t, testfake.NewFakeTransport()),
-		armServoIDs:       []int{1, 2, 3, 4, 5},
-		defaultSpeed:      50,
-		defaultAcc:        servo.DefaultAccelDegsPerSecSq,
-		dwellToleranceDeg: servo.DefaultDwellToleranceDeg,
+		logger:       logging.NewTestLogger(t),
+		opMgr:        operation.NewSingleOperationManager(),
+		controller:   testArmHandle(t, testfake.NewFakeTransport()),
+		armServoIDs:  []int{1, 2, 3, 4, 5},
+		defaultSpeed: 50,
+		defaultAcc:   servo.DefaultAccelDegsPerSecSq,
+		lookaheadDeg: servo.DefaultLookaheadDeg,
 	}
 	s.readJoints = func(context.Context) ([]float64, error) {
 		p := script[min(calls, len(script)-1)]
@@ -45,12 +47,6 @@ func dwellTestArm(t *testing.T, script [][]float64) (*so101, func() int) {
 		return p, nil
 	}
 	return s, func() int { return calls }
-}
-
-// referenceframe.Input is an alias for float64, so a waypoint list is already the right
-// shape; this just names the conversion at the call sites.
-func inputs(frames ...[]float64) [][]referenceframe.Input {
-	return frames
 }
 
 func TestMoveThroughJointPositionsDwellsOnEveryIntermediateWaypoint(t *testing.T) {
@@ -64,24 +60,24 @@ func TestMoveThroughJointPositionsDwellsOnEveryIntermediateWaypoint(t *testing.T
 	// poll: one read to seed the travel reference, then one per intermediate waypoint.
 	s, calls := dwellTestArm(t, [][]float64{start, w0, w1, w2})
 
-	require.NoError(t, s.MoveThroughJointPositions(context.Background(), inputs(w0, w1, w2, w3), nil, nil))
+	require.NoError(t, s.MoveThroughJointPositions(context.Background(), [][]referenceframe.Input{w0, w1, w2, w3}, nil, nil))
 
 	// 1 seed + 3 intermediate waypoints. The flythrough this replaced read exactly twice
 	// (seed + a re-read before the final waypoint) no matter how long the stream was.
 	assert.Equal(t, 4, calls(), "one dwell read per intermediate waypoint, plus the seeding read")
 }
 
-func TestMoveThroughJointPositionsHoldsUntilTheArmIsWithinTolerance(t *testing.T) {
+func TestMoveThroughJointPositionsHoldsUntilTheArmIsWithinTheLookahead(t *testing.T) {
 	w0 := []float64{0.20, 0, 0, 0, 0}
 	w1 := []float64{0.40, 0, 0, 0, 0}
 
-	// 0.05 rad is 2.9 deg, outside the 2 deg default tolerance, so the first waypoint's
+	// 0.05 rad is 2.9 deg, outside the 2 deg default lookahead, so the first waypoint's
 	// dwell can never be satisfied and must run to its timeout instead of hanging.
 	lagging := []float64{0.15, 0, 0, 0, 0}
 	s, calls := dwellTestArm(t, [][]float64{lagging})
 
 	started := time.Now()
-	require.NoError(t, s.MoveThroughJointPositions(context.Background(), inputs(w0, w1), nil, nil))
+	require.NoError(t, s.MoveThroughJointPositions(context.Background(), [][]referenceframe.Input{w0, w1}, nil, nil))
 	elapsed := time.Since(started)
 
 	// Best-effort: a lagging waypoint is given up on, not turned into an error.
@@ -103,7 +99,7 @@ func TestMoveThroughJointPositionsDwellHonorsContextCancellation(t *testing.T) {
 		cancel()
 	}()
 
-	err := s.MoveThroughJointPositions(ctx, inputs(w0, w1), nil, nil)
+	err := s.MoveThroughJointPositions(ctx, [][]referenceframe.Input{w0, w1}, nil, nil)
 	assert.True(t, errors.Is(err, context.Canceled), "got %v", err)
 }
 
@@ -123,7 +119,7 @@ func TestMoveThroughJointPositionsFailsWhenTheDwellLosesPositionFeedback(t *test
 		return nil, errors.New("bus went away")
 	}
 
-	err := s.MoveThroughJointPositions(context.Background(), inputs(w0, w1), nil, nil)
+	err := s.MoveThroughJointPositions(context.Background(), [][]referenceframe.Input{w0, w1}, nil, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "while holding a waypoint")
 }
@@ -134,7 +130,7 @@ func TestMoveThroughJointPositionsSingleWaypointDoesNotDwell(t *testing.T) {
 	s, calls := dwellTestArm(t, [][]float64{{0, 0, 0, 0, 0}})
 
 	require.NoError(t, s.MoveThroughJointPositions(
-		context.Background(), inputs([]float64{0.20, 0, 0, 0, 0}), nil, nil))
+		context.Background(), [][]referenceframe.Input{{0.20, 0, 0, 0, 0}}, nil, nil))
 
 	assert.Equal(t, 1, calls(), "just the seeding read")
 }
@@ -155,4 +151,33 @@ func TestDwellTimeoutFloorIsFarBelowTheMoveTimeoutFloor(t *testing.T) {
 	assert.Equal(t,
 		servo.MoveTimeoutMs(90, 50, servo.DefaultAccelDegsPerSecSq),
 		servo.DwellTimeoutMs(90, 50, servo.DefaultAccelDegsPerSecSq))
+}
+
+// A paced stream runs for seconds, so Stop has to cancel it. Zeroing velocity alone is
+// overwritten by the loop's next goal write.
+func TestStopCancelsARunningWaypointStream(t *testing.T) {
+	// Far from every waypoint, so each dwell polls until something stops it.
+	s, calls := dwellTestArm(t, [][]float64{{-1.0, 0, 0, 0, 0}})
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- s.MoveThroughJointPositions(context.Background(),
+			[][]referenceframe.Input{{0.2, 0, 0, 0, 0}, {0.4, 0, 0, 0, 0}, {0.6, 0, 0, 0, 0}}, nil, nil)
+	}()
+
+	// Let the stream get into its first dwell before stopping it.
+	time.Sleep(30 * time.Millisecond)
+	require.NoError(t, s.Stop(context.Background(), nil))
+
+	select {
+	case err := <-errCh:
+		assert.True(t, errors.Is(err, context.Canceled), "got %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("Stop did not end the waypoint stream")
+	}
+
+	// Stop blocks until the move returns, so the stream cannot still be issuing waypoints.
+	after := calls()
+	time.Sleep(30 * time.Millisecond)
+	assert.Equal(t, after, calls(), "no reads after Stop returned")
 }

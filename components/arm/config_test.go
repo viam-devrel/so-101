@@ -79,7 +79,7 @@ func TestManualModeConfigValidate(t *testing.T) {
 	}
 }
 
-func TestArmConfigValidateWaypointDwellTolerance(t *testing.T) {
+func TestArmConfigValidateWaypointLookahead(t *testing.T) {
 	base := func() *SO101ArmConfig { return &SO101ArmConfig{Port: "/dev/null"} }
 
 	for name, tol := range map[string]float64{
@@ -87,12 +87,12 @@ func TestArmConfigValidateWaypointDwellTolerance(t *testing.T) {
 		"above the maximum": 46,
 		"negative":          -1,
 		// NaN would pass every range comparison and then make the dwell's
-		// `remaining <= tolerance` test false forever, timing out on every waypoint.
+		// `remaining <= lookahead` test false forever, timing out on every waypoint.
 		"NaN": math.NaN(),
 	} {
 		t.Run(name, func(t *testing.T) {
 			c := base()
-			c.WaypointDwellToleranceDeg = tol
+			c.WaypointLookaheadDeg = tol
 			_, _, err := c.Validate("")
 			assert.Error(t, err)
 		})
@@ -105,7 +105,7 @@ func TestArmConfigValidateWaypointDwellTolerance(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			c := base()
-			c.WaypointDwellToleranceDeg = tol
+			c.WaypointLookaheadDeg = tol
 			_, _, err := c.Validate("")
 			assert.NoError(t, err)
 		})
