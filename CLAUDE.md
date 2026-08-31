@@ -150,6 +150,19 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
   and rdk closes a resource *before* constructing its replacement, so any reconfigure of a
   sole holder closes and reopens the port. Two components on one port (say an arm and a
   calibration sensor) keep it open for each other.
+- **A servo goal write supersedes the previous one, so a waypoint stream must be paced by
+  position, not just issued.** `SetGoals` overwrites the pending goal; an unpaced
+  `MoveThroughJointPositions` puts its whole stream on the bus in tens of milliseconds and the
+  servos execute only the final waypoint. That silently turned recorded-trajectory replay into
+  a straight line from the first pose to the last (~3% of the recorded path on a 10 Hz nod)
+  and made planned paths skip their obstacle avoidance, while every unit test stayed green —
+  `components/simulated` loops over a *blocking* `MoveToJointPositions`, so playback worked in
+  simulation. `dwellUntilNear` (`components/arm/motion.go`) fixes it by holding each
+  intermediate waypoint until the arm is within `waypoint_dwell_tolerance_deg` of it. The
+  tolerance is load-bearing in both directions: too tight and no waypoint is ever satisfied
+  (servo steady-state error), too loose and the goal runs so far ahead the pacing stops
+  gating. The dwell is deliberately *not* `WaitForServosToStop` — a stop at every waypoint is
+  not a trajectory.
 - **The arm and the calibration sensor still share the bus without excluding each other.**
   One mutex serializes individual operations, so their transactions cannot interleave, but
   nothing stops an arm move during a calibration workflow. `Discover` holds that mutex for

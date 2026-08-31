@@ -27,8 +27,30 @@ const (
 	// Wait-for-stop safety-timeout shaping.
 	moveTimeoutFactor = 2.0
 	minMoveTimeoutMs  = 1000
+	// minDwellTimeoutMs is the floor for one intermediate waypoint's dwell, deliberately far
+	// below minMoveTimeoutMs. A densified path issues hundreds of waypoints, so a 1s floor on
+	// each would turn a tolerance the hardware cannot actually reach -- a joint's
+	// steady-state error under load, say -- into a playback lasting minutes.
+	minDwellTimeoutMs = 50
 	// MaxMoveTimeoutMs is the safety-timeout ceiling for waiting on a move to complete.
 	MaxMoveTimeoutMs = 15000
+)
+
+// Waypoint-dwell tolerance bounds, in degrees. The dwell holds an intermediate waypoint
+// until every joint is this close to it, and only then commands the next one.
+const (
+	// DefaultDwellToleranceDeg is ~23 steps at the STS3215's 0.088 deg resolution: loose
+	// enough to clear the steady-state error a gravity-loaded joint parks with, tight enough
+	// that the commanded goal never runs further than this ahead of the arm.
+	//
+	// The goal leading the arm by a little is the whole point -- it is what keeps a waypoint
+	// stream ONE continuous motion. A joint whose goal is 2 deg away never decelerates to a
+	// stop before the goal jumps ahead again, so the arm cruises at roughly sqrt(accel*tol)
+	// instead of running a full accelerate-decelerate ramp per waypoint. That also makes
+	// this attribute the playback-speed knob: raising it goes faster and cuts more corner.
+	DefaultDwellToleranceDeg = 2.0
+	MinDwellToleranceDeg     = 0.1
+	MaxDwellToleranceDeg     = 45.0
 )
 
 // DegPerSecToStepsPerSec converts an angular speed in degrees/second to the servo
@@ -75,6 +97,17 @@ func ResolveSpeedDegsPerSec(maxVelRads, defaultSpeedDegsPerSec float64) float64 
 // takes 1.55s against a d/v-derived timeout of 1.2s, so WaitForServosToStop would warn and
 // return while the arm was still moving.
 func MoveTimeoutMs(maxTravelDeg, speedDegsPerSec, accelDegsPerSecSq float64) int {
+	return rampTimeoutMs(maxTravelDeg, speedDegsPerSec, accelDegsPerSecSq, minMoveTimeoutMs)
+}
+
+// DwellTimeoutMs bounds how long ONE intermediate waypoint may be held before the stream
+// gives up on it and commands the next. Same ramp model as MoveTimeoutMs, applied to that
+// segment's own travel rather than the whole move's, but floored at minDwellTimeoutMs.
+func DwellTimeoutMs(maxTravelDeg, speedDegsPerSec, accelDegsPerSecSq float64) int {
+	return rampTimeoutMs(maxTravelDeg, speedDegsPerSec, accelDegsPerSecSq, minDwellTimeoutMs)
+}
+
+func rampTimeoutMs(maxTravelDeg, speedDegsPerSec, accelDegsPerSecSq float64, floorMs int) int {
 	if speedDegsPerSec <= 0 || accelDegsPerSecSq <= 0 {
 		return MaxMoveTimeoutMs
 	}
@@ -84,8 +117,8 @@ func MoveTimeoutMs(maxTravelDeg, speedDegsPerSec, accelDegsPerSecSq float64) int
 		seconds = 2 * math.Sqrt(maxTravelDeg/accelDegsPerSecSq)
 	}
 	ms := int(math.Round(seconds * 1000.0 * moveTimeoutFactor))
-	if ms < minMoveTimeoutMs {
-		ms = minMoveTimeoutMs
+	if ms < floorMs {
+		ms = floorMs
 	}
 	if ms > MaxMoveTimeoutMs {
 		ms = MaxMoveTimeoutMs

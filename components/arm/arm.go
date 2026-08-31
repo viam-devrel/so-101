@@ -89,6 +89,15 @@ type SO101ArmConfig struct {
 	// cloud only an exact match could satisfy means every move fails. Zero or unset means
 	// defaultPositionToleranceMM (1.0).
 	PositionToleranceMM float64 `json:"position_tolerance_mm,omitempty"`
+
+	// WaypointDwellToleranceDeg is how close every joint must get to an intermediate
+	// waypoint of a MoveThroughJointPositions / GoToInputs stream before the next waypoint
+	// is commanded, in degrees. It is the path-fidelity/speed trade: larger lets the
+	// commanded goal run further ahead of the arm, which is faster but cuts more corner;
+	// smaller tracks the path more exactly, down to a near-stop at every waypoint.
+	//
+	// Zero or unset means servo.DefaultDwellToleranceDeg (2.0). Valid range 0.1-45.
+	WaypointDwellToleranceDeg float64 `json:"waypoint_dwell_tolerance_deg,omitempty"`
 }
 
 // ManualModeConfig tunes hand-guided ("manual") mode. All fields optional;
@@ -154,6 +163,16 @@ func (cfg *SO101ArmConfig) Validate(path string) ([]string, []string, error) {
 		return nil, nil, err
 	}
 
+	// NaN is checked explicitly: every comparison against it is false, so a NaN would pass a
+	// range check and then make the dwell's `remaining <= tolerance` test false forever --
+	// every waypoint would burn its full timeout.
+	if t := cfg.WaypointDwellToleranceDeg; t != 0 {
+		if math.IsNaN(t) || t < servo.MinDwellToleranceDeg || t > servo.MaxDwellToleranceDeg {
+			return nil, nil, fmt.Errorf("waypoint_dwell_tolerance_deg must be in [%g,%g], got %v",
+				servo.MinDwellToleranceDeg, servo.MaxDwellToleranceDeg, t)
+		}
+	}
+
 	deps := []string{}
 
 	if cfg.Motion != "" {
@@ -179,6 +198,13 @@ type so101 struct {
 	// goalCloud is the resolved approach-axis tolerance pair. Set once in NewSO101 and
 	// never mutated (the model is resource.AlwaysRebuild), so it needs no mutex.
 	goalCloud planning.GoalCloudConfig
+
+	// dwellToleranceDeg is the resolved waypoint-dwell tolerance. Set once in NewSO101 and
+	// never mutated, same as goalCloud.
+	dwellToleranceDeg float64
+
+	// readJoints, when non-nil, replaces the bus read behind currentJoints. Tests only.
+	readJoints func(context.Context) ([]float64, error)
 
 	mu       sync.RWMutex
 	moveLock sync.Mutex
@@ -290,6 +316,11 @@ func NewSO101(ctx context.Context, deps resource.Dependencies, name resource.Nam
 		}
 	}
 
+	dwellToleranceDeg := conf.WaypointDwellToleranceDeg
+	if dwellToleranceDeg == 0 {
+		dwellToleranceDeg = servo.DefaultDwellToleranceDeg
+	}
+
 	cancelCtx, cancelFunc := context.WithCancel(context.Background())
 
 	arm := &so101{
@@ -307,10 +338,13 @@ func NewSO101(ctx context.Context, deps resource.Dependencies, name resource.Nam
 		cancelCtx:    cancelCtx,
 		cancelFunc:   cancelFunc,
 		initCtx:      ctx, // Store initialization context
+
+		dwellToleranceDeg: dwellToleranceDeg,
 	}
 
-	logger.Debugf("SO-101 configured with speed: %.1f deg/s, acceleration: %.1f deg/s²",
-		speedDegsPerSec, accelerationDegsPerSec)
+	logger.Debugf("SO-101 configured with speed: %.1f deg/s, acceleration: %.1f deg/s², "+
+		"waypoint dwell tolerance: %.2f deg",
+		speedDegsPerSec, accelerationDegsPerSec, dwellToleranceDeg)
 	logger.Debugf("Arm controlling servo IDs: %v", arm.armServoIDs)
 
 	// Initialize and verify servo connections

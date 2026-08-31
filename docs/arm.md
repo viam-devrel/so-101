@@ -30,6 +30,7 @@ The following attributes are available for the arm component:
 | `visualize_ee_frame` | bool   | Optional     | When `true`, serves a colored XYZ coordinate-frame marker at the end-effector for the 3D viewer. Default is `false`.                                                    |
 | `speed_degs_per_sec` | float  | Optional     | Real per-joint speed cap enforced on the servos, in degrees per second. Applies to the longest-travel joint in a move; other joints are scaled down so all joints arrive together. Default `50`, valid range 3–180. |
 | `acceleration_degs_per_sec_per_sec` | float | Optional | Per-joint acceleration cap enforced on the servos, in degrees per second². Scaled alongside speed so joints arrive together; lower is smoother but slower. Default `500`, valid range 50–500 (the servo register cannot deliver acceleration outside it). |
+| `waypoint_dwell_tolerance_deg` | float | Optional | How close every joint must get to an intermediate waypoint of a `MoveThroughJointPositions`/`GoToInputs` stream before the next waypoint is commanded, in degrees. The path-fidelity/speed trade — see [Waypoint streams](#waypoint-streams). Default `2.0`, valid range 0.1–45. |
 | `use_urdf`         | bool     | Optional     | When `true`, sources kinematics and collision geometry from the bundled `assets/urdf/so101.urdf` instead of the embedded `so101.json`, and requires `VIAM_MODULE_ROOT` (viam-server sets this). A drop-in swap — frame names, TCP, and kinematics are identical; only the collision geometry upgrades from primitive shapes to per-link meshes. Default `false`. |
 | `mesh_decimation_ratios` | []float | Optional | Per-mesh simplification ratios, one per arm link in document order (base, shoulder, upper_arm, lower_arm, wrist). Only values strictly inside `(0, 1)` decimate; lower is more aggressive. Used only with `use_urdf`. Defaults to `0.9` for all five. |
 | `manual_mode`      | object   | Optional     | Tuning for hand-guided [manual mode](#manual-mode) (see below). Omit for the built-in defaults. |
@@ -67,7 +68,21 @@ The hardware arm scales each joint's speed and acceleration by its share of the 
 
 `MoveThroughJointPositions` accepts `MoveOptions.MaxVelRads` and `MaxAccRads` to override the configured defaults for one move, and the per-joint forms `MaxVelRadsJoints` and `MaxAccRadsJoints`. Setting a per-joint slice makes the matching scalar ignored, per `arm.proto`; a slice whose length doesn't match the arm's joint count is rejected. A per-joint limit slows the whole move rather than that joint, so the joints stay coordinated. `GoToInputs` routes through this same path.
 
-`MoveThroughJointPositions` streams waypoints back-to-back: intermediate waypoints are commanded without waiting for the arm to settle (flythrough), and the arm waits to stop only after the **final** waypoint. As a result, intermediate waypoints are not guaranteed stop-points. `GoToInputs` shares this same streaming path.
+### Waypoint streams
+
+`MoveThroughJointPositions` (and `GoToInputs`, which routes through it) paces its waypoints against the arm's real position: a waypoint is commanded, then held until every joint is within `waypoint_dwell_tolerance_deg` of it, and only then is the next one written. The arm waits for a full stop only after the **final** waypoint, so intermediate waypoints are still not stop-points — the arm flows through them.
+
+**Why the pacing exists.** Each goal write supersedes the previous one, and an unpaced stream lands on the bus in a few tens of milliseconds, so the servos never act on anything but the last waypoint. A recorded trajectory replayed as a straight line from its first pose to its last (on a nodding motion recorded at 10 Hz, about 3% of the recorded path), and a planned path skipped the obstacle avoidance it was planned for.
+
+**`waypoint_dwell_tolerance_deg` is the fidelity/speed trade.** The tolerance is how far ahead of the arm the commanded goal is allowed to run:
+
+- **Larger** — the goal leads by more, the arm never decelerates near a waypoint, motion is faster and cuts more corner between waypoints.
+- **Smaller** — the path is tracked more exactly, down to a near-stop at every waypoint at very small values.
+- The default `2.0` is about 23 servo steps: loose enough to clear the steady-state error a gravity-loaded joint parks with (a tolerance the hardware cannot reach makes every waypoint wait out its timeout instead), tight enough to keep the arm on the path. A joint chasing a goal 2° away cruises at roughly `sqrt(accel × tolerance)`, so at the default acceleration this replays a 10 Hz recording at close to its recorded duration.
+
+Each waypoint's hold is bounded by that segment's own expected ramp duration, so a waypoint the arm cannot reach costs tens of milliseconds, not a full move timeout.
+
+**One position read per waypoint.** The dwell polls at 100 Hz (one `SyncRead`, ~1 ms) and its read doubles as the next segment's travel reference. If the *initial* position read fails, there is no feedback to dwell against and the stream degrades to the old unpaced flythrough — where only the final waypoint is executed — with a warning. If a read fails *during* a stream, the move fails rather than silently reverting to it.
 
 `IsMoving()` reports the servos' own `Moving` register, not just whether a move call is in progress: it stays `true` while an interrupted or timed-out move is still settling, and it is the only signal available on the non-blocking (`wait: false`) path, where no call is left in flight to ask. While a move call **is** in flight, it short-circuits to `true` without touching the bus at all.
 
