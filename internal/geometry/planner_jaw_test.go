@@ -1,3 +1,13 @@
+//go:build nlopt
+
+// This file measures what rdk's motion planner does with a joint that changes nothing about
+// the goal pose -- the question `articulated_jaw` exists to answer. It is tagged out of the
+// default build because motionplan/armplanning links github.com/go-nlopt/nlopt, a cgo package
+// needing the nlopt C library, which nothing else in this module requires. The finding is
+// recorded in CLAUDE.md; re-measure with:
+//
+//	go test -tags nlopt ./internal/geometry
+
 package geometry
 
 import (

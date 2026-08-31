@@ -138,6 +138,11 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
 ## Tests & conventions
 
 - Build/test with `go test ./...` (the Makefile `test` target).
+- **`internal/geometry/planner_jaw_test.go` is behind `//go:build nlopt`** and is NOT in the
+  default build. It is the only file importing `motionplan/armplanning`, which links
+  `github.com/go-nlopt/nlopt` — a cgo package needing the nlopt C library that CI's runner
+  does not have, and nothing else here requires. Run it with
+  `go test -tags nlopt ./internal/geometry`; it takes ~35s.
 - Lint/format with `gofmt -s -w .` (the Makefile `lint` target); also run `go vet`.
 - Tests that need `VIAM_MODULE_ROOT` must use `testfake.RepoRoot()`, never `"."` — tests run
   from their own package directory, not the repo root.
