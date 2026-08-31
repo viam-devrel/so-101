@@ -78,3 +78,36 @@ func TestManualModeConfigValidate(t *testing.T) {
 		t.Fatalf("expected nil manual_mode to be valid, got %v", err)
 	}
 }
+
+func TestArmConfigValidateWaypointLookahead(t *testing.T) {
+	base := func() *SO101ArmConfig { return &SO101ArmConfig{Port: "/dev/null"} }
+
+	for name, tol := range map[string]float64{
+		"below the minimum": 0.05,
+		"above the maximum": 46,
+		"negative":          -1,
+		// NaN would pass every range comparison and then make the dwell's
+		// `remaining <= lookahead` test false forever, timing out on every waypoint.
+		"NaN": math.NaN(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := base()
+			c.WaypointLookaheadDeg = tol
+			_, _, err := c.Validate("")
+			assert.Error(t, err)
+		})
+	}
+
+	for name, tol := range map[string]float64{
+		"unset means the default": 0,
+		"at the minimum":          0.1,
+		"at the maximum":          45,
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := base()
+			c.WaypointLookaheadDeg = tol
+			_, _, err := c.Validate("")
+			assert.NoError(t, err)
+		})
+	}
+}
