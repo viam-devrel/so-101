@@ -296,6 +296,9 @@ func (g *so101Gripper) servoDo(
 // branch, and GoToInputs all do). The target is recorded once the move command itself succeeds,
 // whether or not the caller waits and even if the wait-stop times out: the servo was told to go
 // there regardless of whether it settled, or of whether anyone watched it settle.
+//
+// A non-blocking move leaves the grasp latch alone: arrival is the only evidence updateHoldingLatch
+// has, and it has not happened yet. refreshHoldingLatch still picks up evidence from a later read.
 func (g *so101Gripper) moveToPercent(ctx context.Context, percent float64, wait bool) error {
 	target := servocmd.ClampPercent(percent)
 	if _, err := g.servoDo(ctx, servocmd.CmdServoMove,

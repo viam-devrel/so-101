@@ -186,9 +186,10 @@ serial bus.
 
 The flag has no effect on the raw `servo_position` form, which never waited.
 
-`Open()` and `Grab()` always wait and offer no way to opt out: `Grab()` reads the position
-back after closing to decide whether it caught anything, so sampling a jaw still in flight
-would break grab detection.
+`Open()` and `Grab()` always wait and offer no way to opt out: both settle the grasp latch from
+whether the jaw reached its target (see "How \"holding\" is determined" above), so sampling a jaw
+still in flight would break grasp detection. For the same reason `wait: false` leaves the latch
+untouched — the move has not arrived anywhere yet.
 
 The arm takes the same flag, but in the `extra` argument of `MoveToJointPositions`. No
 `DoCommand` has an `extra` parameter — the arm's included — so on the gripper's high-rate
