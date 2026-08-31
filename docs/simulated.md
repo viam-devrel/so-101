@@ -76,9 +76,30 @@ All attributes are optional, so the simulated gripper works with an empty config
 | -------------- | ------ | --------- | ---------------------------------------------------------------------------------------------------------- |
 | `gripper_type` | string | Optional  | Which gripper meshes to serve: `follower` (moving jaw, the default) or `leader` (thumb-loop handle + trigger). |
 | `mesh_detail`  | string | Optional  | Gripper mesh resolution: `low` (decimated, the default) or `high` (full resolution). The mesh is also the motion-planning collision geometry, so `low` keeps planning fast; set `high` on a second gripper for a visual side-by-side. |
+| `articulated_jaw` | bool | Optional | Give the gripper a 1-DoF revolute jaw joint in its kinematic model and make it `InputEnabled`, so the motion planner can drive the jaw. Default `false`. **Experimental.** |
 
 The simulated gripper reports the same TCP reference frame as the hardware gripper — see
 [Reference frame (TCP)](gripper.md#reference-frame-tcp).
+
+#### `articulated_jaw`
+
+The jaw joint does **not** move the gripper's TCP, so enabling this attribute gives the motion
+planner a degree of freedom that changes only collision geometry — and it may command jaw motion
+you did not ask for while planning an unrelated arm move. Measured over 10 seeds
+(`internal/geometry/planner_jaw_test.go`, `TestPlannerJawTravel`): unobstructed plans never move
+the jaw at all, while plans forced through an obstacle move it 4%-20% of its range, usually
+wandering back to near its starting angle by the end.
+
+**The execute-epsilon hazard (plan/execute split only).** `services/motion/builtin/builtin.go:633`
+rejects a plan whose first trajectory step differs from the component's `CurrentInputs` by more than
+`0.01`, aborting the whole move — and a jaw still travelling from an earlier `Open`/`Grab` is enough
+to exceed that (`TestExecuteEpsilonTripsOnMovingJaw`). **This does not fire on the normal `Move()`
+path**, which passes `math.MaxFloat64` as the epsilon (`builtin.go:260`); it applies only when a
+caller drives the plan/execute split explicitly via the `executeCheckStart` DoCommand. If you use
+that path, let the jaw settle before executing.
+
+Jaw inputs (`GoToInputs`/`CurrentInputs`) are in **radians** end to end — the gripper's gRPC API
+passes raw `float64` values with no unit conversion, unlike the arm API's degrees.
 
 ### DoCommand
 

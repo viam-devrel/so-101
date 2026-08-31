@@ -26,7 +26,17 @@ const (
 	gripperTravelPctPerSec = 200.0
 	// gripperUpdateInterval is how often the background goroutine advances the jaw.
 	gripperUpdateInterval = 10 * time.Millisecond
+	// jawTrajectoryHistory is how many GoToInputs batches the gripper remembers for
+	// get_jaw_trajectory. Small on purpose: this is a debugging window, not a log.
+	jawTrajectoryHistory = 8
 )
+
+// jawBatch is one recorded GoToInputs call.
+type jawBatch struct {
+	steps          [][]referenceframe.Input
+	totalTravelRad float64
+	offset         time.Duration // since construction; monotonic so tests stay deterministic
+}
 
 func init() {
 	resource.RegisterComponent(gripper.API, SO101SimulatedGripperModel,
@@ -47,6 +57,12 @@ type SO101SimulatedGripperConfig struct {
 	// MeshDetail selects the gripper mesh resolution: "low" (decimated, the
 	// default) or "high" (full resolution).
 	MeshDetail string `json:"mesh_detail,omitempty"`
+
+	// ArticulatedJaw gives the gripper a 1-DoF revolute jaw joint in its kinematic model and
+	// makes it InputEnabled, so the motion planner sees the jaw as a variable it may drive.
+	// Off by default: the jaw does not affect the TCP, so the planner gets a degree of freedom
+	// that changes only collision geometry. See docs/simulated.md.
+	ArticulatedJaw bool `json:"articulated_jaw,omitempty"`
 }
 
 // Validate ensures the config is valid.
@@ -68,10 +84,12 @@ func (cfg *SO101SimulatedGripperConfig) Validate(path string) ([]string, []strin
 type simulatedSO101Gripper struct {
 	resource.AlwaysRebuild
 
-	name        resource.Name
-	gripperType string
-	meshDetail  string
-	model       referenceframe.Model
+	name           resource.Name
+	gripperType    string
+	meshDetail     string
+	articulatedJaw bool
+	model          referenceframe.Model
+	logger         logging.Logger
 
 	// lifetime management
 	closed     atomic.Bool
@@ -84,6 +102,15 @@ type simulatedSO101Gripper struct {
 	currentPct  float64
 	targetPct   float64
 	lastUpdated time.Time
+	// stopped mirrors the arm's simOperation.stopped (simulated.go). Without it, Stop()'s
+	// targetPct = currentPct makes an in-flight awaitArrival see "arrived" rather than
+	// "stopped", so GoToInputs would silently carry on to the next batch step.
+	stopped bool
+
+	// createdAt anchors jawBatch.offset to a monotonic clock so tests stay deterministic.
+	createdAt time.Time
+	// jawBatches is a ring of the most recent GoToInputs calls, for get_jaw_trajectory.
+	jawBatches []jawBatch
 }
 
 func newSimulatedSO101Gripper(
@@ -104,20 +131,23 @@ func newSimulatedSO101Gripper(
 		meshDetail = geometry.LowDetail
 	}
 
-	model, err := geometry.BuildGripperModel(gripperType, meshDetail, rawConf.ResourceName().ShortName())
+	model, err := geometry.BuildGripperModel(gripperType, meshDetail, rawConf.ResourceName().ShortName(), conf.ArticulatedJaw)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build gripper kinematic model: %w", err)
 	}
 
 	cancelCtx, cancelFunc := context.WithCancel(context.Background())
 	g := &simulatedSO101Gripper{
-		name:        rawConf.ResourceName(),
-		gripperType: gripperType,
-		meshDetail:  meshDetail,
-		model:       model,
-		cancelCtx:   cancelCtx,
-		cancelFunc:  cancelFunc,
-		lastUpdated: time.Now(),
+		name:           rawConf.ResourceName(),
+		gripperType:    gripperType,
+		meshDetail:     meshDetail,
+		articulatedJaw: conf.ArticulatedJaw,
+		model:          model,
+		logger:         logger,
+		cancelCtx:      cancelCtx,
+		cancelFunc:     cancelFunc,
+		lastUpdated:    time.Now(),
+		createdAt:      time.Now(),
 	}
 	g.startMotionSimulation()
 	return g, nil
@@ -162,13 +192,18 @@ func (g *simulatedSO101Gripper) updateForTime(now time.Time) {
 	}
 }
 
-// moveTo sets the target opening and blocks until the jaw reaches it, the arm is closed,
-// or the context is canceled.
-func (g *simulatedSO101Gripper) moveTo(ctx context.Context, pct float64) error {
+// setTarget sets the target opening without waiting. set_position uses this: the teleop loop
+// issues one every tick and must not block.
+func (g *simulatedSO101Gripper) setTarget(pct float64) {
 	g.mu.Lock()
+	defer g.mu.Unlock()
 	g.targetPct = pct
-	g.mu.Unlock()
+}
 
+// awaitArrival blocks until the jaw reaches its target, is stopped, or ctx is done. stopped is
+// checked before the arrival comparison: Stop() sets targetPct = currentPct, which would
+// otherwise make a stop indistinguishable from arrival.
+func (g *simulatedSO101Gripper) awaitArrival(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
@@ -177,14 +212,35 @@ func (g *simulatedSO101Gripper) moveTo(ctx context.Context, pct float64) error {
 			return g.cancelCtx.Err()
 		default:
 			g.mu.Lock()
+			stopped := g.stopped
 			done := g.currentPct == g.targetPct
 			g.mu.Unlock()
+			if stopped {
+				return errors.New("stopped before reaching target")
+			}
 			if done {
 				return nil
 			}
 			time.Sleep(time.Millisecond)
 		}
 	}
+}
+
+// clearStopped resets the stop flag at the start of a newly commanded move (Open, Grab, or a
+// GoToInputs batch), so a Stop() from a previous move does not leak into this one.
+func (g *simulatedSO101Gripper) clearStopped() {
+	g.mu.Lock()
+	g.stopped = false
+	g.mu.Unlock()
+}
+
+// moveTo sets the target and blocks until the jaw reaches it. Open and Grab use it directly;
+// GoToInputs clears stopped itself once per batch and calls setTarget/awaitArrival separately
+// (see GoToInputs) so intermediate steps aren't each treated as a fresh move.
+func (g *simulatedSO101Gripper) moveTo(ctx context.Context, pct float64) error {
+	g.clearStopped()
+	g.setTarget(pct)
+	return g.awaitArrival(ctx)
 }
 
 func (g *simulatedSO101Gripper) Name() resource.Name {
@@ -206,6 +262,12 @@ func (g *simulatedSO101Gripper) Grab(ctx context.Context, extra map[string]inter
 func (g *simulatedSO101Gripper) Stop(ctx context.Context, extra map[string]interface{}) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	// Only set stopped while moving, otherwise the distinction between "reached the target"
+	// and "was stopped" is lost for whoever is awaiting arrival (mirrors simOperation in
+	// simulated.go).
+	if g.currentPct != g.targetPct {
+		g.stopped = true
+	}
 	g.targetPct = g.currentPct
 	return nil
 }
@@ -230,10 +292,9 @@ func (g *simulatedSO101Gripper) Geometries(
 	ctx context.Context, extra map[string]interface{},
 ) ([]spatialmath.Geometry, error) {
 	g.mu.Lock()
-	pct := g.currentPct / 100.0
+	pct := g.currentPct
 	g.mu.Unlock()
-	jawAngle := geometry.GripperJointMin + pct*(geometry.GripperJointMax-geometry.GripperJointMin)
-	return geometry.BuildGripperMeshes(g.gripperType, g.meshDetail, jawAngle)
+	return geometry.BuildGripperMeshes(g.gripperType, g.meshDetail, geometry.JawRadiansFromPct(pct))
 }
 
 // Status returns the current status of the resource as a map of key-value pairs.
@@ -252,9 +313,7 @@ func (g *simulatedSO101Gripper) DoCommand(
 			return nil, fmt.Errorf("set_position requires a numeric 'percentage'")
 		}
 		clamped := math.Max(0, math.Min(100, pct))
-		g.mu.Lock()
-		g.targetPct = clamped
-		g.mu.Unlock()
+		g.setTarget(clamped)
 		return map[string]interface{}{"target_percentage": clamped}, nil
 	case "get_position":
 		g.mu.Lock()
@@ -262,7 +321,26 @@ func (g *simulatedSO101Gripper) DoCommand(
 		return map[string]interface{}{
 			"position_percentage": g.currentPct,
 			"target_percentage":   g.targetPct,
+			"jaw_angle_rad":       geometry.JawRadiansFromPct(g.currentPct),
+			"dof":                 len(g.model.DoF()),
 		}, nil
+	case "get_jaw_trajectory":
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		out := make([]map[string]interface{}, 0, len(g.jawBatches))
+		for _, b := range g.jawBatches {
+			steps := make([][]float64, len(b.steps))
+			for i, s := range b.steps {
+				steps[i] = append([]float64(nil), s...)
+			}
+			out = append(out, map[string]interface{}{
+				"step_count":       len(b.steps),
+				"total_travel_rad": b.totalTravelRad,
+				"offset_ms":        float64(b.offset.Milliseconds()),
+				"steps":            steps,
+			})
+		}
+		return map[string]interface{}{"batches": out}, nil
 	default:
 		return nil, fmt.Errorf("unknown command: %v", cmd["command"])
 	}
@@ -274,12 +352,114 @@ func (g *simulatedSO101Gripper) Kinematics(ctx context.Context) (referenceframe.
 	return g.model, nil
 }
 
+// jawLimitEpsilon tolerates a planner-issued input that lands just outside a joint limit due to
+// float rounding (e.g. left-associative (range*i)/steps in internal/geometry's angle sweep,
+// which overshoots by ~2.22e-16 -- one ULP -- at i==steps). rdk's frame system rejects an input
+// outside its limit by even that 1 ULP.
+//
+// 1e-6 is deliberately far wider than a ULP (about 4.5e9 ULP at GripperJointMax) -- it exists to
+// absorb ordinary float rounding, not to approximate machine precision, so do not "tighten" it
+// toward a literal ULP. What actually bounds the jaw is geometry.JawPctFromRadians's saturation
+// to 0/100 on conversion, not this epsilon's width: even a value at the edge of the tolerated
+// band converts to a fully-saturated percentage.
+const jawLimitEpsilon = 1e-6
+
+// CurrentInputs reports the jaw angle in radians. It is an error rather than a zero value when
+// articulated_jaw is off: robot/framesystem only asks components whose model has DoF, so being
+// asked at all while static means something is inconsistent.
 func (g *simulatedSO101Gripper) CurrentInputs(ctx context.Context) ([]referenceframe.Input, error) {
-	return nil, errors.ErrUnsupported
+	if !g.articulatedJaw {
+		return nil, errors.ErrUnsupported
+	}
+	g.mu.Lock()
+	pct := g.currentPct
+	g.mu.Unlock()
+	return []referenceframe.Input{geometry.JawRadiansFromPct(pct)}, nil
 }
 
-func (g *simulatedSO101Gripper) GoToInputs(ctx context.Context, inputs ...[]referenceframe.Input) error {
-	return errors.ErrUnsupported
+// recordJawTrajectory logs and remembers one GoToInputs batch, for get_jaw_trajectory. Called
+// after validation passes but before any movement, so a rejected batch is never recorded.
+func (g *simulatedSO101Gripper) recordJawTrajectory(steps [][]referenceframe.Input) {
+	if len(steps) == 0 {
+		return
+	}
+
+	g.mu.Lock()
+	currentRad := geometry.JawRadiansFromPct(g.currentPct)
+	g.mu.Unlock()
+	current := []referenceframe.Input{currentRad}
+
+	totalTravel := 0.0
+	prev := currentRad
+	for _, step := range steps {
+		totalTravel += math.Abs(step[0] - prev)
+		prev = step[0]
+	}
+	linf := referenceframe.InputsLinfDistance(current, steps[len(steps)-1])
+
+	g.logger.Infof(
+		"jaw trajectory: %d steps, theta %.4f -> %.4f rad, total travel %.4f rad, Linf from current %.4f rad",
+		len(steps), steps[0][0], steps[len(steps)-1][0], totalTravel, linf)
+
+	g.mu.Lock()
+	g.jawBatches = append(g.jawBatches, jawBatch{
+		steps:          steps,
+		totalTravelRad: totalTravel,
+		offset:         time.Since(g.createdAt),
+	})
+	if len(g.jawBatches) > jawTrajectoryHistory {
+		g.jawBatches = g.jawBatches[len(g.jawBatches)-jawTrajectoryHistory:]
+	}
+	g.mu.Unlock()
+}
+
+// GoToInputs drives the jaw through each step in turn. The motion service batches consecutive
+// trajectory steps for one component into a single variadic call, so a batch is the normal case.
+// Every step is validated before any of them is applied: a batch that fails halfway would
+// otherwise leave the jaw somewhere the planner did not intend.
+//
+// Only the final step's arrival is awaited. Intermediate targets are waypoints the interpolator
+// passes through on the way to the last one; awaiting each of them individually would cost a
+// full gripperUpdateInterval tick per step for no benefit (a 100-step trajectory of negligible
+// per-step motion would otherwise cost >=1s of wall time).
+func (g *simulatedSO101Gripper) GoToInputs(ctx context.Context, inputSteps ...[]referenceframe.Input) error {
+	if !g.articulatedJaw {
+		return errors.ErrUnsupported
+	}
+	limits := g.model.DoF()
+	if len(limits) != 1 {
+		// Unreachable while articulatedJaw implies exactly 1 DoF, but the len(step) arity check
+		// below only protects against a mismatched step -- it does not protect indexing
+		// limits[0] when limits itself is empty (0 != 0 passes the arity check).
+		return fmt.Errorf("gripper jaw model has %d DoF, want exactly 1", len(limits))
+	}
+	jawLimits := limits[0]
+	for i, step := range inputSteps {
+		if len(step) != 1 {
+			return fmt.Errorf("step %d: got %d inputs, the jaw takes 1", i, len(step))
+		}
+		if step[0] < jawLimits.Min-jawLimitEpsilon || step[0] > jawLimits.Max+jawLimitEpsilon {
+			return fmt.Errorf("step %d: jaw angle %.6f rad is outside [%.6f, %.6f]",
+				i, step[0], jawLimits.Min, jawLimits.Max)
+		}
+	}
+
+	g.recordJawTrajectory(inputSteps)
+
+	g.clearStopped()
+	for i, step := range inputSteps {
+		g.setTarget(geometry.JawPctFromRadians(step[0]))
+		if i == len(inputSteps)-1 {
+			return g.awaitArrival(ctx)
+		}
+		g.mu.Lock()
+		stopped := g.stopped
+		g.mu.Unlock()
+		if stopped {
+			return errors.New("stopped before reaching target")
+		}
+	}
+	return nil
 }
 
 func (g *simulatedSO101Gripper) Close(ctx context.Context) error {

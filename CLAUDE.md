@@ -138,6 +138,11 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
 ## Tests & conventions
 
 - Build/test with `go test ./...` (the Makefile `test` target).
+- **`internal/geometry/planner_jaw_test.go` is behind `//go:build nlopt`** and is NOT in the
+  default build. It is the only file importing `motionplan/armplanning`, which links
+  `github.com/go-nlopt/nlopt` — a cgo package needing the nlopt C library that CI's runner
+  does not have, and nothing else here requires. Run it with
+  `go test -tags nlopt ./internal/geometry`; it takes ~35s.
 - Lint/format with `gofmt -s -w .` (the Makefile `lint` target); also run `go vet`.
 - Tests that need `VIAM_MODULE_ROOT` must use `testfake.RepoRoot()`, never `"."` — tests run
   from their own package directory, not the repo root.
@@ -226,11 +231,21 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
   cloud assumes). Measured off the follower meshes with the jaws closed;
   `TestGripperTCPLiesBetweenTheJawTips` re-derives the jaw bounds from the meshes so
   regenerating them can't strand the TCP inside a finger. The `leader` gripper has no jaws, so
-  its leaf offset is zero. The model is **0-DoF on purpose**: a jaw DoF would become a variable
+  its leaf offset is zero. The model is **0-DoF by default**: a jaw DoF would become a variable
   the motion planner may drive, and it means the frame-system collision meshes are frozen
-  closed while `Geometries()` keeps serving the live articulating jaw to the 3D viewer.
+  closed. **`Geometries()` does NOT feed the 3D viewer** — an earlier version of this note claimed
+  it did, and that claim is false. Verified on a live machine: `GetGeometries` correctly swings the
+  jaw the full 110° between `Grab` and `Open`, while the viewer does not move at all. The viewer
+  renders a gripper from `Kinematics()` (`robot/impl/local_robot.go:1362` takes the kinematics
+  branch and `continue`s, never calling `Geometries()`), so a 0-DoF model renders frozen no matter
+  what `Geometries()` reports. The viewer *does* poll `GetCurrentInputs` and animate a jointed
+  gripper — confirmed on a live machine — so `articulated_jaw` animates on Open/Grab while the
+  default 0-DoF model never will.
   `TestGripperFrameResolvesToTCPInFrameSystem` asserts the end-to-end contract, which is also
-  why users must **not** add a compensating `translation` to the gripper's `frame`.
+  why users must **not** add a compensating `translation` to the gripper's `frame`. The simulated
+  gripper's `articulated_jaw` config attribute opts into the 1-DoF version to measure exactly
+  that risk (the hardware gripper is unchanged, still always 0-DoF); see the sensitivity gotcha
+  below for what the planner actually did with the freedom.
 - **A part's `frame` config and its `kinematics` are two independent things**, and the 3D viewer
   reads frames from the kinematics. Verified against a live machine:
   `RobotService.FrameSystemConfig` reports `follower-gripper`'s `frame.poseInObserverFrame` as
@@ -278,6 +293,11 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
   polling a position read failed outright (nothing retries), the same transient that would
   abort a move from `WaitForServosToStop`'s own poll -- another reason not to poll `IsMoving`
   in a tight loop.
+- **`defaultExecuteEpsilon` is inert on the normal `Move()` path.** `services/motion/builtin`'s
+  `Move` passes `math.MaxFloat64` as the execute epsilon (`builtin.go:260`); the `0.01` default
+  (`builtin.go:77`) applies only when a caller supplies `executeCheckStart` via the plan/execute
+  DoCommand split. So the "first trajectory step must match CurrentInputs" check — and the
+  mid-travel-jaw hazard it creates — does not abort an ordinary arm move.
 - **`Speed: 0` means MAXIMUM, not stopped**, and **`Acc: 0` means UNLIMITED, not zero** — both
   Feetech register sentinels are the opposite of what they look like, and both have already
   caused real bugs in this project. A short-travel joint scaled down by a small `k` can round
@@ -439,3 +459,31 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
   be mistaken for having done anything. `abort`'s advertised states are unchanged — only the
   guard was added. One gap remains by choice: `error` still accepts `abort` without advertising
   it, which is harmless because `reset` is the escape hatch offered there.
+- **SVA `JointConfig.Min`/`Max` are DEGREES**, while `internal/geometry`'s `GripperJointMin`/`Max`
+  and every `referenceframe.Limit` are radians. `referenceframe/frame_json.go:152` applies
+  `DegToRad` for revolute joints (prismatic joints pass through unconverted). Assert *parsed*
+  `DoF()` limits, never the written config values.
+- **A joint that does not affect the goal gets the planner's FULL search range, not none.**
+  `computeJointSensitivities` (`motionplan/armplanning/linearized_frame_system.go:80`) computes
+  `startDistance / |myDistance - startDistance|` — *inverse* sensitivity, so a zero-effect joint
+  divides by zero, yields `+Inf`, and `clampSensitivities` clamps it to `1.0`. This is deliberate
+  in rdk. **But full search freedom does not become full travel:** measured over 10 seeds, an
+  unconstrained gripper jaw (`articulated_jaw` on the simulated gripper) moved 0% on unobstructed
+  plans and only 4%-20% of its range under obstruction, usually returning near its start
+  (`TestPlannerJawTravel`). Do not assume an unconstrained joint will swing to its limits — and do
+  not assume it will stay put either.
+- **A gripper's `CurrentInputs`/`GoToInputs` are JOINT RADIANS, not a normalized position.**
+  `[-0.174533, 1.74533]` (-10deg..100deg) for the SO-101 jaw — the frame system requires the same
+  units and range as the model's `DoF()` limits. There is no 0-1 or 0-100 form on that API; the
+  percentage lives on the `get_position`/`set_position` DoCommands, and
+  `geometry.JawRadiansFromPct`/`JawPctFromRadians` convert. Note the gripper API ships raw float64
+  with **no** degree conversion, unlike the arm API's `Frame.ProtobufFromInput` round trip.
+- **The 3D viewer only renders `euler_angles` link orientations correctly.** `spatialmath.Compose`
+  returns a `*Quaternion`, so `NewOrientationConfig` emits `"type":"quaternion"` — which rdk parses
+  identically to euler, but which the viewer rendered wrong (the gripper's jaw branch splayed off
+  at a bad angle). Every orientation in `so101.json` is `euler_angles`. Convert with
+  `.Orientation().EulerAngles()` before encoding; `TestJawMountOrientationIsEuler` guards it.
+- **rdk rejects a joint input that exceeds a limit by even one ULP** (`input out of bounds`). A
+  sweep computing `min + (range*i)/steps` overshoots by 2.22e-16 at `i == steps`, because `*` and
+  `/` are left-associative. `GoToInputs` validates against a deliberately wide `jawLimitEpsilon`
+  for this reason.
