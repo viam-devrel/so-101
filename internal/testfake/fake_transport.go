@@ -30,6 +30,7 @@ type FakeTransport struct {
 	writes    int
 	opens     int
 	closes    int
+	status    map[int]feetech.StatusError
 }
 
 // NewFakeTransport builds a fake transport seeded with all six SO-101 servos present and
@@ -37,6 +38,7 @@ type FakeTransport struct {
 func NewFakeTransport() *FakeTransport {
 	ft := &FakeTransport{
 		proto:     feetech.NewProtocol(feetech.ProtocolSTS),
+		status:    map[int]feetech.StatusError{},
 		registers: make(map[int]map[byte][]byte),
 	}
 	for id := 1; id <= 6; id++ {
@@ -161,7 +163,19 @@ func (ft *FakeTransport) queue(id int, params []byte) {
 		return // absent servo: silence, which the bus reports as ErrNoResponse
 	}
 	ft.pending = append(ft.pending,
-		ft.proto.Encode(feetech.Packet{ID: byte(id), Instruction: 0, Parameters: params})...)
+		// In a RESPONSE the byte Encode writes from Instruction is the status byte -- Encode
+		// ignores Packet.Error, which is only meaningful after Decode. So condition flags go here.
+		ft.proto.Encode(feetech.Packet{
+			ID: byte(id), Instruction: byte(ft.status[id]), Parameters: params,
+		})...)
+}
+
+// SetStatus makes a servo report condition flags on every response, the way an overloaded
+// STS3215 does -- while still answering with valid register data.
+func (ft *FakeTransport) SetStatus(id int, status feetech.StatusError) {
+	ft.mu.Lock()
+	defer ft.mu.Unlock()
+	ft.status[id] = status
 }
 
 var _ feetech.Transport = (*FakeTransport)(nil)

@@ -7,6 +7,8 @@ import (
 	"context"
 	"fmt"
 	"strings"
+
+	"github.com/hipsterbrown/feetech-servo/feetech"
 )
 
 // The servo_* DoCommand family. The gripper owns no serial connection: it drives its servo
@@ -20,6 +22,7 @@ const (
 	CmdServoPosition     = "servo_position"
 	CmdServoStop         = "servo_stop"
 	CmdServoWaitStop     = "servo_wait_stop"
+	CmdServoLoad         = "servo_load"
 )
 
 // ServoOps is the single-servo surface HandleServoCommand needs. Keeping dispatch behind
@@ -28,10 +31,16 @@ const (
 type ServoOps interface {
 	MoveServoPercent(ctx context.Context, id int, percent float64, speed int) error
 	MoveServoRaw(ctx context.Context, id, raw int) error
-	ServoPositionPercent(ctx context.Context, id int) (percent float64, raw int, err error)
+	// ServoPositionPercent reports the opening as a percentage. condition carries any servo
+	// condition flags (overload, overheat) that accompanied an otherwise-good reading -- a
+	// condition does NOT mean the value is invalid.
+	ServoPositionPercent(ctx context.Context, id int) (percent float64, raw int, condition feetech.StatusError, err error)
 	StopServo(ctx context.Context, id int) error
 	WaitForServosToStop(ctx context.Context, ids []int, timeoutMs int) error
-	AnyServoMoving(ctx context.Context, ids []int) (bool, error)
+	AnyServoMoving(ctx context.Context, ids []int) (moving bool, condition feetech.StatusError, err error)
+	// ServoLoad reads the servo's raw signed present-load register. It exists to make load
+	// measurable (e.g. from the CLI); nothing in this module derives grasp state from it.
+	ServoLoad(ctx context.Context, id int) (load int, condition feetech.StatusError, err error)
 }
 
 // IsServoCommand reports whether a DoCommand belongs to this family, so the arm can route
@@ -170,11 +179,18 @@ func HandleServoCommand(
 		return map[string]any{"percent": percent}, nil
 
 	case CmdServoPosition:
-		percent, raw, err := ops.ServoPositionPercent(ctx, id)
+		percent, raw, condition, err := ops.ServoPositionPercent(ctx, id)
 		if err != nil {
 			return nil, err
 		}
-		return map[string]any{"percent": percent, "raw": raw}, nil
+		return withCondition(map[string]any{"percent": percent, "raw": raw}, condition), nil
+
+	case CmdServoLoad:
+		load, condition, err := ops.ServoLoad(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		return withCondition(map[string]any{"load": load}, condition), nil
 
 	case CmdServoStop:
 		if err := ops.StopServo(ctx, id); err != nil {
@@ -183,11 +199,11 @@ func HandleServoCommand(
 		return map[string]any{}, nil
 
 	case CmdServoMoving:
-		moving, err := ops.AnyServoMoving(ctx, []int{id})
+		moving, condition, err := ops.AnyServoMoving(ctx, []int{id})
 		if err != nil {
 			return nil, err
 		}
-		return map[string]any{"moving": moving}, nil
+		return withCondition(map[string]any{"moving": moving}, condition), nil
 
 	case CmdServoWaitStop:
 		timeoutMs, ok := NumArg(cmd, "timeout_ms")
@@ -206,3 +222,27 @@ func HandleServoCommand(
 
 // defaultServoWaitTimeoutMs bounds servo_wait_stop when the caller does not specify one.
 const defaultServoWaitTimeoutMs = 3000
+
+// ConditionKey is the response field carrying servo condition flags alongside a good reading.
+// Absent when there is no condition, so consumers that predate it are unaffected.
+const ConditionKey = "condition"
+
+// withCondition attaches condition flags to a response as rendered text.
+//
+// Text rather than the bitfield: this crosses the DoCommand boundary as a protobuf Struct when the
+// arm is remote, where every number becomes a float64 (the reason NumArg exists) and a bitfield
+// would arrive lossy and opaque. StatusError.Error() renders "overload" -- loggable, matchable,
+// and stable across the wire. Typed errors do not survive that trip; fields do, which is the whole
+// reason conditions travel as data rather than as an error.
+func withCondition(res map[string]any, condition feetech.StatusError) map[string]any {
+	if condition != 0 {
+		res[ConditionKey] = condition.Error()
+	}
+	return res
+}
+
+// ConditionArg reports the condition text a response carries, if any.
+func ConditionArg(res map[string]any) (string, bool) {
+	v, ok := res[ConditionKey].(string)
+	return v, ok && v != ""
+}

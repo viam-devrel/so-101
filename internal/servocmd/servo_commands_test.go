@@ -133,6 +133,22 @@ func TestServoPositionReturnsPercentAndRaw(t *testing.T) {
 	assert.Equal(t, 1834, res["raw"])
 }
 
+func TestServoLoadReturnsValue(t *testing.T) {
+	ops := &testfake.FakeServoOps{Load: -37}
+	res, err := HandleServoCommand(context.Background(),
+		map[string]any{"command": CmdServoLoad, "servo_id": 6}, ops, armServos)
+	require.NoError(t, err)
+	assert.Equal(t, -37, res["load"])
+}
+
+func TestServoLoadPropagatesError(t *testing.T) {
+	boom := errors.New("bus is on fire")
+	ops := &testfake.FakeServoOps{LoadErr: boom}
+	_, err := HandleServoCommand(context.Background(),
+		map[string]any{"command": CmdServoLoad, "servo_id": 6}, ops, armServos)
+	require.ErrorIs(t, err, boom)
+}
+
 func TestServoStopIsScopedToOneServo(t *testing.T) {
 	ops := &testfake.FakeServoOps{}
 	_, err := HandleServoCommand(context.Background(),

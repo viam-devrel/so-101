@@ -8,10 +8,12 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/hipsterbrown/feetech-servo/feetech"
 	"go.viam.com/rdk/components/arm"
 	"go.viam.com/rdk/components/gripper"
 	"go.viam.com/rdk/logging"
@@ -115,6 +117,10 @@ type so101Gripper struct {
 	// legitimate zero-valued command (0% is closed, a real target). Both are guarded by g.mu.
 	lastCommandedPct float64
 	haveCommanded    bool
+	// holdingLatched is whether the gripper is holding something. Latched at command time by
+	// updateHoldingLatch rather than inferred live -- see that function for why neither position
+	// nor overload can answer the question on demand.
+	holdingLatched bool
 
 	speed        float32
 	acceleration float32
@@ -136,6 +142,10 @@ type so101Gripper struct {
 	// jawReadAt) so last-known-good keeps serving across it.
 	jawHaveRead bool
 	jawGen      uint64
+	// jawConditionSeen is true when the most recent bus read came back with a servo condition
+	// flag (overload while clamping). It is how a grasp that only becomes visible AFTER the move
+	// completes still reaches the latch -- see refreshHoldingLatch.
+	jawConditionSeen bool
 
 	now func() time.Time // injectable for tests; time.Now in production
 }
@@ -261,13 +271,15 @@ func servoIDsFromCapabilities(res map[string]interface{}) []int {
 }
 
 // servoDo sends one servo_* command for this gripper's servo. Every command except a position
-// read or the capabilities probe invalidates the jaw cache -- excluding CmdServoPosition is not
-// just an optimization: if a read's own servoDo bumped the generation counter, the cache would
-// discard the very reading it just took and never populate at all.
+// read, a load read, or the capabilities probe invalidates the jaw cache -- excluding
+// CmdServoPosition is not just an optimization: if a read's own servoDo bumped the generation
+// counter, the cache would discard the very reading it just took and never populate at all.
+// CmdServoLoad is excluded for the same reason it isn't a write: reading load moves nothing.
 func (g *so101Gripper) servoDo(
 	ctx context.Context, command string, args map[string]interface{},
 ) (map[string]interface{}, error) {
-	if command != servocmd.CmdServoPosition && command != servocmd.CmdServoCapabilities {
+	if command != servocmd.CmdServoPosition && command != servocmd.CmdServoCapabilities &&
+		command != servocmd.CmdServoLoad {
 		g.invalidateJawCache()
 	}
 
@@ -284,6 +296,9 @@ func (g *so101Gripper) servoDo(
 // branch, and GoToInputs all do). The target is recorded once the move command itself succeeds,
 // whether or not the caller waits and even if the wait-stop times out: the servo was told to go
 // there regardless of whether it settled, or of whether anyone watched it settle.
+//
+// A non-blocking move leaves the grasp latch alone: arrival is the only evidence updateHoldingLatch
+// has, and it has not happened yet. refreshHoldingLatch still picks up evidence from a later read.
 func (g *so101Gripper) moveToPercent(ctx context.Context, percent float64, wait bool) error {
 	target := servocmd.ClampPercent(percent)
 	if _, err := g.servoDo(ctx, servocmd.CmdServoMove,
@@ -296,6 +311,18 @@ func (g *so101Gripper) moveToPercent(ctx context.Context, percent float64, wait 
 	}
 	_, err := g.servoDo(ctx, servocmd.CmdServoWaitStop,
 		map[string]interface{}{"timeout_ms": gripperSettleTimeoutMs})
+	g.updateHoldingLatch(ctx, target, err)
+
+	// An overload while CLOSING is not a failure: the jaw clamped onto something, which is the
+	// successful outcome of a close, and updateHoldingLatch has already recorded the grasp. While
+	// the flag is up every register read fails, so reporting it as an error would make grabbing a
+	// part indistinguishable from a broken bus. This is the uncommon path -- a stock STS3215 does
+	// not trip overload under a normal grip -- but it is the one where failing loudly would be
+	// most wrong. Opening is different: an overload there means the jaw is obstructed and the move
+	// genuinely did not do what was asked, so it stays an error.
+	if isOverload(err) && target-g.closedPosition <= graspThresholdPct {
+		return nil
+	}
 	return err
 }
 
@@ -303,15 +330,26 @@ func (g *so101Gripper) moveToPercent(ctx context.Context, percent float64, wait 
 // Use this only where the caller must distinguish a failed read from a stale one (Grab,
 // get_position); everything else should use positionPercentCached.
 func (g *so101Gripper) positionPercent(ctx context.Context) (float64, error) {
+	pct, _, err := g.positionPercentCondition(ctx)
+	return pct, err
+}
+
+// positionPercentCondition reads the opening and reports any servo condition the arm attached to
+// the reading. A condition does NOT invalidate the value -- an overloaded servo answers correctly
+// while reporting that it is straining, which for a gripper is the evidence that it is holding
+// something. The flags travel as a response field rather than as an error precisely so they
+// survive the DoCommand boundary to a remote arm, where a typed error would not.
+func (g *so101Gripper) positionPercentCondition(ctx context.Context) (float64, string, error) {
 	res, err := g.servoDo(ctx, servocmd.CmdServoPosition, nil)
 	if err != nil {
-		return 0, err
+		return 0, "", err
 	}
 	pct, ok := servocmd.FloatArg(res, "percent")
 	if !ok {
-		return 0, fmt.Errorf("no position data available")
+		return 0, "", fmt.Errorf("no position data available")
 	}
-	return pct, nil
+	condition, _ := servocmd.ConditionArg(res)
+	return pct, condition, nil
 }
 
 // gripperSettleTimeoutMs bounds the wait for the gripper servo to stop moving. It replaces
@@ -341,8 +379,15 @@ func (g *so101Gripper) positionPercentCached(ctx context.Context) (float64, erro
 		return prev, nil
 	}
 
-	pct, err := g.positionPercent(ctx) // bus read, jawMu NOT held
+	pct, condition, err := g.positionPercentCondition(ctx) // bus read, jawMu NOT held
 	if err != nil {
+		// A read that fails outright can still be a condition on an older arm that has not
+		// adopted the condition field; keep believing it.
+		if isOverload(err) {
+			g.jawMu.Lock()
+			g.jawConditionSeen = true
+			g.jawMu.Unlock()
+		}
 		if havePrev {
 			g.logger.Warnf("jaw position read failed, serving last known good %.1f%%: %v", prev, err)
 			return prev, nil
@@ -359,6 +404,7 @@ func (g *so101Gripper) positionPercentCached(ctx context.Context) (float64, erro
 	// covered here at all; it can still stamp a mid-flight value, bounded by the TTL to 50ms). What
 	// this guard actually covers is the narrow window between a move's last servoDo and the
 	// caller's isMoving.Store(false) defer.
+	g.jawConditionSeen = condition != ""
 	if g.jawGen == gen && !g.isMoving.Load() {
 		g.jawPct, g.jawReadAt, g.jawHaveRead = pct, g.now(), true
 	}
@@ -402,6 +448,144 @@ func isHoldingAt(actualPct, commandedPct float64) bool {
 	return math.Abs(actualPct-commandedPct) > graspThresholdPct
 }
 
+// isOverload reports whether err is a servo condition surfacing as an error rather than as data.
+//
+// This is now a COMPATIBILITY path, not the primary one. Since feetech v0.7.0 a condition no
+// longer costs the reading: internal/controller keeps the value and reports the flags, and
+// servocmd carries them in the response's condition field (servocmd.ConditionKey), which is what
+// positionPercentCondition reads. That path works identically whether the arm is local or remote,
+// because a field survives the DoCommand boundary where a typed error does not.
+//
+// An error can still arrive carrying a condition when the arm this gripper depends on is a REMOTE
+// machine running an older build of this module -- one that predates the condition field and still
+// turns a status flag into a failure. Matching the rendered text is the only option there, since
+// the typed error was flattened to gRPC status text on the way over.
+//
+// Delete this once no supported arm build can still error on a condition.
+func isOverload(err error) bool {
+	if err == nil {
+		return false
+	}
+	var se *feetech.ServoError
+	if errors.As(err, &se) && se.Status&feetech.ErrOverload != 0 {
+		return true
+	}
+	var st feetech.StatusError
+	if errors.As(err, &st) && st&feetech.ErrOverload != 0 {
+		return true
+	}
+	return strings.Contains(err.Error(), "overload")
+}
+
+// updateHoldingLatch records whether the gripper is holding something, given the target a move was
+// just commanded to and any error that move produced. Callers must hold g.mu.
+//
+// The latch exists because neither available signal answers "am I holding?" on demand, as measured
+// on real hardware:
+//
+//   - Position is blind to thin objects. With a part genuinely held the jaw read 0.83% open --
+//     indistinguishable from an empty closed jaw, so no position threshold can see it.
+//   - Overload is unreliable as a grasp signal. Measured against an STS3215's stock protection
+//     registers, a hard clamp on a part draws only ~40% torque while overload_torque trips at 80%,
+//     so a normal grip never raises the flag at all. When it does fire it is a level, not an edge:
+//     it tracks the standing condition and clears when the goal is released, not when the servo
+//     settles. So it is corroborating evidence at best, never the primary signal.
+//
+// So holding is established at command time and held until something releases it.
+// refreshHoldingLatch upgrades the latch when evidence of a grasp arrives after the move that
+// caused it has already completed.
+//
+// The STS3215 raises overload only after protection_time -- 2 seconds of sustained strain -- so a
+// close that lands on an object looks entirely normal at the instant motion stops: the position
+// read succeeds and shows the jaw at its target. The evidence appears seconds later, long after
+// updateHoldingLatch has decided. Measured on hardware: Grab returned false, and the servo was
+// overloaded one second afterwards and stayed that way.
+//
+// So a condition observed on any later read, while the last thing commanded was a close, latches
+// the grasp retroactively. Callers must hold g.mu.
+// latchNeedsFreshRead reports whether a bus read could still change the latch, in either
+// direction: a close whose grasp has not shown up yet, or an open whose release could not be
+// confirmed because the servo was still straining when the move finished. Takes g.mu itself, so
+// callers must not hold it.
+func (g *so101Gripper) latchNeedsFreshRead() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if !g.haveCommanded {
+		return false
+	}
+	closing := g.lastCommandedPct-g.closedPosition <= graspThresholdPct
+	if closing {
+		return !g.holdingLatched // a grasp may still appear
+	}
+	return g.holdingLatched // an open may still turn out to have released
+}
+
+func (g *so101Gripper) refreshHoldingLatch() {
+	if !g.haveCommanded {
+		return
+	}
+	g.jawMu.Lock()
+	seen, pct, havePct := g.jawConditionSeen, g.jawPct, g.jawHaveRead
+	g.jawMu.Unlock()
+
+	closing := g.lastCommandedPct-g.closedPosition <= graspThresholdPct
+
+	// A close whose grasp only became visible later.
+	if closing && !g.holdingLatched && seen {
+		g.logger.Infof("jaw reported a servo condition after closing to %.1f%%: latching a grasp",
+			g.lastCommandedPct)
+		g.holdingLatched = true
+		return
+	}
+
+	// An open whose release could not be confirmed at the time. Opening away from a clamped part
+	// keeps the servo straining until the grip actually lets go, so updateHoldingLatch's read
+	// fails and it cannot clear the latch. Once the strain is gone and the jaw is demonstrably
+	// open, the part is released -- otherwise the gripper stays latched with an empty open jaw and
+	// refuses every planner command, which is what happened on hardware.
+	if !closing && g.holdingLatched && !seen && havePct && pct-g.closedPosition > graspThresholdPct {
+		g.logger.Infof("jaw open at %.1f%% with no strain: clearing the grasp latch", pct)
+		g.holdingLatched = false
+	}
+}
+
+func (g *so101Gripper) updateHoldingLatch(ctx context.Context, commandedPct float64, moveErr error) {
+	closing := commandedPct-g.closedPosition <= graspThresholdPct
+
+	// Overload during a close is a grasp, and for a thin object it is the ONLY evidence there is.
+	// During an open it means something is obstructing the jaw, which is not a grasp.
+	if isOverload(moveErr) {
+		if closing {
+			g.logger.Warnf("jaw overloaded closing to %.1f%%: treating as a grasp, not re-commanding", commandedPct)
+			g.holdingLatched = true
+		} else {
+			g.logger.Warnf("jaw overloaded opening to %.1f%%: obstructed, not re-commanding", commandedPct)
+		}
+		return
+	}
+	if moveErr != nil {
+		return // some other failure: no new evidence either way, leave the latch alone
+	}
+
+	actual, err := g.positionPercent(ctx)
+	if err != nil {
+		if isOverload(err) && closing {
+			g.logger.Warnf("jaw overloaded after closing to %.1f%%: treating as a grasp", commandedPct)
+			g.holdingLatched = true
+		}
+		return
+	}
+
+	switch {
+	case closing && isHoldingAt(actual, commandedPct):
+		// Told to close, stopped short: something is between the fingers.
+		g.holdingLatched = true
+	case !closing && !isHoldingAt(actual, commandedPct) && actual-g.closedPosition > graspThresholdPct:
+		// Opened past the grasp threshold and reached the target: whatever was held is released.
+		g.holdingLatched = false
+	}
+}
+
 func (g *so101Gripper) Grab(ctx context.Context, extra map[string]interface{}) (bool, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -415,25 +599,17 @@ func (g *so101Gripper) Grab(ctx context.Context, extra map[string]interface{}) (
 		return false, fmt.Errorf("failed to close gripper: %w", err)
 	}
 
-	currentPercent, err := g.positionPercent(ctx)
-	if err != nil {
-		g.logger.Warnf("Failed to read gripper position after grab: %v", err)
-		// Deliberately optimistic: the move itself succeeded, only the confirming read failed, so
-		// assume the grab landed rather than reporting false and risking a caller releasing a real
-		// part. IsHoldingSomething instead returns the error -- it has no "the move worked" signal
-		// to fall back on.
-		return true, nil
-	}
-
-	grabbed := isHoldingAt(currentPercent, g.closedPosition)
-
+	// moveToPercent already settled the latch via updateHoldingLatch, using both signals: the jaw
+	// stopping short of closed, and an overload while clamping. Reading it back here rather than
+	// re-deriving it is what keeps Grab and IsHoldingSomething from disagreeing -- on hardware they
+	// once returned true and false for the same physical grasp, one instant apart, because Grab was
+	// optimistic about a failed read while IsHoldingSomething served a stale position.
+	grabbed := g.holdingLatched
 	if grabbed {
-		g.logger.Debugf("Gripper successfully grabbed an object (position difference: %.1f%%)",
-			currentPercent-g.closedPosition)
+		g.logger.Debug("Gripper grabbed an object")
 	} else {
 		g.logger.Debug("Gripper closed but may not have grabbed anything")
 	}
-
 	return grabbed, nil
 }
 
@@ -579,6 +755,16 @@ func (g *so101Gripper) DoCommand(ctx context.Context, cmd map[string]interface{}
 		err := g.moveToPercent(ctx, targetPercent, servocmd.WaitArg(cmd))
 		return map[string]interface{}{"success": err == nil}, err
 
+	case "get_load":
+		// Exists purely to make the raw signed load register sample-able (e.g. from the CLI).
+		// Not used to infer whether the gripper is holding something.
+		res, err := g.servoDo(ctx, servocmd.CmdServoLoad, nil)
+		if err != nil {
+			return nil, err
+		}
+		load, _ := servocmd.NumArg(res, "load")
+		return map[string]interface{}{"load": load}, nil
+
 	case "controller_status":
 		// The arm owns the controller now, so forward and re-shape to this component's
 		// documented keys.
@@ -716,12 +902,11 @@ func (g *so101Gripper) GoToInputs(ctx context.Context, inputSteps ...[]reference
 		return nil
 	}
 
-	// Not g.IsHoldingSomething: that method takes g.mu itself to read lastCommandedPct safely, and
-	// g.mu is already held here -- calling it would self-deadlock. Read g.lastCommandedPct/
-	// g.haveCommanded directly (safe: moveToPercent's writer also takes g.mu) against the pct
-	// already fetched above. No prior command means no evidence of obstruction -- don't refuse.
+	// The latch, not a live read (see updateHoldingLatch). Not g.IsHoldingSomething either: that
+	// takes g.mu itself and g.mu is already held here, so calling it would self-deadlock.
 	final := inputSteps[len(inputSteps)-1][0]
-	if g.haveCommanded && isHoldingAt(current, g.lastCommandedPct) {
+	g.refreshHoldingLatch()
+	if g.holdingLatched {
 		g.logger.Infof("refusing planner jaw command while holding: current %.4f rad, requested %.4f rad",
 			currentRad, final)
 		return fmt.Errorf(
@@ -763,15 +948,21 @@ func (g *so101Gripper) Kinematics(ctx context.Context) (referenceframe.Model, er
 func (g *so101Gripper) IsHoldingSomething(
 	ctx context.Context, extra map[string]interface{},
 ) (gripper.HoldingStatus, error) {
-	pct, err := g.positionPercentCached(ctx)
-	if err != nil {
-		return gripper.HoldingStatus{}, err
+	// Reads the latch rather than the servo: holding is established when a command completes and
+	// stays true until something opens the jaw. Querying position here produced both live failures
+	// -- an open empty jaw reporting held, and a clamped part reporting free while the servo was
+	// overloaded and every read was failing.
+	// When a grasp could still be pending -- not yet latched, and the last thing commanded was a
+	// close -- force a fresh read rather than trusting the cache. The whole point is to notice a
+	// condition that appeared AFTER the move completed, and a cached value from before it would
+	// hide exactly that. Otherwise the cached path is fine and this costs nothing.
+	if g.latchNeedsFreshRead() {
+		g.invalidateJawCache()
 	}
+	_, _ = g.positionPercentCached(ctx)
+
 	g.mu.Lock()
-	commanded, have := g.lastCommandedPct, g.haveCommanded
-	g.mu.Unlock()
-	if !have {
-		return gripper.HoldingStatus{IsHoldingSomething: false}, nil
-	}
-	return gripper.HoldingStatus{IsHoldingSomething: isHoldingAt(pct, commanded)}, nil
+	defer g.mu.Unlock()
+	g.refreshHoldingLatch()
+	return gripper.HoldingStatus{IsHoldingSomething: g.holdingLatched}, nil
 }

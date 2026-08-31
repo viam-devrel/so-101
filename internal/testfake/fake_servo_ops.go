@@ -1,6 +1,10 @@
 package testfake
 
-import "context"
+import (
+	"context"
+
+	"github.com/hipsterbrown/feetech-servo/feetech"
+)
 
 // FakeServoOps records the single-servo operations servocmd.HandleServoCommand dispatches, so
 // the servo_* DoCommand protocol can be tested without a serial bus. It implements
@@ -14,15 +18,22 @@ type FakeServoOps struct {
 	WaitedIDs    []int
 	WaitedMs     int
 
-	Percent  float64
-	Raw      int
-	MoveErr  error
-	PosErr   error
-	MoveRaws []int
+	Percent float64
+	Raw     int
+	// Condition, LoadCondition and MovingCondition are servo condition flags returned alongside
+	// a good reading, the way an overloaded servo reports while still answering correctly.
+	Condition       feetech.StatusError
+	LoadCondition   feetech.StatusError
+	MovingCondition feetech.StatusError
+	MoveErr         error
+	PosErr          error
+	MoveRaws        []int
 
 	Moving    bool
 	MovingErr error
 	MovingIDs []int
+	Load      int
+	LoadErr   error
 }
 
 func (f *FakeServoOps) MoveServoPercent(_ context.Context, id int, percent float64, speed int) error {
@@ -36,11 +47,11 @@ func (f *FakeServoOps) MoveServoRaw(_ context.Context, id, raw int) error {
 	return f.MoveErr
 }
 
-func (f *FakeServoOps) ServoPositionPercent(_ context.Context, id int) (float64, int, error) {
+func (f *FakeServoOps) ServoPositionPercent(_ context.Context, id int) (float64, int, feetech.StatusError, error) {
 	if f.PosErr != nil {
-		return 0, 0, f.PosErr
+		return 0, 0, 0, f.PosErr
 	}
-	return f.Percent, f.Raw, nil
+	return f.Percent, f.Raw, f.Condition, nil
 }
 
 func (f *FakeServoOps) StopServo(_ context.Context, id int) error {
@@ -53,7 +64,17 @@ func (f *FakeServoOps) WaitForServosToStop(_ context.Context, ids []int, timeout
 	return nil
 }
 
-func (f *FakeServoOps) AnyServoMoving(_ context.Context, ids []int) (bool, error) {
+func (f *FakeServoOps) AnyServoMoving(_ context.Context, ids []int) (bool, feetech.StatusError, error) {
 	f.MovingIDs = ids
-	return f.Moving, f.MovingErr
+	if f.MovingErr != nil {
+		return false, 0, f.MovingErr
+	}
+	return f.Moving, f.MovingCondition, nil
+}
+
+func (f *FakeServoOps) ServoLoad(_ context.Context, id int) (int, feetech.StatusError, error) {
+	if f.LoadErr != nil {
+		return 0, 0, f.LoadErr
+	}
+	return f.Load, f.LoadCondition, nil
 }

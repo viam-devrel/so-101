@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/hipsterbrown/feetech-servo/feetech"
 	"github.com/stretchr/testify/assert"
@@ -78,6 +79,60 @@ func TestSyncReadPositionsDecodesInsideTheHandle(t *testing.T) {
 		"decoding belongs inside the handle; exposing Protocol() would re-leak the bus")
 }
 
+func TestServoLoadReadsPresentLoadRegister(t *testing.T) {
+	ft := testfake.NewFakeTransport()
+	// Load is little-endian sign-magnitude at RegPresentLoad; encode +50.
+	ft.SetRegister(6, feetech.RegPresentLoad.Address, testfake.EncodeWordLE(50))
+	h := testHandle(t, ft)
+
+	load, condition, err := h.ServoLoad(context.Background(), 6)
+	require.NoError(t, err)
+	assert.Equal(t, 50, load)
+	assert.Zero(t, condition, "a healthy servo reports no condition")
+}
+
+// TestServoReadsSurviveAConditionFlag is the point of adopting ConditionStatus. An overloaded
+// servo answers correctly and sets a status flag; the old code turned that into a bare error and
+// threw the reading away, leaving callers blind exactly when something interesting was happening.
+func TestServoReadsSurviveAConditionFlag(t *testing.T) {
+	ft := testfake.NewFakeTransport()
+	ft.SetRegister(6, feetech.RegPresentLoad.Address, testfake.EncodeWordLE(404))
+	ft.SetStatus(6, feetech.ErrOverload)
+	h := testHandle(t, ft)
+
+	load, condition, err := h.ServoLoad(context.Background(), 6)
+	require.NoError(t, err, "a condition must not be reported as a failed read")
+	assert.Equal(t, 404, load, "the reading is valid and must survive")
+	assert.NotZero(t, condition&feetech.ErrOverload, "and the condition must be reported alongside it")
+
+	_, _, posCondition, err := h.ServoPositionPercent(context.Background(), 6)
+	require.NoError(t, err, "position reads must survive a condition too")
+	assert.NotZero(t, posCondition&feetech.ErrOverload)
+
+	// The batched Moving read is the one every blocking move polls. It used to discard the
+	// reading too, which is why WaitForServosToStop needed a wrapper treating an overload as
+	// "assume still moving" and ran to its full timeout on a jaw that had already stopped.
+	ft.SetRegister(6, feetech.RegMoving.Address, []byte{1})
+	moving, movingCondition, err := h.AnyServoMoving(context.Background(), []int{6})
+	require.NoError(t, err, "moving reads must survive a condition too")
+	assert.True(t, moving, "the Moving bit is valid and must survive")
+	assert.NotZero(t, movingCondition&feetech.ErrOverload)
+}
+
+// A clamping servo sets its overload flag while answering normally. The wait must end when the
+// servo actually stops, not when the caller's timeout expires -- that timeout is seconds, and it
+// used to be the only thing ending an Open or Grab that overloaded.
+func TestWaitForServosToStopEndsOnAStoppedServoDespiteACondition(t *testing.T) {
+	ft := testfake.NewFakeTransport()
+	ft.SetRegister(6, feetech.RegMoving.Address, []byte{0})
+	ft.SetStatus(6, feetech.ErrOverload)
+	h := testHandle(t, ft)
+
+	start := time.Now()
+	require.NoError(t, h.WaitForServosToStop(context.Background(), []int{6}, 5000))
+	assert.Less(t, time.Since(start), 2*time.Second, "must not wait out the 5s timeout")
+}
+
 func TestPingServoReachesOneServo(t *testing.T) {
 	h := testHandle(t, testfake.NewFakeTransport())
 	model, err := h.PingServo(context.Background(), 3)
@@ -93,7 +148,7 @@ func TestServoPresentReportsConfiguredServos(t *testing.T) {
 
 func TestAnyServoMovingReportsFalseWhenAllStopped(t *testing.T) {
 	h := testHandle(t, testfake.NewFakeTransport())
-	moving, err := h.AnyServoMoving(context.Background(), []int{1, 2, 3})
+	moving, _, err := h.AnyServoMoving(context.Background(), []int{1, 2, 3})
 	require.NoError(t, err)
 	assert.False(t, moving)
 }
@@ -103,7 +158,7 @@ func TestAnyServoMovingReportsTrueWhenOneIsMoving(t *testing.T) {
 	ft.SetRegister(2, feetech.RegMoving.Address, []byte{1})
 	h := testHandle(t, ft)
 
-	moving, err := h.AnyServoMoving(context.Background(), []int{1, 2, 3})
+	moving, _, err := h.AnyServoMoving(context.Background(), []int{1, 2, 3})
 	require.NoError(t, err)
 	assert.True(t, moving)
 }

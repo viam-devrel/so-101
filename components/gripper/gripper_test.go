@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hipsterbrown/feetech-servo/feetech"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.viam.com/rdk/components/arm"
@@ -100,6 +101,14 @@ type fakeServoArm struct {
 	onServoMoving  func()         // called on a servo_moving command, before it is answered
 	onRead         func()         // invoked (outside f.mu) after a servo_position command, if set
 	onMove         func()         // invoked (outside f.mu) after a servo_move command, if set
+	// readErr fails only register READS, leaving writes to succeed. That is what an overloaded
+	// STS3215 actually does: reads come back as a status error while a commanded move still takes
+	// effect (observed on hardware -- a torque-enable and a goal write both reported overload and
+	// both moved the jaw).
+	readErr error
+	// condition is attached to a successful servo_position response, the way an overloaded
+	// servo answers correctly while reporting that it is straining.
+	condition string
 }
 
 func newFakeServoArm() *fakeServoArm {
@@ -133,7 +142,16 @@ func (f *fakeServoArm) DoCommand(_ context.Context, cmd map[string]any) (map[str
 	var resp map[string]any
 	switch cmd["command"] {
 	case servocmd.CmdServoPosition:
-		hook, resp = f.onRead, map[string]any{"percent": f.percent, "raw": f.raw}
+		if f.readErr != nil {
+			err := f.readErr
+			f.mu.Unlock()
+			return nil, err
+		}
+		resp = map[string]any{"percent": f.percent, "raw": f.raw}
+		if f.condition != "" {
+			resp[servocmd.ConditionKey] = f.condition
+		}
+		hook = f.onRead
 	case servocmd.CmdServoMoving:
 		if f.movingResponse != nil {
 			resp = f.movingResponse
@@ -280,8 +298,13 @@ func TestGripperOpenCommandsServoAndWaits(t *testing.T) {
 
 	require.NoError(t, g.Open(context.Background(), nil))
 
-	assert.Equal(t, []string{servocmd.CmdServoMove, servocmd.CmdServoWaitStop}, fa.issued(),
-		"Open should command the servo then wait for it to settle")
+	// The trailing servo_position is the latch's confirming read: moveToPercent must learn whether
+	// the jaw reached its target to decide whether something is between the fingers. One extra bus
+	// read per move is the accepted cost -- moves are user-initiated, unlike the continuous polling
+	// the position cache exists to bound.
+	assert.Equal(t,
+		[]string{servocmd.CmdServoMove, servocmd.CmdServoWaitStop, servocmd.CmdServoPosition},
+		fa.issued(), "Open should command the servo, wait for it to settle, then confirm position")
 
 	move := fa.lastCommand(servocmd.CmdServoMove)
 	assert.Equal(t, 6, move["servo_id"])
@@ -434,6 +457,49 @@ func TestGripperDrivesRealDispatcherEndToEnd(t *testing.T) {
 	got, err := g.DoCommand(context.Background(), map[string]any{"command": "get_position"})
 	require.NoError(t, err)
 	assert.Equal(t, 12.5, got["position_percentage"])
+}
+
+// TestGripperGetLoadReturnsRawSignedLoad drives the real servocmd dispatcher (not the
+// fakeServoArm) end to end, same as TestGripperDrivesRealDispatcherEndToEnd, to prove get_load
+// actually connects through servo_load rather than just being wired against a mock.
+func TestGripperGetLoadReturnsRawSignedLoad(t *testing.T) {
+	ops := &testfake.FakeServoOps{Load: -412}
+	da := &dispatchingArm{name: arm.Named("real-dispatch"), ops: ops}
+	deps := resource.Dependencies{da.name: da}
+	conf := resource.Config{
+		Name:                "gripper",
+		API:                 gripper.API,
+		Model:               SO101GripperModel,
+		ConvertedAttributes: &SO101GripperConfig{Arm: da.name.Name},
+	}
+	res, err := newSO101Gripper(context.Background(), deps, conf, logging.NewTestLogger(t))
+	require.NoError(t, err)
+	g := res.(*so101Gripper)
+
+	got, err := g.DoCommand(context.Background(), map[string]any{"command": "get_load"})
+	require.NoError(t, err)
+	assert.Equal(t, -412, got["load"])
+}
+
+// TestGripperGetLoadPropagatesError proves a servo_load failure surfaces to the caller rather
+// than being swallowed.
+func TestGripperGetLoadPropagatesError(t *testing.T) {
+	boom := errors.New("bus is on fire")
+	ops := &testfake.FakeServoOps{LoadErr: boom}
+	da := &dispatchingArm{name: arm.Named("real-dispatch"), ops: ops}
+	deps := resource.Dependencies{da.name: da}
+	conf := resource.Config{
+		Name:                "gripper",
+		API:                 gripper.API,
+		Model:               SO101GripperModel,
+		ConvertedAttributes: &SO101GripperConfig{Arm: da.name.Name},
+	}
+	res, err := newSO101Gripper(context.Background(), deps, conf, logging.NewTestLogger(t))
+	require.NoError(t, err)
+	g := res.(*so101Gripper)
+
+	_, err = g.DoCommand(context.Background(), map[string]any{"command": "get_load"})
+	require.ErrorIs(t, err, boom)
 }
 
 // Grab infers a grasp from position error. Under the old 500/3500 default an *empty* jaw
@@ -782,10 +848,22 @@ func TestRawSetPositionClearsCommandedTarget(t *testing.T) {
 	})
 	require.NoError(t, err)
 
+	// The latch deliberately SURVIVES a raw set_position. A raw tick target is opaque -- it may be
+	// an open or a close -- so there is no evidence either way, and clearing the latch on no
+	// evidence would silently disable the grasp-retention guard while a part is still held.
+	// Erring toward "still holding" costs a refused jaw command; erring the other way drops the
+	// part. Open is the documented way to release.
 	st, err = g.IsHoldingSomething(ctx, nil)
 	require.NoError(t, err)
-	assert.False(t, st.IsHoldingSomething,
-		"a raw set_position clears the commanded target; with no evidence, report not holding")
+	assert.True(t, st.IsHoldingSomething,
+		"an opaque raw command is not evidence of release; the latch must persist")
+
+	// ...and Open clears it.
+	fa.percent = 95
+	require.NoError(t, g.Open(ctx, nil))
+	st, err = g.IsHoldingSomething(ctx, nil)
+	require.NoError(t, err)
+	assert.False(t, st.IsHoldingSomething, "Open releases, so the latch must clear")
 }
 
 // TestCurrentInputsSurvivesReadFailure: framesystem.CurrentInputs hard-errors the entire machine's
@@ -986,4 +1064,246 @@ func TestOpenDoesNotDeadlock(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Open deadlocked: cache invalidation must not take g.mu")
 	}
+}
+
+// overloadErr builds the error a Feetech servo returns while straining past its torque limit.
+// Two shapes, because both reach the gripper in practice: the typed feetech.ServoError when the
+// arm is a local dependency, and a flattened string when the arm is remote and the error has
+// crossed the servocmd DoCommand boundary as gRPC status text.
+func overloadErrTyped() error {
+	return &feetech.ServoError{ID: 6, Op: "read position", Status: feetech.ErrOverload}
+}
+
+func overloadErrRemote() error {
+	return errors.New("failed to read position for servo 6: servo status error: [overload]")
+}
+
+// TestGraspLatchOverloadOnThinObject is the case the whole latch exists for, and the one position
+// alone can never see. Measured on hardware: with a part genuinely held the jaw read 0.83% open --
+// indistinguishable from an empty closed jaw -- while the servo reported overload. Inferring from
+// position said "not holding" and silently disabled the grasp-retention guard.
+func TestGraspLatchOverloadOnThinObject(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"local arm, typed error", overloadErrTyped()},
+		{"remote arm, flattened string", overloadErrRemote()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fa := newFakeServoArm()
+			g := newTestGripper(t, fa)
+
+			// The jaw closes onto a thin part: it reaches ~0.8%, looking fully closed, and the
+			// servo overloads clamping it. Fail the confirming read the way the servo does.
+			fa.percent = 0.83
+			fa.onMove = func() { fa.setErr(tc.err) }
+
+			grabbed, err := g.Grab(ctx, nil)
+			require.NoError(t, err)
+			assert.True(t, grabbed, "an overloading close is a grasp, even at a closed-looking reading")
+
+			fa.setErr(nil)
+			st, err := g.IsHoldingSomething(ctx, nil)
+			require.NoError(t, err)
+			assert.True(t, st.IsHoldingSomething, "the latch must survive the overload clearing")
+			assert.Equal(t, grabbed, st.IsHoldingSomething, "Grab and IsHoldingSomething must agree")
+		})
+	}
+}
+
+// TestGraspLatchClearedByOpen is the live false positive: an open, empty jaw must not read as
+// holding. Before the latch, any jaw more than graspThresholdPct from closed reported held, which
+// refused every subsequent command including one to close again.
+func TestGraspLatchClearedByOpen(t *testing.T) {
+	ctx := context.Background()
+	fa := newFakeServoArm()
+	g := newTestGripper(t, fa)
+
+	// Establish a real grasp first.
+	fa.percent = 40
+	_, err := g.Grab(ctx, nil)
+	require.NoError(t, err)
+	st, _ := g.IsHoldingSomething(ctx, nil)
+	require.True(t, st.IsHoldingSomething, "sanity: a close that stops short is a grasp")
+
+	// Now open. The jaw reaches its target, so nothing is held.
+	fa.percent = 95
+	require.NoError(t, g.Open(ctx, nil))
+	st, err = g.IsHoldingSomething(ctx, nil)
+	require.NoError(t, err)
+	assert.False(t, st.IsHoldingSomething, "an open that reaches its target releases whatever was held")
+}
+
+// TestGraspLatchNotSetByCloseThatReaches: an empty jaw closing all the way holds nothing.
+func TestGraspLatchNotSetByCloseThatReaches(t *testing.T) {
+	ctx := context.Background()
+	fa := newFakeServoArm()
+	g := newTestGripper(t, fa)
+
+	fa.percent = 0
+	grabbed, err := g.Grab(ctx, nil)
+	require.NoError(t, err)
+	assert.False(t, grabbed, "closing onto nothing is not a grasp")
+	st, _ := g.IsHoldingSomething(ctx, nil)
+	assert.False(t, st.IsHoldingSomething)
+	assert.Equal(t, grabbed, st.IsHoldingSomething, "Grab and IsHoldingSomething must agree")
+}
+
+// TestGraspLatchRefusesPlannerJawCommand closes the loop: a latched grasp must make GoToInputs
+// refuse, which is the safety property the whole feature exists to provide.
+func TestGraspLatchRefusesPlannerJawCommand(t *testing.T) {
+	ctx := context.Background()
+	fa := newFakeServoArm()
+	g := newTestGripperWithConfig(t, fa, SO101GripperConfig{ArticulatedJaw: true})
+
+	// Thin part: closes to a closed-looking reading, overloads while clamping.
+	fa.percent = 0.83
+	fa.onMove = func() { fa.setErr(overloadErrTyped()) }
+	grabbed, err := g.Grab(ctx, nil)
+	require.NoError(t, err)
+	require.True(t, grabbed)
+	fa.setErr(nil)
+	fa.onMove = nil
+
+	moves := countCommands(fa, servocmd.CmdServoMove)
+	err = g.GoToInputs(ctx, []referenceframe.Input{geometry.GripperJointMax})
+	require.Error(t, err, "a latched grasp must refuse a planner jaw command")
+	assert.Contains(t, err.Error(), "holding")
+	assert.Equal(t, moves, countCommands(fa, servocmd.CmdServoMove),
+		"a refused batch must not have moved the jaw")
+
+	// Releasing clears the latch and unblocks the planner again.
+	fa.percent = 95
+	require.NoError(t, g.Open(ctx, nil))
+	assert.NoError(t, g.GoToInputs(ctx, []referenceframe.Input{geometry.JawRadiansFromPct(50)}),
+		"once released, planner jaw commands must work again")
+}
+
+// TestGraspLatchUpgradesOnLateOverload is the hardware case that motivated refreshHoldingLatch.
+// An STS3215 raises overload only after protection_time -- 2s of sustained strain -- so a close
+// that lands on an object looks normal at the instant motion stops: the position read succeeds and
+// shows the jaw at its target. The evidence arrives seconds later, after the latch has already
+// been decided. Measured on a real gripper: Grab returned false, and the servo was overloaded one
+// second afterwards and stayed that way.
+func TestGraspLatchUpgradesOnLateOverload(t *testing.T) {
+	ctx := context.Background()
+	fa := newFakeServoArm()
+	// The jaw reaches its commanded target, so nothing looks wrong when the move completes.
+	fa.percent = 0
+	g := newTestGripper(t, fa)
+
+	grabbed, err := g.Grab(ctx, nil)
+	require.NoError(t, err)
+	require.False(t, grabbed, "at decision time the jaw is at target -- nothing to see yet")
+
+	st, err := g.IsHoldingSomething(ctx, nil)
+	require.NoError(t, err)
+	require.False(t, st.IsHoldingSomething)
+
+	// Now the servo starts reporting overload, as it does once protection_time elapses.
+	fa.setErr(overloadErrTyped())
+
+	st, err = g.IsHoldingSomething(ctx, nil)
+	require.NoError(t, err, "a condition must not surface as an error here")
+	assert.True(t, st.IsHoldingSomething,
+		"an overload appearing after the close must latch the grasp retroactively")
+}
+
+// TestGraspLatchIgnoresLateOverloadAfterOpening: straining while OPENING is obstruction, not a
+// grasp, and must not latch -- otherwise a jaw jammed on the way open reports holding forever.
+func TestGraspLatchIgnoresLateOverloadAfterOpening(t *testing.T) {
+	ctx := context.Background()
+	fa := newFakeServoArm()
+	fa.percent = 95
+	g := newTestGripper(t, fa)
+
+	require.NoError(t, g.Open(ctx, nil))
+	fa.setErr(overloadErrTyped())
+
+	st, err := g.IsHoldingSomething(ctx, nil)
+	require.NoError(t, err)
+	assert.False(t, st.IsHoldingSomething,
+		"the last command opened the jaw, so straining is obstruction rather than a grasp")
+}
+
+// TestGraspLatchClearsAfterStrainedOpen is the other half of the retroactive latch, and the case
+// that stranded a real gripper. Opening away from a clamped part keeps the servo straining until
+// the grip lets go, so the read taken when the move finishes still fails and updateHoldingLatch
+// cannot clear the latch. Measured on hardware: after Open the jaw sat at 94.75% with isHolding
+// still true, and every planner jaw command was refused with an empty, open jaw.
+func TestGraspLatchClearsAfterStrainedOpen(t *testing.T) {
+	ctx := context.Background()
+	fa := newFakeServoArm()
+	g := newTestGripper(t, fa)
+
+	// Establish a grasp the way hardware does: close, condition appears afterwards.
+	fa.percent = 0
+	_, err := g.Grab(ctx, nil)
+	require.NoError(t, err)
+	fa.setReadErr(overloadErrTyped())
+	st, err := g.IsHoldingSomething(ctx, nil)
+	require.NoError(t, err)
+	require.True(t, st.IsHoldingSomething, "sanity: the late overload must have latched a grasp")
+
+	// Open while still straining -- the read fails, so the move cannot confirm the release.
+	require.NoError(t, g.Open(ctx, nil))
+	st, err = g.IsHoldingSomething(ctx, nil)
+	require.NoError(t, err)
+	assert.True(t, st.IsHoldingSomething, "still straining, release unconfirmed -- stay latched")
+
+	// The grip lets go: strain gone, jaw demonstrably open.
+	fa.setReadErr(nil)
+	fa.percent = 95
+
+	st, err = g.IsHoldingSomething(ctx, nil)
+	require.NoError(t, err)
+	assert.False(t, st.IsHoldingSomething,
+		"an unstrained, open jaw has released whatever it held")
+}
+
+func (f *fakeServoArm) setReadErr(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.readErr = err
+}
+
+func (f *fakeServoArm) setCondition(c string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.condition = c
+}
+
+// TestGraspLatchFromConditionField is the adopted path: an overloaded servo answers correctly and
+// reports its condition as a response field, rather than the read failing. That field must drive
+// the retroactive grasp latch exactly as a failed read used to -- otherwise adopting
+// ConditionStatus silently disables grasp detection while every fake-driven test keeps passing.
+func TestGraspLatchFromConditionField(t *testing.T) {
+	ctx := context.Background()
+	fa := newFakeServoArm()
+	fa.percent = 0 // the jaw reaches its target: nothing looks wrong when the move completes
+	g := newTestGripper(t, fa)
+
+	_, err := g.Grab(ctx, nil)
+	require.NoError(t, err)
+	st, err := g.IsHoldingSomething(ctx, nil)
+	require.NoError(t, err)
+	require.False(t, st.IsHoldingSomething, "nothing to see yet")
+
+	// The servo starts reporting overload -- reads still succeed, they just carry the flag.
+	fa.setCondition("overload")
+
+	st, err = g.IsHoldingSomething(ctx, nil)
+	require.NoError(t, err, "a condition is data, not an error")
+	assert.True(t, st.IsHoldingSomething,
+		"a condition reported alongside a good reading must latch the grasp")
+
+	// And it clears once the jaw is open and unstrained.
+	fa.setCondition("")
+	fa.percent = 95
+	require.NoError(t, g.Open(ctx, nil))
+	st, err = g.IsHoldingSomething(ctx, nil)
+	require.NoError(t, err)
+	assert.False(t, st.IsHoldingSomething, "unstrained and open means released")
 }

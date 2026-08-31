@@ -484,6 +484,18 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
   identically to euler, but which the viewer rendered wrong (the gripper's jaw branch splayed off
   at a bad angle). Every orientation in `so101.json` is `euler_angles`. Convert with
   `.Orientation().EulerAngles()` before encoding; `TestJawMountOrientationIsEuler` guards it.
+- **A servo condition is data, not an error.** Since `feetech` v0.7.0, `ConditionStatus(err)`
+  reports condition flags (overload, overheat, voltage) and tells you whether the payload alongside
+  them is usable — it is, for conditions; it is not for transport failures or request-rejection
+  flags (checksum/instruction/range). `internal/controller` keeps the reading and passes the flags
+  on; `internal/servocmd` carries them in a `condition` response field, **not** as an error, because
+  a typed error does not survive the DoCommand boundary to a remote arm and a field does. Never
+  infer a condition from error text in new code — `components/gripper`'s `isOverload` is a
+  compatibility path for older remote arms only. All three read paths do this —
+  `ServoPositionPercent`, `ServoLoad`, and the batched `AnyServoMoving` — which is why
+  `WaitForServosToStop` needs no "an overload means assume still moving" wrapper: it polls
+  `AnyServoMoving`, so a clamping servo's Moving bit is readable and the wait ends when the servo
+  stops instead of at the caller's multi-second timeout. Don't re-add the wrapper; fix the read.
 - **rdk rejects a joint input that exceeds a limit by even one ULP** (`input out of bounds`). A
   sweep computing `min + (range*i)/steps` overshoots by 2.22e-16 at `i == steps`, because `*` and
   `/` are left-associative. `GoToInputs` validates against a deliberately wide `geometry.JawLimitEpsilon`

@@ -77,13 +77,31 @@ whatever is held; a no-op command (the jaw's current angle, which is what most t
 carry) is never refused and never commands the servo, whether or not something is held — it may
 still issue a `servo_position` read on a cache miss.
 
-"Holding" is inferred by comparing the jaw's current reading against the last percent it was
-*commanded* to reach, not the closed position: if the jaw failed to get there by more than the
-grasp threshold, something must be blocking it, whichever direction it was moving. Comparing
-against the closed position instead is wrong — any merely open jaw then looks held — and did
-exactly that on real hardware until it was fixed. `IsHoldingSomething` follows the same rule and,
-like the guard above, reports NOT holding whenever nothing has been commanded yet (at startup, or
-right after a raw `set_position` in ticks), since there is no commanded target to compare against.
+**How "holding" is determined.** The gripper latches a grasp when a command completes, rather than
+inferring it from the jaw's position on demand. Two things measured on real hardware make the
+live inference impossible: a thin part held in the jaw reads ~0.8% open, indistinguishable from an
+empty closed jaw; and the servo's overload flag is not dependable -- a stock STS3215 trips
+overload at 80% torque while a hard clamp draws only ~40%, so a normal grip never raises it, and
+when it does fire it tracks the standing condition rather than marking a moment.
+
+So a close latches a grasp if the jaw stops short of its target or the servo overloads clamping,
+and an open that reaches its target clears it. An overload while closing is reported as success,
+not an error -- clamping is what a close is for. `Grab` returns the same latch
+`IsHoldingSomething` reads, so the two cannot disagree about one physical grasp.
+
+Nothing is latched until a command has completed, so a freshly configured gripper reports NOT
+holding until it is told to close. Two things deliberately leave an existing latch untouched
+rather than clearing it: a raw `set_position` (servo ticks), whose target is opaque and so is no
+evidence of release; and a non-blocking move (`wait: false`), which returns before the jaw has
+arrived anywhere. Dropping the latch on either would disable the grasp-retention guard while a
+part is still held. `Open` is the release.
+
+**Servo conditions appear as data, not failures.** `get_position` and `get_load` may include a
+`condition` field (for example `"overload"`) when the servo is reporting its own state — straining
+against a held object, overheating. A condition does **not** mean the reading is invalid: the servo
+answered correctly and is telling you why it is unhappy. It is also how a grasp on a thin object is
+detected at all, since such an object can close the jaw to a position indistinguishable from empty.
+The field is absent when there is nothing to report.
 
 ## Communication
 
@@ -167,9 +185,10 @@ serial bus.
 
 The flag has no effect on the raw `servo_position` form, which never waited.
 
-`Open()` and `Grab()` always wait and offer no way to opt out: `Grab()` reads the position
-back after closing to decide whether it caught anything, so sampling a jaw still in flight
-would break grab detection.
+`Open()` and `Grab()` always wait and offer no way to opt out: both settle the grasp latch from
+whether the jaw reached its target (see **How "holding" is determined** above), so sampling a jaw
+still in flight would break grasp detection. For the same reason `wait: false` leaves the latch
+untouched — the move has not arrived anywhere yet.
 
 The arm takes the same flag, but in the `extra` argument of `MoveToJointPositions`. No
 `DoCommand` has an `extra` parameter — the arm's included — so on the gripper's high-rate
@@ -203,6 +222,25 @@ Response:
 `set` clamps to 0–100 and takes the same `wait` key with the same `true` default as
 `set_position`. Unlike `set_position` it returns the clamped `position` rather than a
 `success` boolean, and it has no raw-tick form.
+### Get Load
+
+Read the servo's raw signed present-load register (sign-magnitude, not a percentage):
+
+```json
+{
+  "command": "get_load"
+}
+```
+
+Response:
+
+```json
+{
+  "load": -412
+}
+```
+
+This exists so load can be sampled (e.g. from the CLI) while investigating grasp behavior. It plays no part in the gripper's own holding decision -- see "Holding" above.
 
 ### Controller Status
 
