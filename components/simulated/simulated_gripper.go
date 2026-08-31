@@ -352,18 +352,6 @@ func (g *simulatedSO101Gripper) Kinematics(ctx context.Context) (referenceframe.
 	return g.model, nil
 }
 
-// jawLimitEpsilon tolerates a planner-issued input that lands just outside a joint limit due to
-// float rounding (e.g. left-associative (range*i)/steps in internal/geometry's angle sweep,
-// which overshoots by ~2.22e-16 -- one ULP -- at i==steps). rdk's frame system rejects an input
-// outside its limit by even that 1 ULP.
-//
-// 1e-6 is deliberately far wider than a ULP (about 4.5e9 ULP at GripperJointMax) -- it exists to
-// absorb ordinary float rounding, not to approximate machine precision, so do not "tighten" it
-// toward a literal ULP. What actually bounds the jaw is geometry.JawPctFromRadians's saturation
-// to 0/100 on conversion, not this epsilon's width: even a value at the edge of the tolerated
-// band converts to a fully-saturated percentage.
-const jawLimitEpsilon = 1e-6
-
 // CurrentInputs reports the jaw angle in radians. It is an error rather than a zero value when
 // articulated_jaw is off: robot/framesystem only asks components whose model has DoF, so being
 // asked at all while static means something is inconsistent.
@@ -426,22 +414,8 @@ func (g *simulatedSO101Gripper) GoToInputs(ctx context.Context, inputSteps ...[]
 	if !g.articulatedJaw {
 		return errors.ErrUnsupported
 	}
-	limits := g.model.DoF()
-	if len(limits) != 1 {
-		// Unreachable while articulatedJaw implies exactly 1 DoF, but the len(step) arity check
-		// below only protects against a mismatched step -- it does not protect indexing
-		// limits[0] when limits itself is empty (0 != 0 passes the arity check).
-		return fmt.Errorf("gripper jaw model has %d DoF, want exactly 1", len(limits))
-	}
-	jawLimits := limits[0]
-	for i, step := range inputSteps {
-		if len(step) != 1 {
-			return fmt.Errorf("step %d: got %d inputs, the jaw takes 1", i, len(step))
-		}
-		if step[0] < jawLimits.Min-jawLimitEpsilon || step[0] > jawLimits.Max+jawLimitEpsilon {
-			return fmt.Errorf("step %d: jaw angle %.6f rad is outside [%.6f, %.6f]",
-				i, step[0], jawLimits.Min, jawLimits.Max)
-		}
+	if err := geometry.ValidateJawSteps(g.model, inputSteps); err != nil {
+		return err
 	}
 
 	g.recordJawTrajectory(inputSteps)

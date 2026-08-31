@@ -10,6 +10,7 @@ import (
 	"math"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"go.viam.com/rdk/components/arm"
 	"go.viam.com/rdk/components/gripper"
@@ -43,6 +44,12 @@ type SO101GripperConfig struct {
 	// "low" (decimated, the default -- keeps motion planning fast) or "high"
 	// (full resolution).
 	MeshDetail string `json:"mesh_detail,omitempty"`
+
+	// ArticulatedJaw gives the gripper a 1-DoF revolute jaw joint in its kinematic model and makes
+	// it InputEnabled, so the motion planner sees the jaw as a variable it may drive. Off by
+	// default: the jaw does not affect the TCP, so the planner gains a degree of freedom that
+	// changes only collision geometry. See docs/gripper.md.
+	ArticulatedJaw bool `json:"articulated_jaw,omitempty"`
 }
 
 // Validate ensures all parts of the config are valid, and reports the arm as a required
@@ -82,22 +89,55 @@ type so101Gripper struct {
 	// arm owns the serial bus. The gripper drives its servo exclusively through this
 	// dependency's servo_* DoCommand family and holds no controller, port, or
 	// calibration state of its own.
-	arm         arm.Arm
-	logger      logging.Logger
-	gripperType string
-	meshDetail  string
-	servoID     int
-	model       referenceframe.Model
+	arm            arm.Arm
+	logger         logging.Logger
+	gripperType    string
+	meshDetail     string
+	servoID        int
+	model          referenceframe.Model
+	articulatedJaw bool
 
 	mu       sync.Mutex
 	isMoving atomic.Bool
+	// stopped latches when Stop interrupts an in-flight GoToInputs. Must be an atomic, not
+	// g.mu-guarded: Stop runs from another goroutine while GoToInputs holds g.mu, and sync.Mutex
+	// is not reentrant.
+	stopped atomic.Bool
 
 	// Gripper positions in percentage, 0-100%
 	openPosition   float64
 	closedPosition float64
 
+	// lastCommandedPct is the percent value the servo was last told to move to, via
+	// moveToPercent -- the choke point every percent-valued command passes through. It is the
+	// evidence isHoldingAt compares an actual reading against: a jaw that failed to reach where
+	// it was told to go is obstructed. haveCommanded distinguishes "never commanded" from a
+	// legitimate zero-valued command (0% is closed, a real target). Both are guarded by g.mu.
+	lastCommandedPct float64
+	haveCommanded    bool
+
 	speed        float32
 	acceleration float32
+
+	// jawMu guards the position cache ONLY. It is deliberately not g.mu: Open/Grab/DoCommand hold
+	// g.mu across moveToPercent, and sync.Mutex is not reentrant, so invalidating under g.mu would
+	// deadlock. jawMu is never held across a DoCommand -- a viewer poll must not block behind an
+	// Open sitting in servo_wait_stop.
+	jawMu sync.Mutex
+	// jawPct is the last known-good reading. It is meaningful only when jawHaveRead is true --
+	// 0 is itself a legal reading, so jawHaveRead (not a zero check here) is what distinguishes
+	// "never read" from "read zero".
+	jawPct float64
+	// jawReadAt is when jawPct was last refreshed from the bus; zero means "no fresh reading".
+	// invalidateJawCache zeroes this to force a re-read but deliberately leaves jawHaveRead set,
+	// so a dropped re-read can still fall back to the last known good jawPct.
+	jawReadAt time.Time
+	// jawHaveRead is true once any read has ever succeeded, and survives invalidation (see
+	// jawReadAt) so last-known-good keeps serving across it.
+	jawHaveRead bool
+	jawGen      uint64
+
+	now func() time.Time // injectable for tests; time.Now in production
 }
 
 func init() {
@@ -139,7 +179,7 @@ func newSO101Gripper(ctx context.Context, deps resource.Dependencies, conf resou
 		meshDetail = geometry.LowDetail
 	}
 
-	model, err := geometry.BuildGripperModel(gripperType, meshDetail, conf.ResourceName().ShortName(), false)
+	model, err := geometry.BuildGripperModel(gripperType, meshDetail, conf.ResourceName().ShortName(), cfg.ArticulatedJaw)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build gripper kinematic model: %w", err)
 	}
@@ -152,10 +192,24 @@ func newSO101Gripper(ctx context.Context, deps resource.Dependencies, conf resou
 		meshDetail:     meshDetail,
 		servoID:        cfg.ServoID,
 		model:          model,
+		articulatedJaw: cfg.ArticulatedJaw,
 		speed:          30,
 		acceleration:   50,
 		openPosition:   95.0,
 		closedPosition: 0.0,
+		now:            time.Now,
+	}
+
+	if cfg.ArticulatedJaw {
+		if pct, err := g.positionPercentCached(ctx); err != nil {
+			logger.Warnf("could not prime the jaw position cache: %v", err)
+		} else {
+			// The gripper is sitting wherever it is at boot with no command in flight, so
+			// treat that resting position as its own commanded target: actual == commanded,
+			// so IsHoldingSomething/GoToInputs report NOT holding until a real command moves
+			// it. A failed prime just leaves haveCommanded false (see moveToPercent).
+			g.lastCommandedPct, g.haveCommanded = pct, true
+		}
 	}
 
 	logger.Debugf("SO-101 gripper initialized with servo ID %d, open=%.1f%%, closed=%.1f%%",
@@ -206,10 +260,17 @@ func servoIDsFromCapabilities(res map[string]interface{}) []int {
 	}
 }
 
-// servoDo sends one servo_* command for this gripper's servo.
+// servoDo sends one servo_* command for this gripper's servo. Every command except a position
+// read or the capabilities probe invalidates the jaw cache -- excluding CmdServoPosition is not
+// just an optimization: if a read's own servoDo bumped the generation counter, the cache would
+// discard the very reading it just took and never populate at all.
 func (g *so101Gripper) servoDo(
 	ctx context.Context, command string, args map[string]interface{},
 ) (map[string]interface{}, error) {
+	if command != servocmd.CmdServoPosition && command != servocmd.CmdServoCapabilities {
+		g.invalidateJawCache()
+	}
+
 	cmd := map[string]interface{}{"command": command, "servo_id": g.servoID}
 	for k, v := range args {
 		cmd[k] = v
@@ -217,12 +278,19 @@ func (g *so101Gripper) servoDo(
 	return g.arm.DoCommand(ctx, cmd)
 }
 
-// moveToPercent commands the servo. When wait is true it blocks until the servo settles.
+// moveToPercent commands the servo; when wait is true it blocks until the servo settles. It is
+// the single choke point for every percent-valued command, so it is also where lastCommandedPct
+// is recorded -- callers must already hold g.mu (Open, Grab, set_position, the "set" DoCommand
+// branch, and GoToInputs all do). The target is recorded once the move command itself succeeds,
+// whether or not the caller waits and even if the wait-stop times out: the servo was told to go
+// there regardless of whether it settled, or of whether anyone watched it settle.
 func (g *so101Gripper) moveToPercent(ctx context.Context, percent float64, wait bool) error {
+	target := servocmd.ClampPercent(percent)
 	if _, err := g.servoDo(ctx, servocmd.CmdServoMove,
-		map[string]interface{}{"percent": servocmd.ClampPercent(percent)}); err != nil {
+		map[string]interface{}{"percent": target}); err != nil {
 		return err
 	}
+	g.lastCommandedPct, g.haveCommanded = target, true
 	if !wait {
 		return nil
 	}
@@ -231,7 +299,9 @@ func (g *so101Gripper) moveToPercent(ctx context.Context, percent float64, wait 
 	return err
 }
 
-// positionPercent reads the servo's current opening as a percentage.
+// positionPercent reads the servo's current opening as a percentage, always hitting the bus.
+// Use this only where the caller must distinguish a failed read from a stale one (Grab,
+// get_position); everything else should use positionPercentCached.
 func (g *so101Gripper) positionPercent(ctx context.Context) (float64, error) {
 	res, err := g.servoDo(ctx, servocmd.CmdServoPosition, nil)
 	if err != nil {
@@ -247,6 +317,53 @@ func (g *so101Gripper) positionPercent(ctx context.Context) (float64, error) {
 // gripperSettleTimeoutMs bounds the wait for the gripper servo to stop moving. It replaces
 // the fixed 500ms sleep the previous implementation used after every command.
 const gripperSettleTimeoutMs = 2000
+
+// jawCacheTTL bounds how stale a jaw reading may be. It expires on wall clock regardless of
+// writes, so invalidation only ever shortens staleness -- including a jaw back-driven by hand
+// with torque off.
+const jawCacheTTL = 50 * time.Millisecond
+
+func (g *so101Gripper) invalidateJawCache() {
+	g.jawMu.Lock()
+	defer g.jawMu.Unlock()
+	g.jawReadAt = time.Time{}
+	g.jawGen++
+}
+
+// positionPercentCached returns the jaw opening, reading the bus at most once per jawCacheTTL.
+func (g *so101Gripper) positionPercentCached(ctx context.Context) (float64, error) {
+	g.jawMu.Lock()
+	fresh := !g.jawReadAt.IsZero() && g.now().Sub(g.jawReadAt) < jawCacheTTL
+	gen, havePrev, prev := g.jawGen, g.jawHaveRead, g.jawPct
+	g.jawMu.Unlock()
+
+	if fresh {
+		return prev, nil
+	}
+
+	pct, err := g.positionPercent(ctx) // bus read, jawMu NOT held
+	if err != nil {
+		if havePrev {
+			g.logger.Warnf("jaw position read failed, serving last known good %.1f%%: %v", prev, err)
+			return prev, nil
+		}
+		return 0, err
+	}
+
+	g.jawMu.Lock()
+	defer g.jawMu.Unlock()
+	// Discard if the jaw was commanded while this read was in flight, or if it is still moving.
+	// The moving guard's real purpose is narrower than it looks: it is not the servo_wait_stop
+	// timeout case (moveToPercent returning on timeout doesn't stamp anything -- the caller's own
+	// defer isMoving.Store(false) fires microseconds later, and a read landing after that is not
+	// covered here at all; it can still stamp a mid-flight value, bounded by the TTL to 50ms). What
+	// this guard actually covers is the narrow window between a move's last servoDo and the
+	// caller's isMoving.Store(false) defer.
+	if g.jawGen == gen && !g.isMoving.Load() {
+		g.jawPct, g.jawReadAt, g.jawHaveRead = pct, g.now(), true
+	}
+	return pct, nil
+}
 
 func (g *so101Gripper) Open(ctx context.Context, extra map[string]interface{}) error {
 	g.mu.Lock()
@@ -265,6 +382,26 @@ func (g *so101Gripper) Open(ctx context.Context, extra map[string]interface{}) e
 	return nil
 }
 
+// graspThresholdPct is how far short of closed the jaw must stop for Grab to conclude something
+// is between the fingers.
+const graspThresholdPct = 15.0
+
+// isHoldingAt is the shared grasp policy behind Grab, IsHoldingSomething, and GoToInputs's
+// holding guard: the jaw failed to reach its commanded target by more than graspThresholdPct, so
+// something must be between the fingers blocking it.
+//
+// commandedPct must be the target the jaw was actually just told to move to -- Grab satisfies
+// this by construction (it commands closedPosition immediately before reading), while
+// IsHoldingSomething and GoToInputs use lastCommandedPct, the last percent moveToPercent
+// recorded. Comparing actualPct against the closed stop instead (the pre-fix behavior) is wrong:
+// any merely-open jaw then looks "held", because an open jaw is always far from closed regardless
+// of whether anything is between the fingers. That bug was found on real hardware: once the
+// planner opened the jaw past the threshold, IsHoldingSomething reported holding forever after,
+// and GoToInputs refused every subsequent jaw command, including one to close it back up.
+func isHoldingAt(actualPct, commandedPct float64) bool {
+	return math.Abs(actualPct-commandedPct) > graspThresholdPct
+}
+
 func (g *so101Gripper) Grab(ctx context.Context, extra map[string]interface{}) (bool, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -281,16 +418,18 @@ func (g *so101Gripper) Grab(ctx context.Context, extra map[string]interface{}) (
 	currentPercent, err := g.positionPercent(ctx)
 	if err != nil {
 		g.logger.Warnf("Failed to read gripper position after grab: %v", err)
+		// Deliberately optimistic: the move itself succeeded, only the confirming read failed, so
+		// assume the grab landed rather than reporting false and risking a caller releasing a real
+		// part. IsHoldingSomething instead returns the error -- it has no "the move worked" signal
+		// to fall back on.
 		return true, nil
 	}
 
-	positionDifference := currentPercent - g.closedPosition
-	threshold := 15.0
-
-	grabbed := positionDifference > threshold
+	grabbed := isHoldingAt(currentPercent, g.closedPosition)
 
 	if grabbed {
-		g.logger.Debugf("Gripper successfully grabbed an object (position difference: %.1f%%)", positionDifference)
+		g.logger.Debugf("Gripper successfully grabbed an object (position difference: %.1f%%)",
+			currentPercent-g.closedPosition)
 	} else {
 		g.logger.Debug("Gripper closed but may not have grabbed anything")
 	}
@@ -302,6 +441,9 @@ func (g *so101Gripper) Grab(ctx context.Context, extra map[string]interface{}) (
 // Stop that zeroed velocity on every servo on the shared bus, so stopping the gripper also
 // killed any in-flight arm motion.
 func (g *so101Gripper) Stop(ctx context.Context, extra map[string]interface{}) error {
+	if g.isMoving.Load() {
+		g.stopped.Store(true) // only while moving, or "reached the goal" and "was stopped" blur
+	}
 	g.isMoving.Store(false)
 	_, err := g.servoDo(ctx, servocmd.CmdServoStop, nil)
 	return err
@@ -329,13 +471,15 @@ func (g *so101Gripper) IsMoving(ctx context.Context) (bool, error) {
 }
 
 // jawAngle maps the gripper's current open percentage onto the URDF gripper-joint
-// range. If the live position cannot be read it assumes the gripper is closed.
+// range. Reads through the cache -- Geometries() (its only caller) is polled continuously
+// by the 3D viewer, so a dropped read serves last-known-good rather than snapping the
+// rendered jaw shut.
 func (g *so101Gripper) jawAngle(ctx context.Context) float64 {
-	percent, err := g.positionPercent(ctx)
+	pct, err := g.positionPercentCached(ctx)
 	if err != nil {
 		return geometry.GripperJointMin
 	}
-	return geometry.JawRadiansFromPct(percent)
+	return geometry.JawRadiansFromPct(pct)
 }
 
 // Geometries serves the gripper as meshes: a static body and a moving part posed by
@@ -395,13 +539,18 @@ func (g *so101Gripper) DoCommand(ctx context.Context, cmd map[string]interface{}
 			return nil, err
 		}
 
+		// calibrate_positions writes these under g.mu; read them the same way.
+		g.mu.Lock()
+		openPos, closedPos := g.openPosition, g.closedPosition
+		g.mu.Unlock()
+
 		return map[string]interface{}{
 			// position_radians is now derived from the percentage rather than read as a
 			// radian value, so single-key get/set round-trips (arm-recorder) keep working.
 			"position_radians":    (percentPos/100.0*2.0 - 1.0) * math.Pi,
 			"position_percentage": percentPos,
-			"open_position":       g.openPosition,
-			"closed_position":     g.closedPosition,
+			"open_position":       openPos,
+			"closed_position":     closedPos,
 		}, nil
 
 	case "set_position":
@@ -412,9 +561,13 @@ func (g *so101Gripper) DoCommand(ctx context.Context, cmd map[string]interface{}
 		defer g.isMoving.Store(false)
 
 		// The raw servo_position form goes to the arm as raw ticks; the arm owns the
-		// calibration needed to interpret them, so the gripper no longer converts.
+		// calibration needed to interpret them, so the gripper no longer converts. It bypasses
+		// moveToPercent, so it cannot record a percent-valued commanded target -- clear
+		// haveCommanded instead of leaving a stale one, so the next percent-valued command
+		// re-establishes it rather than isHoldingAt comparing against an opaque target.
 		if servoPos, ok := servocmd.FloatArg(cmd, "servo_position"); ok {
 			_, err := g.servoDo(ctx, servocmd.CmdServoMove, map[string]interface{}{"raw": int(servoPos)})
+			g.haveCommanded = false
 			return map[string]interface{}{"success": err == nil}, err
 		}
 
@@ -442,6 +595,7 @@ func (g *so101Gripper) DoCommand(ctx context.Context, cmd map[string]interface{}
 		return out, nil
 
 	case "calibrate_positions":
+		g.mu.Lock()
 		if openPos, ok := cmd["open_position"].(float64); ok {
 			if openPos >= 0 && openPos <= 100 {
 				g.openPosition = openPos
@@ -452,13 +606,15 @@ func (g *so101Gripper) DoCommand(ctx context.Context, cmd map[string]interface{}
 				g.closedPosition = closedPos
 			}
 		}
+		openPos, closedPos := g.openPosition, g.closedPosition
+		g.mu.Unlock()
 
-		g.logger.Debugf("Gripper positions calibrated: open=%.1f%%, closed=%.1f%%", g.openPosition, g.closedPosition)
+		g.logger.Debugf("Gripper positions calibrated: open=%.1f%%, closed=%.1f%%", openPos, closedPos)
 
 		return map[string]interface{}{
 			"success":         true,
-			"open_position":   g.openPosition,
-			"closed_position": g.closedPosition,
+			"open_position":   openPos,
+			"closed_position": closedPos,
 		}, nil
 
 	case "set_motion_params":
@@ -496,12 +652,97 @@ func (g *so101Gripper) Close(ctx context.Context) error {
 	return nil
 }
 
+// CurrentInputs reports the jaw joint angle for the articulated (1-DoF) model. Unsupported for
+// the default static model -- see BuildGripperModel's jawDoF branch. Reads through the position
+// cache (positionPercentCached), so a dropped bus read serves the last known good value rather
+// than erroring the whole frame system.
 func (g *so101Gripper) CurrentInputs(ctx context.Context) ([]referenceframe.Input, error) {
-	return nil, errors.ErrUnsupported
+	if !g.articulatedJaw {
+		return nil, errors.ErrUnsupported
+	}
+	pct, err := g.positionPercentCached(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return []referenceframe.Input{geometry.JawRadiansFromPct(pct)}, nil
 }
 
-func (g *so101Gripper) GoToInputs(ctx context.Context, inputs ...[]referenceframe.Input) error {
-	return errors.ErrUnsupported
+// jawHoldToleranceRad is how far a commanded jaw angle must differ from the current one to count
+// as actually moving the jaw. 0.01 rad is ~0.5% of the 1.92 rad range and about 6 servo ticks --
+// well above quantization, well below the 0.083-0.383 rad the planner was measured moving under
+// obstruction.
+//
+// Numerically identical to rdk's defaultExecuteEpsilon and COMPLETELY unrelated to it: that one
+// bounds how far a plan's first step may sit from CurrentInputs, on a path Move() does not take.
+const jawHoldToleranceRad = 0.01
+
+func (g *so101Gripper) GoToInputs(ctx context.Context, inputSteps ...[]referenceframe.Input) error {
+	if !g.articulatedJaw {
+		return errors.ErrUnsupported
+	}
+	// Validate EVERY step before moving any of them.
+	if err := geometry.ValidateJawSteps(g.model, inputSteps); err != nil {
+		return err
+	}
+
+	// g.mu is held from here through the move: the no-op classification and the holding guard
+	// below must be decided against a fresh read taken at execute time, not one taken before the
+	// lock -- otherwise a concurrent Open (which can hold g.mu for up to 2000ms inside
+	// servo_wait_stop) can change the jaw between the decision and the move that acts on it.
+	//
+	// Accepted limitation: a Stop arriving during this read/decide phase is not latched, because
+	// isMoving is still false at that point, so the jaw may move after that Stop lands. Setting
+	// isMoving earlier would suppress legitimate cache stores during the read (see
+	// positionPercentCached's moving guard), so this is accepted rather than fixed.
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	current, err := g.positionPercentCached(ctx)
+	if err != nil {
+		return err
+	}
+	currentRad := geometry.JawRadiansFromPct(current)
+
+	// A no-op batch is the common case: the gripper appears in every trajectory step of every
+	// plan carrying its unchanged value. It must neither reject nor touch the bus.
+	moves := false
+	for _, step := range inputSteps {
+		if math.Abs(step[0]-currentRad) > jawHoldToleranceRad {
+			moves = true
+			break
+		}
+	}
+	if !moves {
+		return nil
+	}
+
+	// Not g.IsHoldingSomething: that method takes g.mu itself to read lastCommandedPct safely, and
+	// g.mu is already held here -- calling it would self-deadlock. Read g.lastCommandedPct/
+	// g.haveCommanded directly (safe: moveToPercent's writer also takes g.mu) against the pct
+	// already fetched above. No prior command means no evidence of obstruction -- don't refuse.
+	final := inputSteps[len(inputSteps)-1][0]
+	if g.haveCommanded && isHoldingAt(current, g.lastCommandedPct) {
+		g.logger.Infof("refusing planner jaw command while holding: current %.4f rad, requested %.4f rad",
+			currentRad, final)
+		return fmt.Errorf(
+			"gripper is holding something; refusing the planner's request to move the jaw from "+
+				"%.4f to %.4f rad -- add the held object to the motion request's WorldState so the "+
+				"planner stops trying to move the jaw", currentRad, final)
+	}
+	g.logger.Infof("jaw GoToInputs: %d step(s), %.4f -> %.4f rad", len(inputSteps), currentRad, final)
+
+	g.stopped.Store(false) // clear BEFORE isMoving, or a Stop landing between the two is wiped
+	g.isMoving.Store(true)
+	defer g.isMoving.Store(false)
+
+	// Only the final target: a position servo never traverses superseded waypoints.
+	if err := g.moveToPercent(ctx, geometry.JawPctFromRadians(final), true); err != nil {
+		return err
+	}
+	if g.stopped.Load() {
+		return errors.New("jaw motion was stopped before completing the trajectory")
+	}
+	return nil
 }
 
 // Kinematics returns the gripper's static model, whose leaf frame is the TCP between the jaw
@@ -510,6 +751,27 @@ func (g *so101Gripper) Kinematics(ctx context.Context) (referenceframe.Model, er
 	return g.model, nil
 }
 
-func (g *so101Gripper) IsHoldingSomething(ctx context.Context, extra map[string]interface{}) (gripper.HoldingStatus, error) {
-	return gripper.HoldingStatus{}, nil
+// IsHoldingSomething infers a grasp by comparing the jaw's actual position against the last
+// target it was commanded to (see isHoldingAt): it failed to reach where it was told to go, so
+// something is between the fingers. Reads through the cache. This is the standalone public-API
+// path only -- GoToInputs no longer calls it (see the comment there), so taking g.mu here to read
+// lastCommandedPct safely cannot self-deadlock against GoToInputs's own g.mu hold.
+//
+// If nothing has ever been commanded, there is no evidence to compare against -- report NOT
+// holding rather than guessing. A false "holding" is the more damaging error: it was observed on
+// hardware latching the gripper open, refusing every subsequent jaw command including closing.
+func (g *so101Gripper) IsHoldingSomething(
+	ctx context.Context, extra map[string]interface{},
+) (gripper.HoldingStatus, error) {
+	pct, err := g.positionPercentCached(ctx)
+	if err != nil {
+		return gripper.HoldingStatus{}, err
+	}
+	g.mu.Lock()
+	commanded, have := g.lastCommandedPct, g.haveCommanded
+	g.mu.Unlock()
+	if !have {
+		return gripper.HoldingStatus{IsHoldingSomething: false}, nil
+	}
+	return gripper.HoldingStatus{IsHoldingSomething: isHoldingAt(pct, commanded)}, nil
 }

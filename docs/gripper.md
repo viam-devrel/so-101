@@ -28,6 +28,7 @@ Where `arm-1` is the name of your `devrel:so101:arm` component. Configure the ar
 | `servo_id`     | int    | Optional     | The servo ID for the gripper. Default is `6`.                                                                                                                      |
 | `gripper_type` | string | Optional     | Which gripper meshes `Geometries()` serves for the 3D viewer: `follower` (moving jaw, default) or `leader` (thumb-loop handle + trigger). The moving part articulates with the live gripper opening.                                                  |
 | `mesh_detail`  | string | Optional     | Gripper mesh resolution: `low` (decimated, the default) or `high` (full resolution). `Geometries()` is also the motion-planning collision geometry, so `low` keeps planning fast; `high` is mainly for visual comparison.                             |
+| `articulated_jaw` | bool | Optional  | Gives the gripper a 1-DoF jaw joint and makes it `InputEnabled`, so the motion planner may drive the jaw during arm moves. Default `false`. See [Articulated jaw](#articulated-jaw) below.                                                          |
 
 ## Reference frame (TCP)
 
@@ -57,6 +58,32 @@ viewer.
 
 The 3D viewer reads the model's frames directly, so a `<gripper>:tcp` node appears in the scene tree
 with its axes drawn at the grasp point — no extra configuration and no placeholder geometry needed.
+
+## Articulated jaw
+
+`articulated_jaw` is off by default: the jaw does not affect the TCP, so turning it on only
+gives the motion planner an extra degree of freedom that changes collision geometry, at the
+cost of a `GoToInputs` call on every trajectory step of every plan (see the gotcha in the
+repo's `CLAUDE.md`).
+
+With it on, the gripper is `InputEnabled` and reports the jaw angle in **radians** from
+`CurrentInputs`. That reading is cached and may be up to 50 ms stale; if the bus is down, it
+instead serves the last known good reading, which can be arbitrarily stale.
+
+The planner is free to move the jaw during an ordinary arm move — it is part of the same
+trajectory as the arm joints, not a separate grasp action. A command that would actually move
+the jaw **while the gripper is holding something** is refused with an error, to avoid dropping
+whatever is held; a no-op command (the jaw's current angle, which is what most trajectory steps
+carry) is never refused and never commands the servo, whether or not something is held — it may
+still issue a `servo_position` read on a cache miss.
+
+"Holding" is inferred by comparing the jaw's current reading against the last percent it was
+*commanded* to reach, not the closed position: if the jaw failed to get there by more than the
+grasp threshold, something must be blocking it, whichever direction it was moving. Comparing
+against the closed position instead is wrong — any merely open jaw then looks held — and did
+exactly that on real hardware until it was fixed. `IsHoldingSomething` follows the same rule and,
+like the guard above, reports NOT holding whenever nothing has been commanded yet (at startup, or
+right after a raw `set_position` in ticks), since there is no commanded target to compare against.
 
 ## Communication
 
