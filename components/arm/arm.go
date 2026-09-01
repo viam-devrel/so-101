@@ -96,7 +96,10 @@ type SO101ArmConfig struct {
 	// larger is faster but cuts more corner, smaller tracks the path more exactly, down to a
 	// near-stop at every waypoint.
 	//
-	// Zero or unset means servo.DefaultLookaheadDeg (2.0). Valid range 0.1-45.
+	// Zero or unset DERIVES it per move from the speed and acceleration actually in force
+	// (servo.LookaheadDegFor) rather than using a fixed value -- a fast move needs a longer
+	// lookahead than a slow one, because the servo's deceleration distance grows with the
+	// square of its speed. Set this only to override that. Valid range 0.1-45.
 	WaypointLookaheadDeg float64 `json:"waypoint_lookahead_deg,omitempty"`
 }
 
@@ -199,7 +202,8 @@ type so101 struct {
 	// never mutated (the model is resource.AlwaysRebuild), so it needs no mutex.
 	goalCloud planning.GoalCloudConfig
 
-	// lookaheadDeg is the resolved waypoint lookahead. Set once in NewSO101 and never
+	// lookaheadDeg is the CONFIGURED waypoint lookahead override, or 0 to derive it per
+	// move from that move's own speed and acceleration. Set once in NewSO101 and never
 	// mutated, same as goalCloud.
 	lookaheadDeg float64
 
@@ -316,11 +320,6 @@ func NewSO101(ctx context.Context, deps resource.Dependencies, name resource.Nam
 		}
 	}
 
-	lookaheadDeg := conf.WaypointLookaheadDeg
-	if lookaheadDeg == 0 {
-		lookaheadDeg = servo.DefaultLookaheadDeg
-	}
-
 	cancelCtx, cancelFunc := context.WithCancel(context.Background())
 
 	arm := &so101{
@@ -339,12 +338,16 @@ func NewSO101(ctx context.Context, deps resource.Dependencies, name resource.Nam
 		cancelFunc:   cancelFunc,
 		initCtx:      ctx, // Store initialization context
 
-		lookaheadDeg: lookaheadDeg,
+		lookaheadDeg: conf.WaypointLookaheadDeg,
 	}
 
+	lookaheadNote := fmt.Sprintf("%.2f deg (configured)", conf.WaypointLookaheadDeg)
+	if conf.WaypointLookaheadDeg == 0 {
+		lookaheadNote = fmt.Sprintf("%.2f deg (derived, at the default profile)",
+			servo.LookaheadDegFor(float64(speedDegsPerSec), float64(accelerationDegsPerSec)))
+	}
 	logger.Debugf("SO-101 configured with speed: %.1f deg/s, acceleration: %.1f deg/s², "+
-		"waypoint dwell tolerance: %.2f deg",
-		speedDegsPerSec, accelerationDegsPerSec, lookaheadDeg)
+		"waypoint lookahead: %s", speedDegsPerSec, accelerationDegsPerSec, lookaheadNote)
 	logger.Debugf("Arm controlling servo IDs: %v", arm.armServoIDs)
 
 	// Initialize and verify servo connections

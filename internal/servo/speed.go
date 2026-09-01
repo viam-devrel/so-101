@@ -67,14 +67,48 @@ const MinExecutableSpeedDegsPerSec = 12.0
 // allowed to run. The dwell holds an intermediate waypoint until every joint is this close
 // to it, and only then commands the next one.
 const (
-	// DefaultLookaheadDeg is ~23 steps at the STS3215's 0.088 deg resolution: loose enough to
-	// clear the steady-state error a gravity-loaded joint parks with, tight enough to keep the
-	// arm on the path. A goal that always leads a little is what keeps a stream one continuous
-	// motion, so this is also the playback-speed knob -- see docs/arm.md, "Waypoint streams".
+	// DefaultLookaheadDeg is the lookahead's SATISFIABILITY floor, not a good default on its
+	// own. A servo settles where its position error times its P gain balances the load, so a
+	// lookahead below that droop is never reached and every waypoint burns its full timeout.
+	// Measured droop on a gravity-loaded SO-101 joint: 4.8 deg at p_gain 16, 2.2 at 32,
+	// 1.5 at 48. 2.0 clears the p_gain 32 case, which is the Feetech default.
+	//
+	// It is NOT sufficient by itself -- see LookaheadDegFor for the other lower bound.
 	DefaultLookaheadDeg = 2.0
 	MinLookaheadDeg     = 0.1
 	MaxLookaheadDeg     = 45.0
+
+	// lookaheadRampMargin keeps the next goal arriving slightly BEFORE the servo reaches its
+	// deceleration point, rather than exactly at it.
+	lookaheadRampMargin = 1.2
 )
+
+// LookaheadDegFor returns the waypoint lookahead a motion profile needs, from the two
+// independent lower bounds it has to clear.
+//
+// The first is the servo's DECELERATION DISTANCE, v^2/(2a). A servo slows as it approaches
+// its goal, so unless the next goal is written before that ramp begins, a waypoint stream
+// decelerates and re-accelerates at every waypoint. On a 10 Hz recording that is ten
+// velocity dips a second, and it reads as jerk. Measured on a recorded wave replayed at
+// 58.8 deg/s: the ramp is 3.45 deg, the old fixed 2.0 released the next goal only after the
+// servo was already inside it, and raising the lookahead to 4 removed the jerk.
+//
+// The second is DefaultLookaheadDeg, the droop the arm parks with -- a lookahead under it is
+// never satisfied at all. That one dominates at low speed: a nod at 25.2 deg/s has a ramp of
+// only 0.64 deg, so it keeps the 2.0 floor.
+//
+// So the fixed 2.0 this replaces was right only below ~45 deg/s at the default acceleration,
+// which is why a slow recording felt fine and a fast one did not.
+func LookaheadDegFor(speedDegsPerSec, accelDegsPerSecSq float64) float64 {
+	// The Acc register floors at ~43 deg/s^2, so a lower request is silently raised by the
+	// hardware and the ramp is shorter than the configured value implies.
+	a := math.Max(accelDegsPerSecSq, AccFloorDegsPerSecSq)
+	if speedDegsPerSec <= 0 {
+		return DefaultLookaheadDeg
+	}
+	ramp := lookaheadRampMargin * speedDegsPerSec * speedDegsPerSec / (2 * a)
+	return math.Min(MaxLookaheadDeg, math.Max(DefaultLookaheadDeg, ramp))
+}
 
 // DegPerSecToStepsPerSec converts an angular speed in degrees/second to the servo
 // goal-velocity unit (steps/second), clamped to a safe range.

@@ -163,6 +163,27 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
   (servo steady-state error), too loose and the goal runs so far ahead the pacing stops
   gating. The dwell is deliberately *not* `WaitForServosToStop` — a stop at every waypoint is
   not a trajectory.
+- **The waypoint lookahead has TWO independent lower bounds, and a fixed value cannot clear
+  both.** `LookaheadDegFor` derives it per move as `max(1.2 * v^2/2a, DefaultLookaheadDeg)`.
+  The ramp term is the servo's deceleration distance: write the next goal after the servo is
+  already inside that ramp and the stream decelerates and re-accelerates at every waypoint --
+  on a 10 Hz recording that is ten velocity dips a second, and it reads as jerk. The floor
+  term is the droop the arm parks with (4.8 deg at p_gain 16, 2.2 at 32, 1.5 at 48); below it
+  the dwell is never satisfied at all. The old fixed `2.0` cleared only the second, and so was
+  correct only below ~45 deg/s at the default acceleration -- which is why a recorded nod
+  (25.2 deg/s, 0.64 deg ramp) replayed smoothly and a wave (58.8 deg/s, 3.45 deg ramp) felt
+  jerky on hardware until the lookahead was raised to 4. Derived **per move**, not per
+  component, because `arm.MoveOptions` can cap the speed well below the configured default.
+  `waypoint_lookahead_deg` still overrides it outright.
+- **Pacing is not interpolation, and this module does not interpolate.**
+  `MoveThroughJointPositions` writes each waypoint as a servo goal and paces it; nothing
+  inserts intermediate points. Smoothness therefore comes from the goal LEADING the arm --
+  the lookahead -- not from step size. Do not "simplify" a caller's densification away on the
+  assumption that the arm re-adds it: that was done to arm-recorder's 8x playback
+  interpolation and the replay came back visibly jerky. Interpolating here would also fight
+  two existing mechanisms: sub-segments below the lookahead stop the dwell gating at all
+  (the pre-0.9.3 flythrough), and sub-segments below k ~ 0.24 put every joint on
+  `MinExecutableSpeedDegsPerSec`, erasing coordination.
 - **`Stop` must cancel the move, not just zero velocity.** A paced waypoint stream runs for
   seconds, so `arm.Stop` calls `opMgr.CancelRunning` *before* `controller.Stop`; the reverse
   order lets the dwell loop write its next goal after the zero and the arm resumes.

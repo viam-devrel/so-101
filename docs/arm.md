@@ -30,7 +30,7 @@ The following attributes are available for the arm component:
 | `visualize_ee_frame` | bool   | Optional     | When `true`, serves a colored XYZ coordinate-frame marker at the end-effector for the 3D viewer. Default is `false`.                                                    |
 | `speed_degs_per_sec` | float  | Optional     | Real per-joint speed cap enforced on the servos, in degrees per second. Applies to the longest-travel joint in a move; other joints are scaled down so all joints arrive together. Default `50`, valid range 3–180. |
 | `acceleration_degs_per_sec_per_sec` | float | Optional | Per-joint acceleration cap enforced on the servos, in degrees per second². Scaled alongside speed so joints arrive together; lower is smoother but slower. Default `500`, valid range 50–500 (the servo register cannot deliver acceleration outside it). |
-| `waypoint_lookahead_deg` | float | Optional | How far ahead of the arm the commanded goal may run during a `MoveThroughJointPositions`/`GoToInputs` stream, in degrees: the next waypoint is not written until every joint is this close to the current one. The path-fidelity/speed trade — see [Waypoint streams](#waypoint-streams). Default `2.0`, valid range 0.1–45. |
+| `waypoint_lookahead_deg` | float | Optional | How far ahead of the arm the commanded goal may run during a `MoveThroughJointPositions`/`GoToInputs` stream, in degrees: the next waypoint is not written until every joint is this close to the current one. **Omit it** — it is otherwise derived per move from the speed and acceleration in force. Set it only to override. Valid range 0.1–45. See [Waypoint streams](#waypoint-streams). |
 | `use_urdf`         | bool     | Optional     | When `true`, sources kinematics and collision geometry from the bundled `assets/urdf/so101.urdf` instead of the embedded `so101.json`, and requires `VIAM_MODULE_ROOT` (viam-server sets this). A drop-in swap — frame names, TCP, and kinematics are identical; only the collision geometry upgrades from primitive shapes to per-link meshes. Default `false`. |
 | `mesh_decimation_ratios` | []float | Optional | Per-mesh simplification ratios, one per arm link in document order (base, shoulder, upper_arm, lower_arm, wrist). Only values strictly inside `(0, 1)` decimate; lower is more aggressive. Used only with `use_urdf`. Defaults to `0.9` for all five. |
 | `manual_mode`      | object   | Optional     | Tuning for hand-guided [manual mode](#manual-mode) (see below). Omit for the built-in defaults. |
@@ -76,7 +76,25 @@ The hardware arm scales each joint's speed and acceleration by its share of the 
 
 **`Stop` ends a stream.** A paced stream runs for seconds, so `Stop` cancels the move before zeroing velocity and returns once the stream has stopped. Zeroing velocity alone would be overwritten by the next waypoint.
 
-**`waypoint_lookahead_deg` is the fidelity/speed trade.** It is how far ahead of the arm the commanded goal is allowed to run:
+**The lookahead is derived per move, and it has two independent lower bounds.**
+
+A servo decelerates as it approaches its goal, over `v²/2a`. Unless the next goal is written *before* that ramp begins, the arm decelerates and re-accelerates at every waypoint — on a 10 Hz recording, ten velocity dips a second, which reads as jerk. So the lookahead must exceed the deceleration distance.
+
+It must *also* exceed the droop the arm parks with, or the dwell is never satisfied and every waypoint burns its full timeout. Measured on a gravity-loaded joint: 4.8° at `p_gain` 16, 2.2° at 32, 1.5° at 48.
+
+The lookahead is therefore `max(1.2 · v²/2a, 2.0)`, computed from the speed and acceleration actually in force — which `arm.MoveOptions` can cap well below the configured default, so it is derived per move rather than once per component.
+
+| move | speed | ramp `v²/2a` | lookahead |
+|---|---|---|---|
+| recorded nod | 25.2 °/s | 0.64° | 2.0° (droop floor governs) |
+| default profile | 50 °/s | 2.50° | 3.0° |
+| recorded wave | 58.8 °/s | 3.45° | 4.2° |
+
+This replaced a fixed `2.0`, which was correct only below about 45 °/s at the default acceleration. That is why a slow recording replayed smoothly and a fast one felt jerky — confirmed on hardware, where raising a wave replay's lookahead to 4 removed the jerk.
+
+Note the derived value grows with the *square* of speed, so a move at the 180 °/s maximum derives a 38.9° lookahead: at that speed the goal necessarily runs far ahead and the pacing stops gating. Speed and path fidelity genuinely trade against each other here.
+
+**Setting `waypoint_lookahead_deg` overrides all of that.** It is how far ahead of the arm the commanded goal is allowed to run:
 
 - **Larger** — the goal leads by more, the arm never decelerates near a waypoint, motion is faster and cuts more corner between waypoints.
 - **Smaller** — the path is tracked more exactly, down to a near-stop at every waypoint at very small values.

@@ -398,6 +398,14 @@ func (s *so101) MoveThroughJointPositions(ctx context.Context, positions [][]ref
 		speed = servo.ResolveSpeedDegsPerSec(options.MaxVelRads, defaultSpeed)
 	}
 
+	// Derived per move, not per component: MoveOptions can cap the speed well below the
+	// configured default, and the lookahead has to track the speed actually in force or it
+	// is wrong in one direction or the other. A configured value overrides it outright.
+	lookahead := s.lookaheadDeg
+	if lookahead == 0 {
+		lookahead = servo.LookaheadDegFor(speed, accel)
+	}
+
 	// One read before the stream starts; from here on each waypoint's dwell supplies the
 	// next segment's travel reference, so this is the only read a single-waypoint call
 	// makes. GoToInputs routinely emits single-waypoint streams, which would otherwise have
@@ -439,7 +447,7 @@ func (s *so101) MoveThroughJointPositions(ctx context.Context, positions [][]ref
 		// ACTUALLY is, which matters because a joint whose travel is concentrated earlier
 		// in the path would otherwise show a near-zero delta and be floored to 1 step/s
 		// while its goal is still far away.
-		from, err = s.dwellUntilNear(ctx, clamped, s.lookaheadDeg, dwellTimeout)
+		from, err = s.dwellUntilNear(ctx, clamped, lookahead, dwellTimeout)
 		if err != nil {
 			return err
 		}
