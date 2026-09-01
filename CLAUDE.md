@@ -180,10 +180,17 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
   inserts intermediate points. Smoothness therefore comes from the goal LEADING the arm --
   the lookahead -- not from step size. Do not "simplify" a caller's densification away on the
   assumption that the arm re-adds it: that was done to arm-recorder's 8x playback
-  interpolation and the replay came back visibly jerky. Interpolating here would also fight
-  two existing mechanisms: sub-segments below the lookahead stop the dwell gating at all
-  (the pre-0.9.3 flythrough), and sub-segments below k ~ 0.24 put every joint on
-  `MinExecutableSpeedDegsPerSec`, erasing coordination.
+  interpolation and the replay came back visibly jerky.
+- **Linear interpolation does NOT disturb `CoordinatedProfiles`.** Two plausible-sounding
+  objections to a caller densifying its waypoints are both false, and were checked against
+  the real function rather than reasoned about: (1) sub-segments do NOT collapse onto
+  `MinExecutableSpeedDegsPerSec` -- interpolation preserves each joint's share of the
+  segment's travel, so `k = d_i/d_max` is invariant and the per-joint `SpeedSteps`/`AccUnits`
+  are byte-identical between a parent segment and a 1/8 sub-segment; (2) sub-segments smaller
+  than the lookahead do NOT reintroduce the pre-0.9.3 flythrough -- the goal leads by several
+  sub-waypoints, but the lead is still bounded in absolute degrees by the lookahead, which is
+  the property that matters. Densifying is a legitimate smoothness lever for a caller that
+  knows its own tempo.
 - **`Stop` must cancel the move, not just zero velocity.** A paced waypoint stream runs for
   seconds, so `arm.Stop` calls `opMgr.CancelRunning` *before* `controller.Stop`; the reverse
   order lets the dwell loop write its next goal after the zero and the arm resumes.
