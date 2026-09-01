@@ -116,10 +116,32 @@ func CoordinatedProfiles(travelsDeg []float64, refSpeedDegsPerSec, refAccelDegsP
 	out := make([]JointProfile, len(travelsDeg))
 	for i, d := range travelsDeg {
 		k := math.Abs(d) / maxTravel
+
+		// Scaling below MinExecutableSpeedDegsPerSec buys nothing: the servo stops honouring
+		// the register there, in opposite directions depending on load. So the floor costs
+		// only the coordination this scaling could not deliver anyway, and a low-k joint
+		// arrives early instead of executing an unpredictable speed.
+		//
+		// A STATIONARY joint is left at the old 1-step floor rather than raised to this one:
+		// its goal is its own position, so the value is inert, and writing a real speed to a
+		// joint that is not moving would be misleading on the wire.
+		v := speed * k
+		if k > 0 {
+			v = math.Max(v, MinExecutableSpeedDegsPerSec)
+		}
+
+		// A per-joint cap still wins over the floor. It is a constraint the caller may be
+		// relying on for safety, so a cap slower than the floor is UNDER-executed rather
+		// than silently exceeded -- reduceReference already honoured it, and raising the
+		// speed back above it here would quietly break that guarantee.
+		if i < len(caps) && caps[i].MaxSpeedDegsPerSec > 0 && v > caps[i].MaxSpeedDegsPerSec {
+			v = caps[i].MaxSpeedDegsPerSec
+		}
+
 		out[i] = JointProfile{
 			// DegPerSecToStepsPerSec, NOT ResolveSpeedDegsPerSec: the latter floors at
-			// 3 deg/s, which would destroy scaling for any joint below k ~ 0.06.
-			SpeedSteps: DegPerSecToStepsPerSec(speed * k),
+			// 3 deg/s, which is both the wrong value and the wrong place for a floor.
+			SpeedSteps: DegPerSecToStepsPerSec(v),
 			AccUnits:   DegPerSecSqToAccUnits(accel * k),
 		}
 	}

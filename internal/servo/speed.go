@@ -21,6 +21,10 @@ const (
 
 	// Configured-speed bounds in deg/s (mirror the config validation), used to clamp a
 	// MoveOptions-derived speed so a tiny or huge MaxVelRads can't produce an unsafe command.
+	//
+	// NOTE minSpeedDegsPerSec is BELOW MinExecutableSpeedDegsPerSec: the configured range
+	// promises speeds this hardware does not honour. Measured, not inferred -- see that
+	// constant. Left alone here because raising it is a breaking config change.
 	minSpeedDegsPerSec = 3.0
 	maxSpeedDegsPerSec = 180.0
 
@@ -35,6 +39,29 @@ const (
 	// MaxMoveTimeoutMs is the safety-timeout ceiling for waiting on a move to complete.
 	MaxMoveTimeoutMs = 15000
 )
+
+// MinExecutableSpeedDegsPerSec is the slowest per-joint speed the STS3215 actually honours,
+// and the floor CoordinatedProfiles applies to every joint it scales down.
+//
+// Below it the register is not merely imprecise, it fails in OPPOSITE directions depending
+// on load, so neither the commanded speed nor any single correction is recoverable. Measured
+// on an SO-101 (p_gain 32), 3 reps per point, 25 degree sweeps:
+//
+//	commanded   shoulder (heavy)   elbow (light)   wrist (unloaded)
+//	 4 deg/s     0.80  (0.20x)      1.57 (0.39x)    7.60 (1.90x)
+//	 8 deg/s     3.13  (0.39x)      8.82 (1.10x)    8.78 (1.10x)
+//	10 deg/s     8.18  (bimodal, 4.22-10.19 across reps)
+//	10.5 deg/s  10.52  (1.00x)     10.50 (1.00x)   10.44 (0.99x)
+//
+// The light joints floor hard at ~8.8 deg/s -- command less and you still get 8.8. The
+// gravity-loaded shoulder does the reverse and under-executes to a fifth of its command.
+// All three track within 1% from 10.5 up.
+//
+// 12 carries margin over the worst joint's measured 10.5 and clear of the bimodal 10.0. It
+// is a tuning value, NOT a hardware constant: it comes from one arm, three joints, one pose
+// each, on 10-25 degree sweeps. A payload or a different pose moves the loaded joint's
+// threshold, and short accel-limited segments were not measured.
+const MinExecutableSpeedDegsPerSec = 12.0
 
 // Waypoint-lookahead bounds, in degrees: how far ahead of the arm the commanded goal is
 // allowed to run. The dwell holds an intermediate waypoint until every joint is this close
