@@ -144,6 +144,29 @@ func ResolveSpeedDegsPerSec(maxVelRads, defaultSpeedDegsPerSec float64) float64 
 	return degs
 }
 
+// ResolveAccelDegsPerSecSq picks the effective reference acceleration in deg/s^2, mirroring
+// ResolveSpeedDegsPerSec: a per-move MoveOptions.MaxAccRads (radians/second^2) wins when
+// positive, otherwise the configured default, clamped to what the Acc register can express.
+//
+// The symmetry is load-bearing, not tidiness. LookaheadDegFor needs the acceleration
+// ACTUALLY in force: a caller that lowers it lengthens the servo's deceleration ramp, and a
+// lookahead still computed from the higher configured default would then release the next
+// goal after the servo had already begun decelerating -- the jerk the derived lookahead
+// exists to prevent.
+func ResolveAccelDegsPerSecSq(maxAccRads, defaultAccelDegsPerSecSq float64) float64 {
+	if maxAccRads <= 0 {
+		return defaultAccelDegsPerSecSq
+	}
+	degs := utils.RadToDeg(maxAccRads)
+	if degs < MinAccelDegsPerSecSq {
+		degs = MinAccelDegsPerSecSq
+	}
+	if degs > MaxAccelDegsPerSecSq {
+		degs = MaxAccelDegsPerSecSq
+	}
+	return degs
+}
+
 // MoveTimeoutMs returns a safety timeout (ms) for waiting on a move to complete, based on
 // the worst-case joint travel and the commanded profile, clamped to a sane window.
 //

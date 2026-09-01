@@ -73,3 +73,44 @@ func TestLookaheadDegForGrowsWithTheSquareOfSpeed(t *testing.T) {
 		t.Errorf("doubling the speed scaled the lookahead by %.2f, want 4.00", ratio)
 	}
 }
+
+// The lookahead is derived from BOTH speed and acceleration, so acceleration has to track
+// MoveOptions the same way speed does. It did not: speed resolved through
+// ResolveSpeedDegsPerSec while acceleration silently kept the component default, so a caller
+// that LOWERED acceleration got a longer real deceleration ramp and a lookahead still sized
+// for the shorter one -- the next goal released after the servo had begun decelerating.
+func TestResolveAccelDegsPerSecSq(t *testing.T) {
+	const dflt = 500.0
+	for _, tc := range []struct {
+		name       string
+		maxAccRads float64
+		want       float64
+	}{
+		{"unset keeps the configured default", 0, dflt},
+		{"negative keeps the configured default", -1, dflt},
+		{"a lower request is honoured", math.Pi, 180},
+		{"below the register's floor clamps up", 0.1, MinAccelDegsPerSecSq},
+		{"above the register's ceiling clamps down", 100, MaxAccelDegsPerSecSq},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ResolveAccelDegsPerSecSq(tc.maxAccRads, dflt); math.Abs(got-tc.want) > 0.01 {
+				t.Errorf("ResolveAccelDegsPerSecSq(%g, %g) = %.2f, want %.2f",
+					tc.maxAccRads, dflt, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestLowerAccelerationWidensTheLookahead(t *testing.T) {
+	// Halving the acceleration doubles the deceleration ramp, so the lookahead must grow to
+	// match. If acceleration were ignored, both of these would be equal and the slower-
+	// stopping arm would be paced as though it stopped on a dime.
+	fast := LookaheadDegFor(80, MaxAccelDegsPerSecSq)
+	slow := LookaheadDegFor(80, MaxAccelDegsPerSecSq/2)
+	if slow <= fast {
+		t.Fatalf("lookahead at half the acceleration = %.2f, want greater than %.2f", slow, fast)
+	}
+	if ratio := slow / fast; math.Abs(ratio-2.0) > 0.01 {
+		t.Errorf("halving acceleration scaled the lookahead by %.2f, want 2.00", ratio)
+	}
+}

@@ -382,8 +382,6 @@ func (s *so101) MoveThroughJointPositions(ctx context.Context, positions [][]ref
 	defaultSpeed := float64(s.defaultSpeed)
 	defaultAccel := float64(s.defaultAcc)
 	s.mu.RUnlock()
-	accel := defaultAccel
-
 	caps, err := servo.JointLimitsFromMoveOptions(options, len(s.armServoIDs))
 	if err != nil {
 		return err
@@ -396,6 +394,14 @@ func (s *so101) MoveThroughJointPositions(ctx context.Context, positions [][]ref
 	speed := defaultSpeed
 	if options != nil && len(options.MaxVelRadsJoints) == 0 && options.MaxVelRads > 0 {
 		speed = servo.ResolveSpeedDegsPerSec(options.MaxVelRads, defaultSpeed)
+	}
+
+	// Acceleration gets the same treatment, for the same reason and one more: the lookahead
+	// is derived from BOTH, so an accel that ignored MoveOptions would size the lookahead
+	// against a deceleration ramp the arm is not actually going to have.
+	accel := defaultAccel
+	if options != nil && len(options.MaxAccRadsJoints) == 0 && options.MaxAccRads > 0 {
+		accel = servo.ResolveAccelDegsPerSecSq(options.MaxAccRads, defaultAccel)
 	}
 
 	// Derived per move, not per component: MoveOptions can cap the speed well below the
