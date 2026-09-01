@@ -25,8 +25,12 @@ func TestLookaheadDegFor(t *testing.T) {
 		name: "a slow move keeps the droop floor", speed: 25.2, acc: 500, want: DefaultLookaheadDeg,
 		why: "0.64 deg ramp is below the 2.0 droop floor",
 	}, {
-		name: "the shipped default profile", speed: 50, acc: 500, want: 3.0,
-		why: "50^2/(2*500) * 1.2",
+		// The shipped default sits exactly ON the crossover: 1.2*50^2/(2*500) is 3.0, the
+		// same value DefaultLookaheadDeg carries, so this row pins neither branch on its
+		// own -- the 58.8 and 25.2 rows do that. It is here to catch either constant
+		// moving, which would change the default profile's character.
+		name: "the shipped default profile sits on the crossover", speed: 50, acc: 500,
+		want: DefaultLookaheadDeg, why: "1.2 * 50^2/(2*500) == DefaultLookaheadDeg",
 	}, {
 		// Below the droop the dwell is never satisfied and every waypoint burns its full
 		// timeout -- the failure the floor exists to prevent.

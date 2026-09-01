@@ -21,10 +21,8 @@ const (
 
 	// Configured-speed bounds in deg/s (mirror the config validation), used to clamp a
 	// MoveOptions-derived speed so a tiny or huge MaxVelRads can't produce an unsafe command.
-	//
-	// NOTE minSpeedDegsPerSec is BELOW MinExecutableSpeedDegsPerSec: the configured range
-	// promises speeds this hardware does not honour. Measured, not inferred -- see that
-	// constant. Left alone here because raising it is a breaking config change.
+	// NOTE: minSpeedDegsPerSec is BELOW MinExecutableSpeedDegsPerSec -- see docs/arm.md,
+	// "Motion and speed". Raising it would be a breaking config change.
 	minSpeedDegsPerSec = 3.0
 	maxSpeedDegsPerSec = 180.0
 
@@ -40,27 +38,12 @@ const (
 	MaxMoveTimeoutMs = 15000
 )
 
-// MinExecutableSpeedDegsPerSec is the slowest per-joint speed the STS3215 actually honours,
-// and the floor CoordinatedProfiles applies to every joint it scales down.
+// MinExecutableSpeedDegsPerSec is the slowest per-joint speed the STS3215 honours, and the
+// floor CoordinatedProfiles applies to every joint it scales down. Below it the register
+// fails in OPPOSITE directions depending on load, so no single correction recovers it.
 //
-// Below it the register is not merely imprecise, it fails in OPPOSITE directions depending
-// on load, so neither the commanded speed nor any single correction is recoverable. Measured
-// on an SO-101 (p_gain 32), 3 reps per point, 25 degree sweeps:
-//
-//	commanded   shoulder (heavy)   elbow (light)   wrist (unloaded)
-//	 4 deg/s     0.80  (0.20x)      1.57 (0.39x)    7.60 (1.90x)
-//	 8 deg/s     3.13  (0.39x)      8.82 (1.10x)    8.78 (1.10x)
-//	10 deg/s     8.18  (bimodal, 4.22-10.19 across reps)
-//	10.5 deg/s  10.52  (1.00x)     10.50 (1.00x)   10.44 (0.99x)
-//
-// The light joints floor hard at ~8.8 deg/s -- command less and you still get 8.8. The
-// gravity-loaded shoulder does the reverse and under-executes to a fifth of its command.
-// All three track within 1% from 10.5 up.
-//
-// 12 carries margin over the worst joint's measured 10.5 and clear of the bimodal 10.0. It
-// is a tuning value, NOT a hardware constant: it comes from one arm, three joints, one pose
-// each, on 10-25 degree sweeps. A payload or a different pose moves the loaded joint's
-// threshold, and short accel-limited segments were not measured.
+// A tuning value, not a hardware constant -- measured on one arm at p_gain 32. See
+// docs/arm.md, "Motion and speed", for the measurements and their limits.
 const MinExecutableSpeedDegsPerSec = 12.0
 
 // Waypoint-lookahead bounds, in degrees: how far ahead of the arm the commanded goal is
@@ -68,23 +51,11 @@ const MinExecutableSpeedDegsPerSec = 12.0
 // to it, and only then commands the next one.
 const (
 	// DefaultLookaheadDeg is the lookahead's SATISFIABILITY floor, not a good default on its
-	// own. A servo settles where its position error times its P gain balances the load, so a
-	// lookahead below that droop is never reached, and every waypoint burns its full dwell
-	// timeout instead of releasing on its first read.
-	//
-	// Measured droop on gravity-loaded SO-101 joints: 4.6-5.2 deg at p_gain 16, 2.0-2.3 at
-	// 32, 1.26-1.49 at 48. This was 2.0 and documented as clearing the p_gain 32 case. It
-	// does not -- it sits INSIDE that 2.0-2.3 band. Observed on hardware: recordings whose
-	// derived speed lifted the lookahead above the droop (a wave at 58.8 deg/s -> 4.14 deg)
-	// replayed smoothly, while slower ones that fell back to this floor (a nod at 25.2 deg/s,
-	// a gripper test at 21.0) were stuttery and ran roughly 8x their recorded duration.
-	//
-	// 3.0 clears the p_gain 32 band with ~30% margin. It deliberately does NOT clear p_gain
-	// 16, whose 4.8 deg droop would need a lookahead wider than a typical segment; an arm
-	// left at that gain needs its gain raised, not its lookahead. The dwell's stall escape is
-	// the backstop for any droop this floor cannot cover.
-	//
-	// It is NOT sufficient by itself -- see LookaheadDegFor for the other lower bound.
+	// own: a lookahead below the droop the arm parks with is never reached, and every
+	// waypoint burns its full dwell timeout. 3.0 clears the p_gain 32 droop band with ~30%
+	// margin; it deliberately does not clear p_gain 16, which the dwell's stall escape
+	// backstops instead. NOT sufficient alone -- see LookaheadDegFor for the other bound.
+	// Measurements: docs/arm.md, "Waypoint streams".
 	DefaultLookaheadDeg = 3.0
 	MinLookaheadDeg     = 0.1
 	MaxLookaheadDeg     = 45.0
@@ -95,21 +66,11 @@ const (
 )
 
 // LookaheadDegFor returns the waypoint lookahead a motion profile needs, from the two
-// independent lower bounds it has to clear.
+// independent lower bounds it has to clear: the servo's deceleration distance v^2/(2a) --
+// release the next goal after the servo is inside that ramp and the stream dips in velocity
+// at every waypoint -- and DefaultLookaheadDeg, the droop floor, which governs at low speed.
 //
-// The first is the servo's DECELERATION DISTANCE, v^2/(2a). A servo slows as it approaches
-// its goal, so unless the next goal is written before that ramp begins, a waypoint stream
-// decelerates and re-accelerates at every waypoint. On a 10 Hz recording that is ten
-// velocity dips a second, and it reads as jerk. Measured on a recorded wave replayed at
-// 58.8 deg/s: the ramp is 3.45 deg, the old fixed 2.0 released the next goal only after the
-// servo was already inside it, and raising the lookahead to 4 removed the jerk.
-//
-// The second is DefaultLookaheadDeg, the droop the arm parks with -- a lookahead under it is
-// never satisfied at all. That one dominates at low speed: a nod at 25.2 deg/s has a ramp of
-// only 0.64 deg, so it keeps the 2.0 floor.
-//
-// So the fixed 2.0 this replaces was right only below ~45 deg/s at the default acceleration,
-// which is why a slow recording felt fine and a fast one did not.
+// See docs/arm.md, "Waypoint streams", for the hardware measurements behind both.
 func LookaheadDegFor(speedDegsPerSec, accelDegsPerSecSq float64) float64 {
 	// The Acc register floors at ~43 deg/s^2, so a lower request is silently raised by the
 	// hardware and the ramp is shorter than the configured value implies.
@@ -128,14 +89,7 @@ func LookaheadDegFor(speedDegsPerSec, accelDegsPerSecSq float64) float64 {
 // (the package's documented contract). If bench testing shows the commanded speed differs
 // materially from the measured speed, adjust StepsPerDegree by the measured factor.
 func DegPerSecToStepsPerSec(degPerSec float64) int {
-	steps := int(math.Round(degPerSec * StepsPerDegree))
-	if steps < minSpeedSteps {
-		steps = minSpeedSteps
-	}
-	if steps > maxSpeedSteps {
-		steps = maxSpeedSteps
-	}
-	return steps
+	return min(max(int(math.Round(degPerSec*StepsPerDegree)), minSpeedSteps), maxSpeedSteps)
 }
 
 // ResolveSpeedDegsPerSec picks the effective move speed in deg/s. A per-move
@@ -145,37 +99,17 @@ func ResolveSpeedDegsPerSec(maxVelRads, defaultSpeedDegsPerSec float64) float64 
 	if maxVelRads <= 0 {
 		return defaultSpeedDegsPerSec
 	}
-	degs := utils.RadToDeg(maxVelRads)
-	if degs < minSpeedDegsPerSec {
-		degs = minSpeedDegsPerSec
-	}
-	if degs > maxSpeedDegsPerSec {
-		degs = maxSpeedDegsPerSec
-	}
-	return degs
+	return min(max(utils.RadToDeg(maxVelRads), minSpeedDegsPerSec), maxSpeedDegsPerSec)
 }
 
-// ResolveAccelDegsPerSecSq picks the effective reference acceleration in deg/s^2, mirroring
-// ResolveSpeedDegsPerSec: a per-move MoveOptions.MaxAccRads (radians/second^2) wins when
-// positive, otherwise the configured default, clamped to what the Acc register can express.
-//
-// The symmetry is load-bearing, not tidiness. LookaheadDegFor needs the acceleration
-// ACTUALLY in force: a caller that lowers it lengthens the servo's deceleration ramp, and a
-// lookahead still computed from the higher configured default would then release the next
-// goal after the servo had already begun decelerating -- the jerk the derived lookahead
-// exists to prevent.
+// ResolveAccelDegsPerSecSq mirrors ResolveSpeedDegsPerSec for acceleration. The symmetry is
+// load-bearing: LookaheadDegFor needs the acceleration ACTUALLY in force, or a caller that
+// lowers it gets a longer real ramp and a lookahead still sized for the shorter one.
 func ResolveAccelDegsPerSecSq(maxAccRads, defaultAccelDegsPerSecSq float64) float64 {
 	if maxAccRads <= 0 {
 		return defaultAccelDegsPerSecSq
 	}
-	degs := utils.RadToDeg(maxAccRads)
-	if degs < MinAccelDegsPerSecSq {
-		degs = MinAccelDegsPerSecSq
-	}
-	if degs > MaxAccelDegsPerSecSq {
-		degs = MaxAccelDegsPerSecSq
-	}
-	return degs
+	return min(max(utils.RadToDeg(maxAccRads), MinAccelDegsPerSecSq), MaxAccelDegsPerSecSq)
 }
 
 // MoveTimeoutMs returns a safety timeout (ms) for waiting on a move to complete, based on

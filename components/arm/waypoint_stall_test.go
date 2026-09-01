@@ -13,11 +13,9 @@ import (
 	"so_arm/internal/servo"
 )
 
-// A servo settles where its position error times its P gain balances the load, and then
-// reports Moving=0 with the goal unreached. On an SO-101 whose servos ship with p_gain 16,
-// a gravity-loaded joint parks ~4.8 deg short -- past any usable lookahead -- so before the
-// stall escape the dwell's only exit was its deadline, and a 1.5s recorded trajectory took
-// 31s of pure waiting on hardware.
+// A servo parks short of its goal and reports Moving=0, past any usable lookahead at a low
+// P gain, so without the stall escape the dwell's only exit is its deadline. See
+// docs/arm.md, "Waypoint streams".
 
 func TestWaypointDwellStopsWaitingOnServosThatHaveStopped(t *testing.T) {
 	w0 := []float64{0.20, 0, 0, 0, 0}
@@ -51,10 +49,8 @@ func TestWaypointDwellIgnoresTheMovingStateOnItsFirstPoll(t *testing.T) {
 	parked := shortOfGoal(0.20)
 	s, _ := dwellTestArm(t, [][]float64{parked})
 
-	// A servo takes ~2ms to raise Moving after a goal write, so the state read on the very
-	// first poll can still be the pre-write zero. Reading it there would abandon a waypoint
-	// before the arm had started. This reports "not moving" from the first call onward; the
-	// dwell must still have polled positions at least twice before acting on it.
+	// Moving takes ~2ms to rise after a goal write, so a first-poll read can be the pre-write
+	// zero. This reports "not moving" from call one; the dwell must poll twice before acting.
 	positionReads := 0
 	s.readJoints = func(context.Context) ([]float64, error) {
 		positionReads++
@@ -87,15 +83,11 @@ func TestWaypointDwellFallsBackToItsDeadlineWhenTheMovingReadFails(t *testing.T)
 		[][]referenceframe.Input{w0, w1}, nil, nil))
 }
 
-// Stop zeroes servo velocity, which makes the servos stop — precisely the condition the
-// stall escape fires on. So a cancelled stream reliably takes the escape rather than the
-// select's ctx.Done(), and the waypoint loop gets as far as one more moveJoints write
-// before its ctx.Err() check unwinds it.
-//
-// That write is harmless only because of the ordering Stop already commits to:
-// opMgr.CancelRunning BLOCKS until the stream returns (rdk's cancelAndWaitFunc waits on a
-// condition variable), so controller.Stop's zero always lands after any stray write. This
-// test pins the stream terminating; TestStopCancelsARunningWaypointStream pins the ordering.
+// Stop's zeroed velocity is exactly the condition the stall escape fires on, so a cancelled
+// stream takes the escape rather than the select's ctx.Done() and reaches one more moveJoints
+// write before ctx.Err() unwinds it. That write is harmless because opMgr.CancelRunning
+// blocks until the stream returns. This pins termination; TestStopCancelsARunningWaypointStream
+// pins the ordering.
 func TestWaypointDwellTerminatesWhenCancelledWhileServosAreStopped(t *testing.T) {
 	w0 := []float64{0.20, 0, 0, 0, 0}
 	w1 := []float64{0.40, 0, 0, 0, 0}

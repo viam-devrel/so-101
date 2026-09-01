@@ -344,13 +344,9 @@ func NewSO101(ctx context.Context, deps resource.Dependencies, name resource.Nam
 		lookaheadDeg: conf.WaypointLookaheadDeg,
 	}
 
-	lookaheadNote := fmt.Sprintf("%.2f deg (configured)", conf.WaypointLookaheadDeg)
-	if conf.WaypointLookaheadDeg == 0 {
-		lookaheadNote = fmt.Sprintf("%.2f deg (derived, at the default profile)",
-			servo.LookaheadDegFor(float64(speedDegsPerSec), float64(accelerationDegsPerSec)))
-	}
 	logger.Debugf("SO-101 configured with speed: %.1f deg/s, acceleration: %.1f deg/s², "+
-		"waypoint lookahead: %s", speedDegsPerSec, accelerationDegsPerSec, lookaheadNote)
+		"waypoint lookahead: %.2f deg (0 = derived per move)",
+		speedDegsPerSec, accelerationDegsPerSec, conf.WaypointLookaheadDeg)
 	logger.Debugf("Arm controlling servo IDs: %v", arm.armServoIDs)
 
 	// Initialize and verify servo connections

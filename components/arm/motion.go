@@ -250,9 +250,8 @@ func (s *so101) moveJoints(
 // for, which on a path densified 10x from a 10 Hz recording is minutes of pure polling.
 const dwellPollInterval = 10 * time.Millisecond
 
-// minDwellPoll bounds how eagerly the adaptive wait below can re-read. Each poll is one
-// SyncRead, and CLAUDE.md records a position read failing outright under sustained max-rate
-// polling -- which in this dwell is fatal to the move.
+// minDwellPoll bounds how eagerly the adaptive wait below can re-read: a position read can
+// fail outright under sustained max-rate polling, which in this dwell is fatal to the move.
 const minDwellPoll = 2 * time.Millisecond
 
 // dwellUntilNear holds an intermediate waypoint until every joint is within lookaheadDeg of it,
@@ -266,13 +265,8 @@ const minDwellPoll = 2 * time.Millisecond
 // both bounds how much corner the stream can cut and sets the pace (see
 // servo.DefaultLookaheadDeg).
 //
-// The wait between polls is PREDICTED, not fixed. A fixed tick quantises every waypoint to a
-// multiple of itself: the arm needs some fraction of a tick to close the last of its gap, and
-// the dwell cannot notice until the next one. Measured on a recorded nod (544 waypoints,
-// 6.9s recorded), that rounding cost 5.5ms per waypoint at a 10ms tick -- 3.0s of the 5.0s by
-// which playback overran. Sleeping the time the arm is actually predicted to still need cut
-// it to 1.1ms per waypoint at a 4ms tick without raising the poll rate, which is what this
-// does adaptively.
+// The wait between polls is PREDICTED, not fixed: a fixed tick quantises every waypoint to a
+// multiple of itself. See docs/arm.md, "Waypoint streams".
 //
 // Best-effort on the timeout, like WaitForServosToStop: it logs and returns the last read
 // rather than failing a move that is merely lagging. A read FAILURE is fatal, though --
@@ -297,10 +291,9 @@ func (s *so101) dwellUntilNear(ctx context.Context, goal []float64, lookaheadDeg
 		if remainingDeg <= lookaheadDeg {
 			return current, nil
 		}
-		// A servo parks short of its goal and reports Moving=0. That droop exceeds any usable
-		// lookahead at a low P gain, leaving the deadline as the only exit -- which is what
-		// made a nod replay take 8x its recorded duration. See docs/arm.md, "Waypoint
-		// streams". Not on the first poll: Moving takes ~2ms to rise after a goal write.
+		// A servo parks short of its goal and reports Moving=0, leaving the deadline as the
+		// only exit. Not on the first poll: Moving takes ~2ms to rise after a goal write.
+		// See docs/arm.md, "Waypoint streams".
 		if polls > 0 {
 			moving, mErr := s.anyServoMoving(ctx)
 			switch {
@@ -323,26 +316,16 @@ func (s *so101) dwellUntilNear(ctx context.Context, goal []float64, lookaheadDeg
 			return current, nil
 		}
 
-		// Sleep only as long as the arm is predicted to still need. Over-estimating the
-		// speed just polls early, which is harmless; under-estimating degrades to the cap,
-		// which is the old fixed behaviour. The reference speed is the dominant joint's, so
-		// it errs on the safe side of the two.
+		// Sleep only as long as the arm is predicted to still need. Over-estimating the speed
+		// polls early (harmless); under-estimating degrades to the cap, the old behaviour.
 		wait := dwellPollInterval
 		if speedDegsPerSec > 0 {
-			predicted := time.Duration((remainingDeg - lookaheadDeg) / speedDegsPerSec * float64(time.Second))
-			if predicted < wait {
-				wait = predicted
-			}
+			wait = min(wait, time.Duration((remainingDeg-lookaheadDeg)/speedDegsPerSec*float64(time.Second)))
 		}
-		if wait < minDwellPoll {
-			wait = minDwellPoll
-		}
-		timer := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
-			timer.Stop()
 			return nil, ctx.Err()
-		case <-timer.C:
+		case <-time.After(max(wait, minDwellPoll)):
 		}
 	}
 }
@@ -454,17 +437,15 @@ func (s *so101) MoveThroughJointPositions(ctx context.Context, positions [][]ref
 		speed = servo.ResolveSpeedDegsPerSec(options.MaxVelRads, defaultSpeed)
 	}
 
-	// Acceleration gets the same treatment, for the same reason and one more: the lookahead
-	// is derived from BOTH, so an accel that ignored MoveOptions would size the lookahead
-	// against a deceleration ramp the arm is not actually going to have.
+	// Same treatment as speed, plus one more reason: the lookahead is derived from BOTH, so
+	// an accel that ignored MoveOptions would size it against a ramp the arm will not have.
 	accel := defaultAccel
 	if options != nil && len(options.MaxAccRadsJoints) == 0 && options.MaxAccRads > 0 {
 		accel = servo.ResolveAccelDegsPerSecSq(options.MaxAccRads, defaultAccel)
 	}
 
 	// Derived per move, not per component: MoveOptions can cap the speed well below the
-	// configured default, and the lookahead has to track the speed actually in force or it
-	// is wrong in one direction or the other. A configured value overrides it outright.
+	// configured default. A configured value overrides it outright.
 	lookahead := s.lookaheadDeg
 	if lookahead == 0 {
 		lookahead = servo.LookaheadDegFor(speed, accel)

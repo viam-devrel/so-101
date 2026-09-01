@@ -8,35 +8,39 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.viam.com/rdk/components/arm"
 	"go.viam.com/rdk/referenceframe"
+	"go.viam.com/rdk/utils"
 
 	"so_arm/internal/servo"
 )
 
-// The lookahead is derived per move from the speed and acceleration actually in force,
-// because a servo's deceleration distance grows with the square of its speed. A fixed value
-// is necessarily wrong at one end: 2.0 deg was below the ramp of a wave replayed at
-// 58.8 deg/s, so the next goal was written only after the servo had begun decelerating —
-// ten velocity dips a second on a 10 Hz recording.
+// The lookahead is derived per move, because a servo's deceleration distance grows with the
+// square of its speed, so a fixed value is necessarily wrong at one end. See docs/arm.md.
 func TestWaypointLookaheadIsDerivedFromTheMoveProfile(t *testing.T) {
 	w0 := []float64{0.20, 0, 0, 0, 0}
 	w1 := []float64{0.40, 0, 0, 0, 0}
 
-	// 0.045 rad is 2.58 deg short of w0: inside the 3.0 deg derived from the default
-	// 50 deg/s + 500 deg/s^2 profile, but outside the old fixed 2.0.
-	short := []float64{0.20 - 0.045, 0, 0, 0, 0}
+	// The move speed has to differ from the component default, or the assertion cannot tell
+	// derivation from the floor: at the shipped 50 deg/s + 500 deg/s^2 the ramp term is
+	// exactly 3.0 deg, the same value DefaultLookaheadDeg carries. At 100 deg/s the ramp is
+	// 12.0 deg, so a 6 deg residual satisfies the derived lookahead and nothing else.
+	opts := &arm.MoveOptions{MaxVelRads: utils.DegToRad(100)}
+	require.InDelta(t, 12.0, servo.LookaheadDegFor(100, servo.DefaultAccelDegsPerSecSq), 0.01)
+
+	short := []float64{0.20 - utils.DegToRad(6), 0, 0, 0, 0}
 
 	s, calls := dwellTestArm(t, [][]float64{short})
 	s.lookaheadDeg = 0 // unset: derive
 
 	require.NoError(t, s.MoveThroughJointPositions(context.Background(),
-		[][]referenceframe.Input{w0, w1}, nil, nil))
+		[][]referenceframe.Input{w0, w1}, opts, nil))
 
 	// One seeding read plus one dwell read: the derived lookahead is satisfied on the first
-	// poll. Under the old fixed 2.0 this waypoint could never be satisfied and would poll
-	// until its deadline instead.
+	// poll. Against DefaultLookaheadDeg this residual is never satisfied and the dwell polls
+	// to its deadline instead, so this fails if the derivation is dropped.
 	assert.Equal(t, 2, calls(),
-		"a 2.58 deg residual must satisfy the lookahead derived for a 50 deg/s move")
+		"a 6 deg residual must satisfy the lookahead derived for a 100 deg/s move")
 }
 
 func TestConfiguredWaypointLookaheadOverridesTheDerivedOne(t *testing.T) {
@@ -57,11 +61,8 @@ func TestConfiguredWaypointLookaheadOverridesTheDerivedOne(t *testing.T) {
 	assert.Greater(t, time.Since(started), 10*time.Millisecond, "the dwell must have polled")
 }
 
-// A fixed poll tick quantises every waypoint to a multiple of itself: the arm needs some
-// fraction of a tick to close the last of its gap, and the dwell cannot notice until the
-// next one. Measured on a recorded nod, that rounding cost 5.5 ms per waypoint at a 10 ms
-// tick — 2.4 s of the 5.0 s by which a 6.9 s recording overran. The wait is therefore
-// predicted from the distance still to cover, not fixed.
+// A fixed poll tick quantises every waypoint to a multiple of itself, so the wait is
+// predicted from the distance still to cover. See docs/arm.md, "Waypoint streams".
 func TestWaypointDwellWaitsOnlyAsLongAsTheArmStillNeeds(t *testing.T) {
 	w0 := []float64{0.20, 0, 0, 0, 0}
 	w1 := []float64{0.40, 0, 0, 0, 0}
@@ -95,9 +96,7 @@ func TestWaypointDwellWaitsOnlyAsLongAsTheArmStillNeeds(t *testing.T) {
 
 func TestWaypointDwellNeverWaitsBelowItsFloor(t *testing.T) {
 	// The predicted wait shrinks with the remaining distance, so without a floor a nearly
-	// arrived arm would be polled as fast as the bus allows. CLAUDE.md records a position
-	// read failing outright under sustained max-rate polling, and in this dwell that is
-	// fatal to the move.
+	// arrived arm is polled as fast as the bus allows -- where a read can fail outright.
 	w0 := []float64{0.20, 0, 0, 0, 0}
 	w1 := []float64{0.40, 0, 0, 0, 0}
 	// A hair past the lookahead: predicted wait is microseconds.

@@ -66,6 +66,21 @@ So when servo 6's range is too wide to be real, the module substitutes a conserv
 
 The hardware arm scales each joint's speed and acceleration by its share of the move's travel, so all joints arrive together. `speed_degs_per_sec` and `acceleration_degs_per_sec_per_sec` (or their per-move overrides, below) apply to the longest-travel joint; the rest are scaled down to match it.
 
+**Coordinated scaling has a floor.** A joint scaled down to a very low speed is not merely imprecise — below roughly 10.5 °/s the STS3215's goal-velocity register fails in *opposite* directions depending on load, so neither the commanded speed nor any single correction is recoverable. Measured on an SO-101 at `p_gain` 32, 3 reps per point, 25° sweeps:
+
+| commanded | shoulder (heavy) | elbow (light) | wrist (unloaded) |
+|---|---|---|---|
+| 4 °/s | 0.80 (0.20×) | 1.57 (0.39×) | 7.60 (1.90×) |
+| 8 °/s | 3.13 (0.39×) | 8.82 (1.10×) | 8.78 (1.10×) |
+| 10 °/s | 8.18 (bimodal, 4.22–10.19 across reps) | | |
+| 10.5 °/s | 10.52 (1.00×) | 10.50 (1.00×) | 10.44 (0.99×) |
+
+The light joints floor hard at ~8.8 °/s — command less and you still get 8.8. The gravity-loaded shoulder does the reverse and under-executes to a fifth of its command. All three track within 1% from 10.5 up. So `MinExecutableSpeedDegsPerSec` is **12**, carrying margin over the worst joint's measured 10.5 and clear of the bimodal 10.0, and every scaled-down joint is floored there: a low-share joint arrives early instead of executing an unpredictable speed. A *stationary* joint is left at the 1-step floor — its goal is its own position, so the value is inert.
+
+That 12 is a tuning value, not a hardware constant. It comes from one arm, three joints, one pose each, on 10–25° sweeps; a payload or a different pose moves the loaded joint's threshold, and short accel-limited segments were not measured. Note also that `speed_degs_per_sec`'s configured minimum is 3 °/s, *below* this floor — the configured range promises speeds the hardware does not honour, and raising it would be a breaking config change.
+
+A per-joint `MaxVelRadsJoints` cap still wins over the floor: a cap slower than 12 °/s is under-executed rather than silently exceeded.
+
 `MoveThroughJointPositions` accepts `MoveOptions.MaxVelRads` and `MaxAccRads` to override the configured defaults for one move, and the per-joint forms `MaxVelRadsJoints` and `MaxAccRadsJoints`. Setting a per-joint slice makes the matching scalar ignored, per `arm.proto`; a slice whose length doesn't match the arm's joint count is rejected. A per-joint limit slows the whole move rather than that joint, so the joints stay coordinated. `GoToInputs` routes through this same path.
 
 ### Waypoint streams
@@ -101,7 +116,7 @@ Note the derived value grows with the *square* of speed, so a move at the 180 °
 
 - **Larger** — the goal leads by more, the arm never decelerates near a waypoint, motion is faster and cuts more corner between waypoints.
 - **Smaller** — the path is tracked more exactly, down to a near-stop at every waypoint at very small values.
-- The default `2.0` is about 23 servo steps: loose enough to clear the steady-state error a gravity-loaded joint parks with (a lookahead the hardware cannot reach makes every waypoint wait out its timeout instead), tight enough to keep the arm on the path. A joint chasing a goal 2° away cruises at roughly `sqrt(accel × lookahead)`, so at the default acceleration this replays a 10 Hz recording at close to its recorded duration.
+- A joint chasing its goal cruises at roughly `sqrt(accel × lookahead)`, so the derived value above replays a 10 Hz recording at close to its recorded duration.
 
 **A waypoint the arm has stopped short of ends immediately.** A servo settles where its position error times its P gain balances the load, then reports `Moving = 0` with the goal unreached. When that droop exceeds the lookahead — which the floor above cannot always prevent, since a `p_gain` 16 arm droops 4.8° — the dwell would otherwise have no exit but its deadline. Because it gates on the **worst** joint, one joint parked short makes every waypoint in the stream wait out its full timeout. Measured on hardware: a 1.5 s recorded trajectory took 31.3 s; with the escape, 6.5 s, and path deviation was unchanged (3.8° → 3.7° mean), so the escape removes dead time without cutting corners.
 
