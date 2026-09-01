@@ -250,6 +250,11 @@ func (s *so101) moveJoints(
 // for, which on a path densified 10x from a 10 Hz recording is minutes of pure polling.
 const dwellPollInterval = 10 * time.Millisecond
 
+// minDwellPoll bounds how eagerly the adaptive wait below can re-read. Each poll is one
+// SyncRead, and CLAUDE.md records a position read failing outright under sustained max-rate
+// polling -- which in this dwell is fatal to the move.
+const minDwellPoll = 2 * time.Millisecond
+
 // dwellUntilNear holds an intermediate waypoint until every joint is within lookaheadDeg of it,
 // then returns the last position read so the caller can use it as the next segment's travel
 // reference.
@@ -261,14 +266,20 @@ const dwellPollInterval = 10 * time.Millisecond
 // both bounds how much corner the stream can cut and sets the pace (see
 // servo.DefaultLookaheadDeg).
 //
+// The wait between polls is PREDICTED, not fixed. A fixed tick quantises every waypoint to a
+// multiple of itself: the arm needs some fraction of a tick to close the last of its gap, and
+// the dwell cannot notice until the next one. Measured on a recorded nod (544 waypoints,
+// 6.9s recorded), that rounding cost 5.5ms per waypoint at a 10ms tick -- 3.0s of the 5.0s by
+// which playback overran. Sleeping the time the arm is actually predicted to still need cut
+// it to 1.1ms per waypoint at a 4ms tick without raising the poll rate, which is what this
+// does adaptively.
+//
 // Best-effort on the timeout, like WaitForServosToStop: it logs and returns the last read
 // rather than failing a move that is merely lagging. A read FAILURE is fatal, though --
 // without position feedback the dwell degenerates into the flythrough it exists to replace,
 // and every remaining segment would be scaled against a stale travel reference.
-func (s *so101) dwellUntilNear(ctx context.Context, goal []float64, lookaheadDeg float64, timeoutMs int) ([]float64, error) {
+func (s *so101) dwellUntilNear(ctx context.Context, goal []float64, lookaheadDeg, speedDegsPerSec float64, timeoutMs int) ([]float64, error) {
 	deadline := time.Now().Add(time.Duration(timeoutMs) * time.Millisecond)
-	ticker := time.NewTicker(dwellPollInterval)
-	defer ticker.Stop()
 
 	// polls counts completed polls rather than a flag cleared at the bottom of the loop: a
 	// flag can be stranded true by any future early `continue`, which would silently disable
@@ -312,10 +323,26 @@ func (s *so101) dwellUntilNear(ctx context.Context, goal []float64, lookaheadDeg
 			return current, nil
 		}
 
+		// Sleep only as long as the arm is predicted to still need. Over-estimating the
+		// speed just polls early, which is harmless; under-estimating degrades to the cap,
+		// which is the old fixed behaviour. The reference speed is the dominant joint's, so
+		// it errs on the safe side of the two.
+		wait := dwellPollInterval
+		if speedDegsPerSec > 0 {
+			predicted := time.Duration((remainingDeg - lookaheadDeg) / speedDegsPerSec * float64(time.Second))
+			if predicted < wait {
+				wait = predicted
+			}
+		}
+		if wait < minDwellPoll {
+			wait = minDwellPoll
+		}
+		timer := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return nil, ctx.Err()
-		case <-ticker.C:
+		case <-timer.C:
 		}
 	}
 }
@@ -484,7 +511,7 @@ func (s *so101) MoveThroughJointPositions(ctx context.Context, positions [][]ref
 		// ACTUALLY is, which matters because a joint whose travel is concentrated earlier
 		// in the path would otherwise show a near-zero delta and be floored to 1 step/s
 		// while its goal is still far away.
-		from, err = s.dwellUntilNear(ctx, clamped, lookahead, dwellTimeout)
+		from, err = s.dwellUntilNear(ctx, clamped, lookahead, speed, dwellTimeout)
 		if err != nil {
 			return err
 		}
