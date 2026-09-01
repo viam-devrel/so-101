@@ -30,7 +30,7 @@ The following attributes are available for the arm component:
 | `visualize_ee_frame` | bool   | Optional     | When `true`, serves a colored XYZ coordinate-frame marker at the end-effector for the 3D viewer. Default is `false`.                                                    |
 | `speed_degs_per_sec` | float  | Optional     | Real per-joint speed cap enforced on the servos, in degrees per second. Applies to the longest-travel joint in a move; other joints are scaled down so all joints arrive together. Default `50`, valid range 3–180. |
 | `acceleration_degs_per_sec_per_sec` | float | Optional | Per-joint acceleration cap enforced on the servos, in degrees per second². Scaled alongside speed so joints arrive together; lower is smoother but slower. Default `500`, valid range 50–500 (the servo register cannot deliver acceleration outside it). |
-| `waypoint_lookahead_deg` | float | Optional | How far ahead of the arm the commanded goal may run during a `MoveThroughJointPositions`/`GoToInputs` stream, in degrees: the next waypoint is not written until every joint is this close to the current one. The path-fidelity/speed trade — see [Waypoint streams](#waypoint-streams). Default `2.0`, valid range 0.1–45. |
+| `waypoint_lookahead_deg` | float | Optional | How far ahead of the arm the commanded goal may run during a `MoveThroughJointPositions`/`GoToInputs` stream, in degrees: the next waypoint is not written until every joint is this close to the current one. **Omit it** — it is otherwise derived per move from the speed and acceleration in force. Set it only to override. Valid range 0.1–45. See [Waypoint streams](#waypoint-streams). |
 | `use_urdf`         | bool     | Optional     | When `true`, sources kinematics and collision geometry from the bundled `assets/urdf/so101.urdf` instead of the embedded `so101.json`, and requires `VIAM_MODULE_ROOT` (viam-server sets this). A drop-in swap — frame names, TCP, and kinematics are identical; only the collision geometry upgrades from primitive shapes to per-link meshes. Default `false`. |
 | `mesh_decimation_ratios` | []float | Optional | Per-mesh simplification ratios, one per arm link in document order (base, shoulder, upper_arm, lower_arm, wrist). Only values strictly inside `(0, 1)` decimate; lower is more aggressive. Used only with `use_urdf`. Defaults to `0.9` for all five. |
 | `manual_mode`      | object   | Optional     | Tuning for hand-guided [manual mode](#manual-mode) (see below). Omit for the built-in defaults. |
@@ -66,6 +66,21 @@ So when servo 6's range is too wide to be real, the module substitutes a conserv
 
 The hardware arm scales each joint's speed and acceleration by its share of the move's travel, so all joints arrive together. `speed_degs_per_sec` and `acceleration_degs_per_sec_per_sec` (or their per-move overrides, below) apply to the longest-travel joint; the rest are scaled down to match it.
 
+**Coordinated scaling has a floor.** A joint scaled down to a very low speed is not merely imprecise — below roughly 10.5 °/s the STS3215's goal-velocity register fails in *opposite* directions depending on load, so neither the commanded speed nor any single correction is recoverable. Measured on an SO-101 at `p_gain` 32, 3 reps per point, 25° sweeps:
+
+| commanded | shoulder (heavy) | elbow (light) | wrist (unloaded) |
+|---|---|---|---|
+| 4 °/s | 0.80 (0.20×) | 1.57 (0.39×) | 7.60 (1.90×) |
+| 8 °/s | 3.13 (0.39×) | 8.82 (1.10×) | 8.78 (1.10×) |
+| 10 °/s | 8.18 (bimodal, 4.22–10.19 across reps) | | |
+| 10.5 °/s | 10.52 (1.00×) | 10.50 (1.00×) | 10.44 (0.99×) |
+
+The light joints floor hard at ~8.8 °/s — command less and you still get 8.8. The gravity-loaded shoulder does the reverse and under-executes to a fifth of its command. All three track within 1% from 10.5 up. So `MinExecutableSpeedDegsPerSec` is **12**, carrying margin over the worst joint's measured 10.5 and clear of the bimodal 10.0, and every scaled-down joint is floored there: a low-share joint arrives early instead of executing an unpredictable speed. A *stationary* joint is left at the 1-step floor — its goal is its own position, so the value is inert.
+
+That 12 is a tuning value, not a hardware constant. It comes from one arm, three joints, one pose each, on 10–25° sweeps; a payload or a different pose moves the loaded joint's threshold, and short accel-limited segments were not measured. Note also that `speed_degs_per_sec`'s configured minimum is 3 °/s, *below* this floor — the configured range promises speeds the hardware does not honour, and raising it would be a breaking config change.
+
+A per-joint `MaxVelRadsJoints` cap still wins over the floor: a cap slower than 12 °/s is under-executed rather than silently exceeded.
+
 `MoveThroughJointPositions` accepts `MoveOptions.MaxVelRads` and `MaxAccRads` to override the configured defaults for one move, and the per-joint forms `MaxVelRadsJoints` and `MaxAccRadsJoints`. Setting a per-joint slice makes the matching scalar ignored, per `arm.proto`; a slice whose length doesn't match the arm's joint count is rejected. A per-joint limit slows the whole move rather than that joint, so the joints stay coordinated. `GoToInputs` routes through this same path.
 
 ### Waypoint streams
@@ -76,11 +91,36 @@ The hardware arm scales each joint's speed and acceleration by its share of the 
 
 **`Stop` ends a stream.** A paced stream runs for seconds, so `Stop` cancels the move before zeroing velocity and returns once the stream has stopped. Zeroing velocity alone would be overwritten by the next waypoint.
 
-**`waypoint_lookahead_deg` is the fidelity/speed trade.** It is how far ahead of the arm the commanded goal is allowed to run:
+**The lookahead is derived per move, and it has two independent lower bounds.**
+
+A servo decelerates as it approaches its goal, over `v²/2a`. Unless the next goal is written *before* that ramp begins, the arm decelerates and re-accelerates at every waypoint — on a 10 Hz recording, ten velocity dips a second, which reads as jerk. So the lookahead must exceed the deceleration distance.
+
+It must *also* exceed the droop the arm parks with, or the dwell is never satisfied and every waypoint burns its full timeout. Measured on gravity-loaded joints: 4.6–5.2° at `p_gain` 16, **2.0–2.3° at 32**, 1.26–1.49° at 48.
+
+The floor is `3.0`, which clears the `p_gain` 32 band with ~30% margin. It was 2.0 — inside that band — and the consequence was visible on hardware: recordings fast enough for the ramp term to lift the lookahead clear of the droop replayed smoothly, while slower ones that fell back to the floor were stuttery and ran roughly 8× their recorded duration.
+
+The lookahead is therefore `max(1.2 · v²/2a, 3.0)`, computed from the speed and acceleration actually in force — which `arm.MoveOptions` can cap well below the configured default, so it is derived per move rather than once per component.
+
+| move | speed | ramp `v²/2a` | lookahead |
+|---|---|---|---|
+| recorded gripper test | 21.0 °/s | 0.44° | 3.0° (droop floor governs) |
+| recorded nod | 25.2 °/s | 0.64° | 3.0° (droop floor governs) |
+| default profile | 50 °/s | 2.50° | 3.0° |
+| recorded wave | 58.8 °/s | 3.45° | 4.2° |
+
+This replaced a fixed `2.0`, which was correct only below about 45 °/s at the default acceleration. That is why a slow recording replayed smoothly and a fast one felt jerky — confirmed on hardware, where raising a wave replay's lookahead to 4 removed the jerk.
+
+Note the derived value grows with the *square* of speed, so a move at the 180 °/s maximum derives a 38.9° lookahead: at that speed the goal necessarily runs far ahead and the pacing stops gating. Speed and path fidelity genuinely trade against each other here.
+
+**Setting `waypoint_lookahead_deg` overrides all of that.** It is how far ahead of the arm the commanded goal is allowed to run:
 
 - **Larger** — the goal leads by more, the arm never decelerates near a waypoint, motion is faster and cuts more corner between waypoints.
 - **Smaller** — the path is tracked more exactly, down to a near-stop at every waypoint at very small values.
-- The default `2.0` is about 23 servo steps: loose enough to clear the steady-state error a gravity-loaded joint parks with (a lookahead the hardware cannot reach makes every waypoint wait out its timeout instead), tight enough to keep the arm on the path. A joint chasing a goal 2° away cruises at roughly `sqrt(accel × lookahead)`, so at the default acceleration this replays a 10 Hz recording at close to its recorded duration.
+- A joint chasing its goal cruises at roughly `sqrt(accel × lookahead)`, so the derived value above replays a 10 Hz recording at close to its recorded duration.
+
+**A waypoint the arm has stopped short of ends immediately.** A servo settles where its position error times its P gain balances the load, then reports `Moving = 0` with the goal unreached. When that droop exceeds the lookahead — which the floor above cannot always prevent, since a `p_gain` 16 arm droops 4.8° — the dwell would otherwise have no exit but its deadline. Because it gates on the **worst** joint, one joint parked short makes every waypoint in the stream wait out its full timeout. Measured on hardware: a 1.5 s recorded trajectory took 31.3 s; with the escape, 6.5 s, and path deviation was unchanged (3.8° → 3.7° mean), so the escape removes dead time without cutting corners.
+
+The moving state is consulted from the dwell's second poll onward, never the first — a servo takes about 2 ms to raise `Moving` after a goal write, so an immediate check could read the pre-write zero and abandon a waypoint before the arm started. A failure to read it is not fatal; the dwell falls back to its deadline.
 
 Each waypoint's hold is bounded by that segment's own expected ramp duration, so a waypoint the arm cannot reach costs tens of milliseconds, not a full move timeout.
 

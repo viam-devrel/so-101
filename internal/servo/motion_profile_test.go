@@ -121,19 +121,19 @@ func TestCoordinatedProfiles(t *testing.T) {
 		}
 	})
 
-	t.Run("a tiny travel floors instead of rounding into the sentinels", func(t *testing.T) {
-		// k = 0.0001: speed scales to 0.005 deg/s and acceleration to 0.05 deg/s^2, both
-		// of which round to 0 without the floors.
+	t.Run("a moving joint never drops below the executable speed", func(t *testing.T) {
+		// k = 0.0001 scales the speed to 0.005 deg/s. The servo does not honour anything
+		// near that: measured, a command below ~10.5 deg/s is executed either far too fast
+		// (a light joint floors at ~8.8) or far too slow (a loaded joint ran at a fifth of
+		// its command). So the joint is floored to a speed it will actually perform and
+		// arrives early, rather than executing an unpredictable one.
 		got := CoordinatedProfiles([]float64{100, 0.01}, refSpeed, refAccel, nil)
-		// EXACTLY the floor, not merely at-or-above it. 50 deg/s * 0.0001 is 0.005 deg/s,
-		// which rounds to 0 steps and floors to 1. Asserting only ">= 1" would also accept
-		// 34 steps -- what ResolveSpeedDegsPerSec's 3 deg/s floor produces -- so a
-		// substitution of that function for DegPerSecToStepsPerSec would pass unnoticed
-		// while silently destroying scaling for every joint below k ~ 0.06.
-		if got[1].SpeedSteps != minSpeedSteps {
-			t.Errorf("SpeedSteps = %d, want exactly %d (a wrong conversion helper would "+
-				"floor much higher and still satisfy a >= check)", got[1].SpeedSteps, minSpeedSteps)
+		if want := DegPerSecToStepsPerSec(MinExecutableSpeedDegsPerSec); got[1].SpeedSteps != want {
+			t.Errorf("SpeedSteps = %d, want exactly %d (the executable-speed floor)",
+				got[1].SpeedSteps, want)
 		}
+		// Acceleration is NOT floored alongside it: a short segment that cannot reach the
+		// floor speed within its travel is acceleration-limited, which is correct.
 		if got[1].AccUnits != MinAccUnits {
 			t.Errorf("AccUnits = %d, want exactly %d", got[1].AccUnits, MinAccUnits)
 		}
@@ -167,12 +167,28 @@ func TestReduceReferenceAndCaps(t *testing.T) {
 	t.Run("a cap on the reference joint slows everyone proportionally", func(t *testing.T) {
 		caps := []JointLimits{{MaxSpeedDegsPerSec: 25}, {}}
 		got := CoordinatedProfiles([]float64{40, 10}, refSpeed, refAccel, caps)
-		// k = 1.0 and 0.25; the cap halves the reference, so both halve.
+		// k = 1.0 and 0.25; the cap halves the reference, so the reference joint halves.
 		if want := DegPerSecToStepsPerSec(25); got[0].SpeedSteps != want {
 			t.Errorf("capped joint = %d, want %d", got[0].SpeedSteps, want)
 		}
-		if want := DegPerSecToStepsPerSec(6.25); got[1].SpeedSteps != want {
-			t.Errorf("uncapped joint = %d, want %d (it must slow too, to stay coordinated)",
+		// The short joint would scale to 6.25 deg/s, below the executable floor, so it is
+		// floored to 12 and arrives EARLY. Coordination is genuinely lost here -- but it was
+		// never real: 6.25 deg/s is a speed the servo does not perform, so the old value
+		// only looked coordinated. See MinExecutableSpeedDegsPerSec.
+		if want := DegPerSecToStepsPerSec(MinExecutableSpeedDegsPerSec); got[1].SpeedSteps != want {
+			t.Errorf("uncapped short joint = %d, want %d (floored: 6.25 deg/s is not executable)",
+				got[1].SpeedSteps, want)
+		}
+	})
+
+	t.Run("a per-joint cap below the executable floor is under-executed, not exceeded", func(t *testing.T) {
+		// A cap is a constraint the caller may be relying on for safety. When it is slower
+		// than the servo can actually perform, the honest failure is to command the cap and
+		// under-execute -- never to quietly raise the joint to the floor and exceed it.
+		caps := []JointLimits{{}, {MaxSpeedDegsPerSec: 4}}
+		got := CoordinatedProfiles([]float64{40, 10}, refSpeed, refAccel, caps)
+		if want := DegPerSecToStepsPerSec(4); got[1].SpeedSteps != want {
+			t.Errorf("capped joint = %d, want %d (the cap wins over the floor)",
 				got[1].SpeedSteps, want)
 		}
 	})

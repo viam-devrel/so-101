@@ -29,6 +29,16 @@ func (s *so101) currentJoints(ctx context.Context) ([]float64, error) {
 	return s.controller.GetJointPositionsForServos(ctx, s.armServoIDs)
 }
 
+// anyServoMoving reports whether any arm servo is still executing its commanded profile.
+// It is a seam for the same reason as currentJoints: the dwell's stall escape is about what
+// the servos report mid-stream, which a concrete handle cannot express without hardware.
+func (s *so101) anyServoMoving(ctx context.Context) (bool, error) {
+	if s.servosMoving != nil {
+		return s.servosMoving(ctx)
+	}
+	return s.controller.AnyServoMoving(ctx, s.armServoIDs)
+}
+
 // calculateJointLimits dynamically calculates joint limits from calibration data
 func (s *so101) calculateJointLimits() [][2]float64 {
 	limits := make([][2]float64, len(s.armServoIDs))
@@ -240,6 +250,10 @@ func (s *so101) moveJoints(
 // for, which on a path densified 10x from a 10 Hz recording is minutes of pure polling.
 const dwellPollInterval = 10 * time.Millisecond
 
+// minDwellPoll bounds how eagerly the adaptive wait below can re-read: a position read can
+// fail outright under sustained max-rate polling, which in this dwell is fatal to the move.
+const minDwellPoll = 2 * time.Millisecond
+
 // dwellUntilNear holds an intermediate waypoint until every joint is within lookaheadDeg of it,
 // then returns the last position read so the caller can use it as the next segment's travel
 // reference.
@@ -251,16 +265,20 @@ const dwellPollInterval = 10 * time.Millisecond
 // both bounds how much corner the stream can cut and sets the pace (see
 // servo.DefaultLookaheadDeg).
 //
+// The wait between polls is PREDICTED, not fixed: a fixed tick quantises every waypoint to a
+// multiple of itself. See docs/arm.md, "Waypoint streams".
+//
 // Best-effort on the timeout, like WaitForServosToStop: it logs and returns the last read
 // rather than failing a move that is merely lagging. A read FAILURE is fatal, though --
 // without position feedback the dwell degenerates into the flythrough it exists to replace,
 // and every remaining segment would be scaled against a stale travel reference.
-func (s *so101) dwellUntilNear(ctx context.Context, goal []float64, lookaheadDeg float64, timeoutMs int) ([]float64, error) {
+func (s *so101) dwellUntilNear(ctx context.Context, goal []float64, lookaheadDeg, speedDegsPerSec float64, timeoutMs int) ([]float64, error) {
 	deadline := time.Now().Add(time.Duration(timeoutMs) * time.Millisecond)
-	ticker := time.NewTicker(dwellPollInterval)
-	defer ticker.Stop()
 
-	for {
+	// polls counts completed polls rather than a flag cleared at the bottom of the loop: a
+	// flag can be stranded true by any future early `continue`, which would silently disable
+	// the stall escape for the whole dwell.
+	for polls := 0; ; polls++ {
 		current, err := s.currentJoints(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read positions while holding a waypoint: %w", err)
@@ -273,6 +291,23 @@ func (s *so101) dwellUntilNear(ctx context.Context, goal []float64, lookaheadDeg
 		if remainingDeg <= lookaheadDeg {
 			return current, nil
 		}
+		// A servo parks short of its goal and reports Moving=0, leaving the deadline as the
+		// only exit. Not on the first poll: Moving takes ~2ms to rise after a goal write.
+		// See docs/arm.md, "Waypoint streams".
+		if polls > 0 {
+			moving, mErr := s.anyServoMoving(ctx)
+			switch {
+			case mErr != nil:
+				// Auxiliary signal: a transient must not fail a move the deadline covers.
+				s.logger.Debugf("waypoint dwell: could not read moving state, "+
+					"falling back to the timeout: %v", mErr)
+			case !moving:
+				s.logger.Debugf("waypoint dwell: servos stopped %.2f deg short of the "+
+					"waypoint (lookahead %.2f deg), moving to the next waypoint",
+					remainingDeg, lookaheadDeg)
+				return current, nil
+			}
+		}
 		if time.Now().After(deadline) {
 			// Debug, not Warn: on a dense path a lagging waypoint is routine, and one log
 			// line per waypoint would bury everything else.
@@ -281,10 +316,16 @@ func (s *so101) dwellUntilNear(ctx context.Context, goal []float64, lookaheadDeg
 			return current, nil
 		}
 
+		// Sleep only as long as the arm is predicted to still need. Over-estimating the speed
+		// polls early (harmless); under-estimating degrades to the cap, the old behaviour.
+		wait := dwellPollInterval
+		if speedDegsPerSec > 0 {
+			wait = min(wait, time.Duration((remainingDeg-lookaheadDeg)/speedDegsPerSec*float64(time.Second)))
+		}
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
-		case <-ticker.C:
+		case <-time.After(max(wait, minDwellPoll)):
 		}
 	}
 }
@@ -382,8 +423,6 @@ func (s *so101) MoveThroughJointPositions(ctx context.Context, positions [][]ref
 	defaultSpeed := float64(s.defaultSpeed)
 	defaultAccel := float64(s.defaultAcc)
 	s.mu.RUnlock()
-	accel := defaultAccel
-
 	caps, err := servo.JointLimitsFromMoveOptions(options, len(s.armServoIDs))
 	if err != nil {
 		return err
@@ -396,6 +435,20 @@ func (s *so101) MoveThroughJointPositions(ctx context.Context, positions [][]ref
 	speed := defaultSpeed
 	if options != nil && len(options.MaxVelRadsJoints) == 0 && options.MaxVelRads > 0 {
 		speed = servo.ResolveSpeedDegsPerSec(options.MaxVelRads, defaultSpeed)
+	}
+
+	// Same treatment as speed, plus one more reason: the lookahead is derived from BOTH, so
+	// an accel that ignored MoveOptions would size it against a ramp the arm will not have.
+	accel := defaultAccel
+	if options != nil && len(options.MaxAccRadsJoints) == 0 && options.MaxAccRads > 0 {
+		accel = servo.ResolveAccelDegsPerSecSq(options.MaxAccRads, defaultAccel)
+	}
+
+	// Derived per move, not per component: MoveOptions can cap the speed well below the
+	// configured default. A configured value overrides it outright.
+	lookahead := s.lookaheadDeg
+	if lookahead == 0 {
+		lookahead = servo.LookaheadDegFor(speed, accel)
 	}
 
 	// One read before the stream starts; from here on each waypoint's dwell supplies the
@@ -439,7 +492,7 @@ func (s *so101) MoveThroughJointPositions(ctx context.Context, positions [][]ref
 		// ACTUALLY is, which matters because a joint whose travel is concentrated earlier
 		// in the path would otherwise show a near-zero delta and be floored to 1 step/s
 		// while its goal is still far away.
-		from, err = s.dwellUntilNear(ctx, clamped, s.lookaheadDeg, dwellTimeout)
+		from, err = s.dwellUntilNear(ctx, clamped, lookahead, speed, dwellTimeout)
 		if err != nil {
 			return err
 		}

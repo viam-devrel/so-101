@@ -163,6 +163,70 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
   (servo steady-state error), too loose and the goal runs so far ahead the pacing stops
   gating. The dwell is deliberately *not* `WaitForServosToStop` — a stop at every waypoint is
   not a trajectory.
+- **A servo stops short of its goal and reports `Moving = 0`, so the dwell needs a stall
+  escape, not just a tolerance.** A position servo settles where error x P gain balances the
+  load; measured droop is 4.6-5.2 deg at p_gain 16, 2.0-2.3 at 32, 1.26-1.49 at 48. Because
+  `dwellUntilNear` gates on the **worst** joint, one joint parked past the lookahead makes
+  every waypoint in the stream burn its full `DwellTimeoutMs`. Measured: a 1.5s trajectory
+  took 31.3s; with the escape 6.5s, path deviation unchanged (3.8 -> 3.7 deg mean), so it
+  removes dead time without cutting corners. The escape consults `AnyServoMoving` from the
+  dwell's **second** poll onward -- Moving takes ~2ms to rise after a goal write, the same
+  order as the position read before it, so a first-poll check can read the pre-write zero and
+  abandon a waypoint before the arm started. A `Moving` read failure is deliberately NOT fatal
+  (unlike the position read): it is auxiliary, and the deadline still bounds the wait. It is
+  the backstop for any droop `DefaultLookaheadDeg` cannot cover -- notably a p_gain 16 arm,
+  whose 4.8 deg droop would need a lookahead wider than a typical segment.
+- **A fake bus has no gravity, so no unit test can observe the droop.** Every stall-escape
+  test drives the `servosMoving` seam; `dwellTestArm` pins it to "always moving" so the
+  lookahead and deadline tests keep pinning what they pin (the fake answers a `Moving` read
+  with zero, which would otherwise send every dwell down the escape). Test residuals come from
+  `shortOfGoal`, derived from `DefaultLookaheadDeg` -- they were once literals chosen against
+  a 2.0 floor and silently stopped testing anything when it moved.
+- **The dwell's poll wait is PREDICTED, not fixed, and that was worth 2.4s on a 6.9s
+  recording.** A fixed tick quantises every waypoint to a multiple of itself: the arm needs
+  some fraction of a tick to close the last of its gap and the dwell cannot notice until the
+  next one. Measured on hardware by solving three replays as a system -- (poll 10ms, steps 7)
+  11.9s, (10ms, 3) 10.4s, (4ms, 7) 9.5s -- the per-waypoint cost was 5.5ms at a 10ms tick and
+  1.1ms at 4ms, against a base motion time of 8.9s that both fits agree on. So the fix is to
+  sleep `(remaining - lookahead) / speed` capped at `dwellPollInterval` and floored at
+  `minDwellPoll`, which beats shipping a shorter tick: it is more precise exactly when the arm
+  is about to arrive and LESS chatty when it is far away. The floor is load-bearing -- the
+  predicted wait goes to zero as the arm arrives, and CLAUDE.md's own note records a position
+  read failing outright under sustained max-rate polling, which in this dwell is fatal.
+  Over-estimating the speed only polls early (harmless); under-estimating degrades to the cap,
+  i.e. the old behaviour.
+- **8.9s of that 6.9s recording is still unexplained by any of this.** With waypoint overhead
+  extrapolated to zero the base motion is 1.29x the recording, because arm-recorder's
+  `derivedMaxVelRads` models total travel over total time and treats the deceleration and
+  re-acceleration at every direction reversal as free. That is a separate, unfixed term.
+- **The waypoint lookahead has TWO independent lower bounds, and a fixed value cannot clear
+  both.** `LookaheadDegFor` derives it per move as `max(1.2 * v^2/2a, DefaultLookaheadDeg)`.
+  The ramp term is the servo's deceleration distance: write the next goal after the servo is
+  already inside that ramp and the stream decelerates and re-accelerates at every waypoint --
+  on a 10 Hz recording that is ten velocity dips a second, and it reads as jerk. The floor
+  term is the droop the arm parks with (4.8 deg at p_gain 16, 2.2 at 32, 1.5 at 48); below it
+  the dwell is never satisfied at all. The old fixed `2.0` cleared only the second, and so was
+  correct only below ~45 deg/s at the default acceleration -- which is why a recorded nod
+  (25.2 deg/s, 0.64 deg ramp) replayed smoothly and a wave (58.8 deg/s, 3.45 deg ramp) felt
+  jerky on hardware until the lookahead was raised to 4. Derived **per move**, not per
+  component, because `arm.MoveOptions` can cap the speed well below the configured default.
+  `waypoint_lookahead_deg` still overrides it outright.
+- **Pacing is not interpolation, and this module does not interpolate.**
+  `MoveThroughJointPositions` writes each waypoint as a servo goal and paces it; nothing
+  inserts intermediate points. Smoothness therefore comes from the goal LEADING the arm --
+  the lookahead -- not from step size. Do not "simplify" a caller's densification away on the
+  assumption that the arm re-adds it: that was done to arm-recorder's 8x playback
+  interpolation and the replay came back visibly jerky.
+- **Linear interpolation does NOT disturb `CoordinatedProfiles`.** Two plausible-sounding
+  objections to a caller densifying its waypoints are both false, and were checked against
+  the real function rather than reasoned about: (1) sub-segments do NOT collapse onto
+  `MinExecutableSpeedDegsPerSec` -- interpolation preserves each joint's share of the
+  segment's travel, so `k = d_i/d_max` is invariant and the per-joint `SpeedSteps`/`AccUnits`
+  are byte-identical between a parent segment and a 1/8 sub-segment; (2) sub-segments smaller
+  than the lookahead do NOT reintroduce the pre-0.9.3 flythrough -- the goal leads by several
+  sub-waypoints, but the lead is still bounded in absolute degrees by the lookahead, which is
+  the property that matters. Densifying is a legitimate smoothness lever for a caller that
+  knows its own tempo.
 - **`Stop` must cancel the move, not just zero velocity.** A paced waypoint stream runs for
   seconds, so `arm.Stop` calls `opMgr.CancelRunning` *before* `controller.Stop`; the reverse
   order lets the dwell loop write its next goal after the zero and the arm resumes.
