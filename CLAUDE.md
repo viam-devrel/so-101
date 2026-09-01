@@ -163,6 +163,25 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
   (servo steady-state error), too loose and the goal runs so far ahead the pacing stops
   gating. The dwell is deliberately *not* `WaitForServosToStop` — a stop at every waypoint is
   not a trajectory.
+- **A servo stops short of its goal and reports `Moving = 0`, so the dwell needs a stall
+  escape, not just a tolerance.** A position servo settles where error x P gain balances the
+  load; measured droop is 4.6-5.2 deg at p_gain 16, 2.0-2.3 at 32, 1.26-1.49 at 48. Because
+  `dwellUntilNear` gates on the **worst** joint, one joint parked past the lookahead makes
+  every waypoint in the stream burn its full `DwellTimeoutMs`. Measured: a 1.5s trajectory
+  took 31.3s; with the escape 6.5s, path deviation unchanged (3.8 -> 3.7 deg mean), so it
+  removes dead time without cutting corners. The escape consults `AnyServoMoving` from the
+  dwell's **second** poll onward -- Moving takes ~2ms to rise after a goal write, the same
+  order as the position read before it, so a first-poll check can read the pre-write zero and
+  abandon a waypoint before the arm started. A `Moving` read failure is deliberately NOT fatal
+  (unlike the position read): it is auxiliary, and the deadline still bounds the wait. It is
+  the backstop for any droop `DefaultLookaheadDeg` cannot cover -- notably a p_gain 16 arm,
+  whose 4.8 deg droop would need a lookahead wider than a typical segment.
+- **A fake bus has no gravity, so no unit test can observe the droop.** Every stall-escape
+  test drives the `servosMoving` seam; `dwellTestArm` pins it to "always moving" so the
+  lookahead and deadline tests keep pinning what they pin (the fake answers a `Moving` read
+  with zero, which would otherwise send every dwell down the escape). Test residuals come from
+  `shortOfGoal`, derived from `DefaultLookaheadDeg` -- they were once literals chosen against
+  a 2.0 floor and silently stopped testing anything when it moved.
 - **The waypoint lookahead has TWO independent lower bounds, and a fixed value cannot clear
   both.** `LookaheadDegFor` derives it per move as `max(1.2 * v^2/2a, DefaultLookaheadDeg)`.
   The ramp term is the servo's deceleration distance: write the next goal after the servo is

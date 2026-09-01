@@ -80,13 +80,16 @@ The hardware arm scales each joint's speed and acceleration by its share of the 
 
 A servo decelerates as it approaches its goal, over `v²/2a`. Unless the next goal is written *before* that ramp begins, the arm decelerates and re-accelerates at every waypoint — on a 10 Hz recording, ten velocity dips a second, which reads as jerk. So the lookahead must exceed the deceleration distance.
 
-It must *also* exceed the droop the arm parks with, or the dwell is never satisfied and every waypoint burns its full timeout. Measured on a gravity-loaded joint: 4.8° at `p_gain` 16, 2.2° at 32, 1.5° at 48.
+It must *also* exceed the droop the arm parks with, or the dwell is never satisfied and every waypoint burns its full timeout. Measured on gravity-loaded joints: 4.6–5.2° at `p_gain` 16, **2.0–2.3° at 32**, 1.26–1.49° at 48.
 
-The lookahead is therefore `max(1.2 · v²/2a, 2.0)`, computed from the speed and acceleration actually in force — which `arm.MoveOptions` can cap well below the configured default, so it is derived per move rather than once per component.
+The floor is `3.0`, which clears the `p_gain` 32 band with ~30% margin. It was 2.0 — inside that band — and the consequence was visible on hardware: recordings fast enough for the ramp term to lift the lookahead clear of the droop replayed smoothly, while slower ones that fell back to the floor were stuttery and ran roughly 8× their recorded duration.
+
+The lookahead is therefore `max(1.2 · v²/2a, 3.0)`, computed from the speed and acceleration actually in force — which `arm.MoveOptions` can cap well below the configured default, so it is derived per move rather than once per component.
 
 | move | speed | ramp `v²/2a` | lookahead |
 |---|---|---|---|
-| recorded nod | 25.2 °/s | 0.64° | 2.0° (droop floor governs) |
+| recorded gripper test | 21.0 °/s | 0.44° | 3.0° (droop floor governs) |
+| recorded nod | 25.2 °/s | 0.64° | 3.0° (droop floor governs) |
 | default profile | 50 °/s | 2.50° | 3.0° |
 | recorded wave | 58.8 °/s | 3.45° | 4.2° |
 
@@ -99,6 +102,10 @@ Note the derived value grows with the *square* of speed, so a move at the 180 °
 - **Larger** — the goal leads by more, the arm never decelerates near a waypoint, motion is faster and cuts more corner between waypoints.
 - **Smaller** — the path is tracked more exactly, down to a near-stop at every waypoint at very small values.
 - The default `2.0` is about 23 servo steps: loose enough to clear the steady-state error a gravity-loaded joint parks with (a lookahead the hardware cannot reach makes every waypoint wait out its timeout instead), tight enough to keep the arm on the path. A joint chasing a goal 2° away cruises at roughly `sqrt(accel × lookahead)`, so at the default acceleration this replays a 10 Hz recording at close to its recorded duration.
+
+**A waypoint the arm has stopped short of ends immediately.** A servo settles where its position error times its P gain balances the load, then reports `Moving = 0` with the goal unreached. When that droop exceeds the lookahead — which the floor above cannot always prevent, since a `p_gain` 16 arm droops 4.8° — the dwell would otherwise have no exit but its deadline. Because it gates on the **worst** joint, one joint parked short makes every waypoint in the stream wait out its full timeout. Measured on hardware: a 1.5 s recorded trajectory took 31.3 s; with the escape, 6.5 s, and path deviation was unchanged (3.8° → 3.7° mean), so the escape removes dead time without cutting corners.
+
+The moving state is consulted from the dwell's second poll onward, never the first — a servo takes about 2 ms to raise `Moving` after a goal write, so an immediate check could read the pre-write zero and abandon a waypoint before the arm started. A failure to read it is not fatal; the dwell falls back to its deadline.
 
 Each waypoint's hold is bounded by that segment's own expected ramp duration, so a waypoint the arm cannot reach costs tens of milliseconds, not a full move timeout.
 

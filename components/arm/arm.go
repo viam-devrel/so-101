@@ -210,6 +210,9 @@ type so101 struct {
 	// readJoints, when non-nil, replaces the bus read behind currentJoints. Tests only.
 	readJoints func(context.Context) ([]float64, error)
 
+	// servosMoving, when non-nil, replaces the bus read behind anyServoMoving. Tests only.
+	servosMoving func(context.Context) (bool, error)
+
 	mu       sync.RWMutex
 	moveLock sync.Mutex
 	isMoving atomic.Bool

@@ -29,6 +29,16 @@ func (s *so101) currentJoints(ctx context.Context) ([]float64, error) {
 	return s.controller.GetJointPositionsForServos(ctx, s.armServoIDs)
 }
 
+// anyServoMoving reports whether any arm servo is still executing its commanded profile.
+// It is a seam for the same reason as currentJoints: the dwell's stall escape is about what
+// the servos report mid-stream, which a concrete handle cannot express without hardware.
+func (s *so101) anyServoMoving(ctx context.Context) (bool, error) {
+	if s.servosMoving != nil {
+		return s.servosMoving(ctx)
+	}
+	return s.controller.AnyServoMoving(ctx, s.armServoIDs)
+}
+
 // calculateJointLimits dynamically calculates joint limits from calibration data
 func (s *so101) calculateJointLimits() [][2]float64 {
 	limits := make([][2]float64, len(s.armServoIDs))
@@ -260,7 +270,10 @@ func (s *so101) dwellUntilNear(ctx context.Context, goal []float64, lookaheadDeg
 	ticker := time.NewTicker(dwellPollInterval)
 	defer ticker.Stop()
 
-	for {
+	// polls counts completed polls rather than a flag cleared at the bottom of the loop: a
+	// flag can be stranded true by any future early `continue`, which would silently disable
+	// the stall escape for the whole dwell.
+	for polls := 0; ; polls++ {
 		current, err := s.currentJoints(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read positions while holding a waypoint: %w", err)
@@ -272,6 +285,24 @@ func (s *so101) dwellUntilNear(ctx context.Context, goal []float64, lookaheadDeg
 		_, remainingDeg := servo.JointTravelsDeg(current, goal)
 		if remainingDeg <= lookaheadDeg {
 			return current, nil
+		}
+		// A servo parks short of its goal and reports Moving=0. That droop exceeds any usable
+		// lookahead at a low P gain, leaving the deadline as the only exit -- which is what
+		// made a nod replay take 8x its recorded duration. See docs/arm.md, "Waypoint
+		// streams". Not on the first poll: Moving takes ~2ms to rise after a goal write.
+		if polls > 0 {
+			moving, mErr := s.anyServoMoving(ctx)
+			switch {
+			case mErr != nil:
+				// Auxiliary signal: a transient must not fail a move the deadline covers.
+				s.logger.Debugf("waypoint dwell: could not read moving state, "+
+					"falling back to the timeout: %v", mErr)
+			case !moving:
+				s.logger.Debugf("waypoint dwell: servos stopped %.2f deg short of the "+
+					"waypoint (lookahead %.2f deg), moving to the next waypoint",
+					remainingDeg, lookaheadDeg)
+				return current, nil
+			}
 		}
 		if time.Now().After(deadline) {
 			// Debug, not Warn: on a dense path a lagging waypoint is routine, and one log

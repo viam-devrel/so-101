@@ -69,12 +69,23 @@ const MinExecutableSpeedDegsPerSec = 12.0
 const (
 	// DefaultLookaheadDeg is the lookahead's SATISFIABILITY floor, not a good default on its
 	// own. A servo settles where its position error times its P gain balances the load, so a
-	// lookahead below that droop is never reached and every waypoint burns its full timeout.
-	// Measured droop on a gravity-loaded SO-101 joint: 4.8 deg at p_gain 16, 2.2 at 32,
-	// 1.5 at 48. 2.0 clears the p_gain 32 case, which is the Feetech default.
+	// lookahead below that droop is never reached, and every waypoint burns its full dwell
+	// timeout instead of releasing on its first read.
+	//
+	// Measured droop on gravity-loaded SO-101 joints: 4.6-5.2 deg at p_gain 16, 2.0-2.3 at
+	// 32, 1.26-1.49 at 48. This was 2.0 and documented as clearing the p_gain 32 case. It
+	// does not -- it sits INSIDE that 2.0-2.3 band. Observed on hardware: recordings whose
+	// derived speed lifted the lookahead above the droop (a wave at 58.8 deg/s -> 4.14 deg)
+	// replayed smoothly, while slower ones that fell back to this floor (a nod at 25.2 deg/s,
+	// a gripper test at 21.0) were stuttery and ran roughly 8x their recorded duration.
+	//
+	// 3.0 clears the p_gain 32 band with ~30% margin. It deliberately does NOT clear p_gain
+	// 16, whose 4.8 deg droop would need a lookahead wider than a typical segment; an arm
+	// left at that gain needs its gain raised, not its lookahead. The dwell's stall escape is
+	// the backstop for any droop this floor cannot cover.
 	//
 	// It is NOT sufficient by itself -- see LookaheadDegFor for the other lower bound.
-	DefaultLookaheadDeg = 2.0
+	DefaultLookaheadDeg = 3.0
 	MinLookaheadDeg     = 0.1
 	MaxLookaheadDeg     = 45.0
 

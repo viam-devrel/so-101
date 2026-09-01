@@ -3,6 +3,7 @@ package arm
 import (
 	"context"
 	"errors"
+	"math"
 	"testing"
 	"time"
 
@@ -46,6 +47,10 @@ func dwellTestArm(t *testing.T, script [][]float64) (*so101, func() int) {
 		calls++
 		return p, nil
 	}
+	// The default arm is one that is still moving, so these tests keep exercising the
+	// lookahead and the deadline. Without this they would take the dwell's stall escape --
+	// the fake bus answers a Moving read with zero -- and stop pinning what they pin.
+	s.servosMoving = func(context.Context) (bool, error) { return true, nil }
 	return s, func() int { return calls }
 }
 
@@ -71,9 +76,9 @@ func TestMoveThroughJointPositionsHoldsUntilTheArmIsWithinTheLookahead(t *testin
 	w0 := []float64{0.20, 0, 0, 0, 0}
 	w1 := []float64{0.40, 0, 0, 0, 0}
 
-	// 0.05 rad is 2.9 deg, outside the 2 deg default lookahead, so the first waypoint's
+	// Further from w0 than any derivable lookahead, so the first waypoint's
 	// dwell can never be satisfied and must run to its timeout instead of hanging.
-	lagging := []float64{0.15, 0, 0, 0, 0}
+	lagging := shortOfGoal(0.20)
 	s, calls := dwellTestArm(t, [][]float64{lagging})
 
 	started := time.Now()
@@ -180,4 +185,16 @@ func TestStopCancelsARunningWaypointStream(t *testing.T) {
 	after := calls()
 	time.Sleep(30 * time.Millisecond)
 	assert.Equal(t, after, calls(), "no reads after Stop returned")
+}
+
+// shortOfGoal returns a position that is deliberately further from the goal than any
+// lookahead the dwell could derive, so the dwell cannot be satisfied by proximity.
+//
+// Derived from servo.DefaultLookaheadDeg rather than written as a literal: these tests were
+// originally pinned to a 2.9 deg residual chosen against a 2.0 deg floor, and silently
+// stopped testing anything when that floor was raised to 3.0 -- every one of them started
+// passing on the first poll instead.
+func shortOfGoal(goalRad float64) []float64 {
+	shortfallRad := (servo.DefaultLookaheadDeg + 2.0) * math.Pi / 180.0
+	return []float64{goalRad - shortfallRad, 0, 0, 0, 0}
 }
