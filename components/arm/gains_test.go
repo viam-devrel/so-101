@@ -44,6 +44,43 @@ func TestServoInitializationWritesTheTunedGains(t *testing.T) {
 	assert.Equal(t, byte(64), readServoGain(t, s, 2, "d_gain"))
 	assert.Equal(t, byte(2), readServoGain(t, s, 2, "i_gain"))
 	assert.Equal(t, byte(4), readServoGain(t, s, 3, "i_gain"))
+	// Servo 1 is the only P that is not 48, servo 5 the only D that is not 64: a
+	// transcription slip in either is caught by nothing else.
+	assert.Equal(t, byte(32), readServoGain(t, s, 1, "p_gain"))
+	assert.Equal(t, byte(48), readServoGain(t, s, 5, "d_gain"))
+}
+
+// orderRecordingTransport records the order of gain writes to one servo at the wire level.
+type orderRecordingTransport struct {
+	*testfake.FakeTransport
+	id   int
+	seen []byte
+}
+
+func (o *orderRecordingTransport) Write(p []byte) (int, error) {
+	// Packet: [0xFF, 0xFF, id, len, instruction, params..., checksum]. WRITE is 0x03.
+	if len(p) >= 7 && p[0] == 0xFF && p[1] == 0xFF && int(p[2]) == o.id && p[4] == 0x03 &&
+		(p[5] == feetech.RegPGain.Address || p[5] == feetech.RegDGain.Address ||
+			p[5] == feetech.RegIGain.Address) {
+		o.seen = append(o.seen, p[5])
+	}
+	return o.FakeTransport.Write(p)
+}
+
+// Damping is written before the integral term, and the integral term before proportional. A
+// non-zero I is only stable against a raised D, so any other order leaves a window where a
+// bus failure strands the servo above its stable I. Reading final register values cannot
+// catch this -- they are order-independent -- so it needs the wire.
+func TestApplyServoGainsWritesDampingBeforeIntegral(t *testing.T) {
+	ft := testfake.NewFakeTransport()
+	seedGains(ft, 32, 32, 0, 1, 2, 3, 4, 5, 6)
+	rec := &orderRecordingTransport{FakeTransport: ft, id: 3}
+
+	require.NoError(t, gainsTestArm(t, rec, &SO101ArmConfig{}).initializeServos())
+
+	assert.Equal(t, []byte{
+		feetech.RegDGain.Address, feetech.RegIGain.Address, feetech.RegPGain.Address,
+	}, rec.seen, "gains must be written D, then I, then P")
 }
 
 func TestServoInitializationRespectsDisableServoGains(t *testing.T) {
@@ -139,11 +176,14 @@ func TestApplyServoGainsFailureDoesNotFailInit(t *testing.T) {
 
 	// Servo 2's d_gain write failed, so it must be left exactly as found.
 	assert.Equal(t, byte(32), readServoGain(t, s, 2, "d_gain"), "servo 2 d_gain must be left as found after a write failure")
-	// The failure must not cascade to the rest of servo 2's own gains...
-	assert.Equal(t, byte(2), readServoGain(t, s, 2, "i_gain"), "servo 2 i_gain must still land")
-	assert.Equal(t, byte(48), readServoGain(t, s, 2, "p_gain"), "servo 2 p_gain must still land")
-	// ...or to any other servo.
+	// The failure IS terminal for the rest of servo 2's gains, on purpose: 48/32/4 -- I and
+	// P applied over a stock D -- is the combination the write order exists to prevent, and
+	// it would persist in EEPROM with no retry to clear it.
+	assert.Equal(t, byte(0), readServoGain(t, s, 2, "i_gain"), "servo 2 i_gain must not land over a stock d_gain")
+	assert.Equal(t, byte(32), readServoGain(t, s, 2, "p_gain"), "servo 2 p_gain must not land over a stock d_gain")
+	// It must NOT cascade to any other servo.
 	assert.Equal(t, byte(64), readServoGain(t, s, 3, "d_gain"), "servo 3 d_gain must still land")
+	assert.Equal(t, byte(4), readServoGain(t, s, 3, "i_gain"), "servo 3 i_gain must still land")
 }
 
 func gainRegisters() []byte {

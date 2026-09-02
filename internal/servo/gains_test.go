@@ -21,6 +21,12 @@ func TestDefaultArmGainsInvariants(t *testing.T) {
 			t.Fatalf("servo %d: I=%d needs D>=48 to be stable, got D=%d", id, g.I, g.D)
 		}
 	}
+	// The report's caveat, not a general rule: joint 2 looked good at I=4 in the first grid
+	// but oscillated in 2 of 3 repeat passes, even at D=64. It is the one retune the source
+	// evidence explicitly warns against, and every other invariant here would allow it.
+	if DefaultArmGains[2].I > 2 {
+		t.Fatalf("servo 2: I=%d exceeds the 2 that was clean in all three repeat passes", DefaultArmGains[2].I)
+	}
 	if _, ok := DefaultArmGains[6]; ok {
 		t.Fatal("servo 6 (gripper) is untested and must not carry a tuned default")
 	}

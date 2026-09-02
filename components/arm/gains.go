@@ -30,13 +30,21 @@ func writeGainIfChanged(ctx context.Context, h *controller.ControllerHandle, id 
 }
 
 // applyServoGains writes the tuned P/D/I table to the arm's own servos, skipping registers
-// that already hold the target value.
+// it can prove already hold the target value.
 //
 // The write ORDER is fixed at D, I, P and is not incidental: a non-zero I is only stable
 // against a raised D (measured -- joint 2 oscillated at D=32/I=4 and was stable at
 // D=48/I=4), so damping first means every prefix of the sequence is at least as stable as
 // the state before it. A partial failure then cannot strand a gravity-loaded joint on a
 // combination measured to oscillate, in EEPROM.
+//
+// The prefix argument only holds if a failure is TERMINAL for that servo, hence the break:
+// without it the reachable states are all eight subsets rather than the four prefixes, and
+// {I,P}-without-D is 48/32/4 on servo 3 -- precisely the state this ordering exists to
+// prevent. It is load-bearing for a second reason since writeGainIfChanged began writing
+// through an unreadable register: all three writes are now attempted even when the reads
+// fail, so the break is the only thing bounding the failure set. Per servo, not per call --
+// one servo's bus trouble must not skip the rest.
 //
 // It NEVER returns an error: the arm works at stock gains, so a bus problem here must not
 // prevent it from coming up.
@@ -48,10 +56,12 @@ func applyServoGains(ctx context.Context, h *controller.ControllerHandle, ids []
 		}
 		for _, w := range []struct {
 			name string
-			want int
+			want byte
 		}{{"d_gain", g.D}, {"i_gain", g.I}, {"p_gain", g.P}} {
-			if err := writeGainIfChanged(ctx, h, id, w.name, byte(w.want)); err != nil {
-				logger.Warnf("servo %d: leaving %s as found: %v", id, w.name, err)
+			if err := writeGainIfChanged(ctx, h, id, w.name, w.want); err != nil {
+				logger.Warnf("servo %d: %s write failed; leaving it and this servo's "+
+					"remaining gains as found: %v", id, w.name, err)
+				break
 			}
 		}
 	}

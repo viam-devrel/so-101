@@ -1,10 +1,13 @@
 package servo
 
-// Gains is one servo's position-loop PID register triple. Each value is a single byte.
+// Gains is one servo's position-loop PID register triple. byte, not int, so a retune out of
+// register range is a compile error rather than a silent truncation on the wire -- a D of
+// 300 would reach the servo as 44, i.e. LESS damping than intended, which is the direction
+// that breaks applyServoGains' write-order argument.
 type Gains struct {
-	P int
-	D int
-	I int
+	P byte
+	D byte
+	I byte
 }
 
 // DefaultArmGains is the tuned per-joint gain table for arm servos 1-5, against a stock
