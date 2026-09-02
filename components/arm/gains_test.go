@@ -96,26 +96,29 @@ func TestApplyServoGainsSkipsNoOpWrites(t *testing.T) {
 	}
 }
 
-// failingReadTransport wraps a FakeTransport and fails exactly the FIRST (servo, register)
-// READ packet at the wire level -- everything else (PING, SYNC_READ, WRITE/SYNC_WRITE, reads
-// of any other register or servo, and a later re-read of the SAME register once failsLeft is
-// exhausted) passes through untouched. Failing only once, not forever, is what lets a test
-// both trigger the warn-and-continue path during init AND read the register back afterward
-// to assert it was left alone. This is what makes TestApplyServoGainsFailureDoesNotFailInit a
-// real test of the contract rather than a vacuous one: the ping and position read below go
-// over the SAME transport and must keep succeeding.
-type failingReadTransport struct {
+// failingWriteTransport wraps a FakeTransport and fails exactly the FIRST (servo, register)
+// WRITE packet at the wire level -- everything else (PING, SYNC_READ, reads, the EEPROM
+// unlock/relock writes to the lock register, writes to any other register or servo, and a
+// later write to the SAME register once failsLeft is exhausted) passes through untouched.
+//
+// The failure is injected on the WRITE, not the read: writeGainIfChanged deliberately falls
+// through to the write when a read fails, so a read failure lands the gain anyway and would
+// make this test vacuous. Failing only once, not forever, is what lets the test both trigger
+// the warn-and-continue path during init AND read the register back afterward. The ping and
+// position read go over the SAME transport and must keep succeeding -- that is the proof
+// this exercises the real contract rather than a transport that is simply broken.
+type failingWriteTransport struct {
 	*testfake.FakeTransport
 	id        int
 	address   byte
 	failsLeft int
 }
 
-func (f *failingReadTransport) Write(p []byte) (int, error) {
-	// Packet: [0xFF, 0xFF, id, len, instruction, params..., checksum]. READ is
-	// instruction 0x02 with params [address, length].
+func (f *failingWriteTransport) Write(p []byte) (int, error) {
+	// Packet: [0xFF, 0xFF, id, len, instruction, params..., checksum]. WRITE is
+	// instruction 0x03 with params [address, data...].
 	if f.failsLeft > 0 && len(p) >= 7 && p[0] == 0xFF && p[1] == 0xFF &&
-		int(p[2]) == f.id && p[4] == 0x02 && p[5] == f.address {
+		int(p[2]) == f.id && p[4] == 0x03 && p[5] == f.address {
 		f.failsLeft--
 		return 0, syscall.EIO
 	}
@@ -123,21 +126,19 @@ func (f *failingReadTransport) Write(p []byte) (int, error) {
 }
 
 // A gain write failing must not fail initialization: the arm works at stock gains. Only
-// servo 2's d_gain READ fails (via failingReadTransport); ping (PING packets) and the
-// position read (a SYNC_READ) use different instructions and are unaffected, so their
-// continued success is the proof this exercises the real warn-and-continue path and not a
-// transport that is simply broken outright.
+// servo 2's d_gain WRITE fails; ping (PING) and the position read (SYNC_READ) use different
+// instructions and are unaffected, so their continued success is the proof this exercises
+// the real warn-and-continue path and not a transport that is simply broken outright.
 func TestApplyServoGainsFailureDoesNotFailInit(t *testing.T) {
 	ft := testfake.NewFakeTransport()
 	seedGains(ft, 32, 32, 0, 1, 2, 3, 4, 5, 6)
-	failing := &failingReadTransport{FakeTransport: ft, id: 2, address: feetech.RegDGain.Address, failsLeft: 1}
+	failing := &failingWriteTransport{FakeTransport: ft, id: 2, address: feetech.RegDGain.Address, failsLeft: 1}
 	s := gainsTestArm(t, failing, &SO101ArmConfig{})
 
 	require.NoError(t, s.initializeServos())
 
-	// Servo 2's d_gain read failed, so writeGainIfChanged bailed out before writing --
-	// it must be left exactly as found, not stranded at some other value.
-	assert.Equal(t, byte(32), readServoGain(t, s, 2, "d_gain"), "servo 2 d_gain must be left as found after a read failure")
+	// Servo 2's d_gain write failed, so it must be left exactly as found.
+	assert.Equal(t, byte(32), readServoGain(t, s, 2, "d_gain"), "servo 2 d_gain must be left as found after a write failure")
 	// The failure must not cascade to the rest of servo 2's own gains...
 	assert.Equal(t, byte(2), readServoGain(t, s, 2, "i_gain"), "servo 2 i_gain must still land")
 	assert.Equal(t, byte(48), readServoGain(t, s, 2, "p_gain"), "servo 2 p_gain must still land")

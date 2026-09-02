@@ -2,7 +2,6 @@ package arm
 
 import (
 	"context"
-	"fmt"
 
 	"go.viam.com/rdk/logging"
 
@@ -10,22 +9,21 @@ import (
 	"so_arm/internal/servo"
 )
 
-// writeGainIfChanged writes a one-byte gain register only when it does not already hold the
-// target value.
+// writeGainIfChanged writes a one-byte gain register unless it can prove the write would
+// change nothing.
 //
 // p_gain, d_gain and i_gain are all EEPROM registers (addresses 21-23) with finite write
 // endurance, and every write costs three bus transactions for the unlock/write/relock dance.
 // Both callers rewrite the same values repeatedly -- manual mode on every entry and exit,
 // arm init on every Reconfigure -- so the skip is the wear guard, not an optimization.
+//
+// A read that FAILS therefore falls through to the write rather than returning: it cannot
+// prove the write is unnecessary, and the wear guard is not worth the alternative. On
+// restoreCompliance's path, skipping the write leaves a joint at p_gain 8 / i_gain 0 in
+// EEPROM -- soft, across power cycles -- and a bare register read failing outright is a
+// transient this hardware really produces, with nothing retrying it.
 func writeGainIfChanged(ctx context.Context, h *controller.ControllerHandle, id int, name string, want byte) error {
-	cur, err := h.ReadServoRegister(ctx, id, name)
-	if err != nil {
-		return fmt.Errorf("read %s servo %d: %w", name, id, err)
-	}
-	if len(cur) != 1 {
-		return fmt.Errorf("unexpected %s width %d for servo %d", name, len(cur), id)
-	}
-	if cur[0] == want {
+	if cur, err := h.ReadServoRegister(ctx, id, name); err == nil && len(cur) == 1 && cur[0] == want {
 		return nil
 	}
 	return h.WriteServoRegister(ctx, id, name, []byte{want})
