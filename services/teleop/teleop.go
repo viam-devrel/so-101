@@ -180,7 +180,10 @@ func (tp *so101Teleop) syncOnce(ctx context.Context) error {
 		gripperPct = pct
 	}
 
-	if err := tp.followerArm.MoveToJointPositions(ctx, positions, map[string]interface{}{"wait": false}); err != nil {
+	// acc=0 (unlimited) for streamed setpoints -- an acceleration limit is catastrophic for
+	// tracking. The command stream itself shapes the trajectory here.
+	if err := tp.followerArm.MoveToJointPositions(ctx, positions,
+		map[string]interface{}{"wait": false, "unlimited_accel": true}); err != nil {
 		return fmt.Errorf("write follower joints: %w", err)
 	}
 
