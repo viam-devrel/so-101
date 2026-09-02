@@ -45,16 +45,22 @@ func TestApplyComplianceZeroesIGain(t *testing.T) {
 func TestApplyComplianceHonoursThePGainOptOut(t *testing.T) {
 	ft := testfake.NewFakeTransport()
 	for _, id := range []int{1, 2} {
+		ft.SetRegister(id, feetech.RegPGain.Address, []byte{48})
 		ft.SetRegister(id, feetech.RegIGain.Address, []byte{4})
 		ft.SetRegister(id, feetech.RegTorqueLimit.Address, testfake.EncodeWordLE(1000))
 	}
 	io := &controllerManualIO{controller: testArmHandle(t, ft), ids: []int{1, 2}}
 
 	require.NoError(t, io.applyCompliance(context.Background(), 0, 50))
+	// Restore too: it writes whatever it captured, so a register the apply never touched
+	// must not be written back from a zero value -- p_gain 0 is no position control at all.
+	require.NoError(t, io.restoreCompliance(context.Background()))
 
 	for _, id := range []int{1, 2} {
 		assert.Equal(t, byte(4), readReg(t, io, id, "i_gain"), "servo %d i_gain must be untouched", id)
+		assert.Equal(t, byte(48), readReg(t, io, id, "p_gain"), "servo %d p_gain must be untouched", id)
 		assert.Zero(t, ft.WriteCount(id, feetech.RegIGain.Address))
+		assert.Zero(t, ft.WriteCount(id, feetech.RegPGain.Address))
 	}
 }
 

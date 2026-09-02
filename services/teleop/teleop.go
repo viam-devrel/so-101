@@ -234,10 +234,7 @@ func (tp *so101Teleop) syncOnce(ctx context.Context) error {
 //
 // It costs one extra follower read per cycle, and only until the latch trips.
 func (tp *so101Teleop) readyToStream(ctx context.Context, leader []referenceframe.Input) (bool, error) {
-	tp.mu.Lock()
-	streaming := tp.streaming
-	tp.mu.Unlock()
-	if streaming {
+	if tp.latched() {
 		return true, nil
 	}
 
@@ -259,6 +256,12 @@ func (tp *so101Teleop) readyToStream(ctx context.Context, leader []referencefram
 	tp.mu.Unlock()
 	tp.logger.Infof("Follower caught up (within %.1f deg); streaming setpoints", maxStreamStartGapDeg)
 	return true, nil
+}
+
+func (tp *so101Teleop) latched() bool {
+	tp.mu.Lock()
+	defer tp.mu.Unlock()
+	return tp.streaming
 }
 
 func (tp *so101Teleop) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
