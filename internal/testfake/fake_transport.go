@@ -203,6 +203,15 @@ func (ft *FakeTransport) CloseCount() int {
 	return ft.closes
 }
 
+// PacketCount reports how many request packets have been written to the transport, so a
+// test can assert a code path's bus traffic rather than only its effect -- a skipped read
+// leaves no trace in the register store.
+func (ft *FakeTransport) PacketCount() int {
+	ft.mu.Lock()
+	defer ft.mu.Unlock()
+	return ft.writes
+}
+
 // WriteCount reports how many WRITE packets have landed on one register, so a test can
 // assert a read-first guard actually skipped a redundant write -- reading the value back
 // cannot distinguish "already correct" from "written again".

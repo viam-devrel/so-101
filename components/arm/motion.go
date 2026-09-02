@@ -416,8 +416,9 @@ func (s *so101) MoveToJointPositions(ctx context.Context, positions []referencef
 	//
 	// A read failure degrades to the old uniform-speed path rather than failing the move.
 	// Before this change the read happened only when waiting and a failure was a warning;
-	// making it fatal would mean a transient bus error aborts a teleop setpoint that used
-	// to go through, at 30-50 Hz on the wait:false path.
+	// making it fatal would mean a transient bus error aborts a streamed wait:false setpoint
+	// that used to go through. (Teleop no longer reaches this read at all -- it takes the
+	// unlimited-acceleration branch above -- but other wait:false callers still do.)
 	current, err := s.currentJoints(ctx)
 	if err != nil {
 		s.logger.Warnf("failed to read positions for coordinated move, falling back to "+
