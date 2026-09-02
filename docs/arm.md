@@ -34,6 +34,7 @@ The following attributes are available for the arm component:
 | `use_urdf`         | bool     | Optional     | When `true`, sources kinematics and collision geometry from the bundled `assets/urdf/so101.urdf` instead of the embedded `so101.json`, and requires `VIAM_MODULE_ROOT` (viam-server sets this). A drop-in swap — frame names, TCP, and kinematics are identical; only the collision geometry upgrades from primitive shapes to per-link meshes. Default `false`. |
 | `mesh_decimation_ratios` | []float | Optional | Per-mesh simplification ratios, one per arm link in document order (base, shoulder, upper_arm, lower_arm, wrist). Only values strictly inside `(0, 1)` decimate; lower is more aggressive. Used only with `use_urdf`. Defaults to `0.9` for all five. |
 | `manual_mode`      | object   | Optional     | Tuning for hand-guided [manual mode](#manual-mode) (see below). Omit for the built-in defaults. |
+| `disable_servo_gains` | bool  | Optional     | When `true`, leaves the servos' P/D/I registers untouched at init instead of writing the tuned defaults. Set it if you tuned gains externally (e.g. with `pidtune apply`). Default `false`. See [Servo gains](#servo-gains). |
 | `orientation_tolerance_deg` | float | Optional | Half-angle, in degrees, of the cone of acceptable end-effector approach directions around the goal orientation, used by `MoveToPosition`. **Roll about that axis is NOT constrained.** Range `[0, 180]`; `0`/unset means `30`. See [Approach-axis orientation planning](#approach-axis-orientation-planning). |
 | `position_tolerance_mm` | float | Optional | Per-axis positional leeway, in millimetres, of the `MoveToPosition` goal cloud. Default `1.0`. See [Approach-axis orientation planning](#approach-axis-orientation-planning). |
 **If you're building and setting up an arm for the first time, please see the [calibration sensor component](calibration.md#model-devrelso101calibration) for setup instructions.**
@@ -373,6 +374,19 @@ A per-joint `MaxVelRadsJoints` cap still wins over the floor: a cap slower than 
 
 `MoveThroughJointPositions` accepts `MoveOptions.MaxVelRads` and `MaxAccRads` to override the configured defaults for one move, and the per-joint forms `MaxVelRadsJoints` and `MaxAccRadsJoints`. Setting a per-joint slice makes the matching scalar ignored, per `arm.proto`; a slice whose length doesn't match the arm's joint count is rejected. A per-joint limit slows the whole move rather than that joint, so the joints stay coordinated. `GoToInputs` routes through this same path.
 
+### Streamed setpoints: `wait` and `unlimited_accel`
+
+`MoveToJointPositions` accepts two optional booleans in its `extra` map:
+
+```json
+{ "wait": false, "unlimited_accel": true }
+```
+
+- **`wait`** (default `true`) — block until the move settles, or return as soon as the goal is written.
+- **`unlimited_accel`** (default `false`) — command the servos' acceleration register to `0`, the servo's "unlimited" sentinel, instead of the configured `acceleration_degs_per_sec_per_sec` ramp, and skip the coordination read that a ramped move uses to give the other joints a travel reference for arriving together.
+
+Both skips are for a caller **streaming setpoints** rather than making a one-off point-to-point move — the [teleop service](teleop.md) sets it on every follower command. An acceleration ramp is close to a free win for a single move, but it is measurably catastrophic for continuously-updated tracking: `acc=32` quadrupled RMS tracking error and took lag from 40ms to 160ms versus `acc=0`, because the servo re-ramps on every new goal instead of ever reaching speed. The coordination read is skipped for the same reason it's pointless here — coordinated arrival is meaningless for a goal about to be superseded in ~10ms — and skipping it is measured to halve the bus traffic per call, one packet (the goal write) instead of two (a position read, then the write). A plain point-to-point move should keep both the ramp and the coordinated read; do not set `unlimited_accel` there.
+
 ### Waypoint streams
 
 `MoveThroughJointPositions` (and `GoToInputs`, which routes through it) paces its waypoints against the arm's real position: a waypoint is commanded, then held until every joint is within `waypoint_lookahead_deg` of it, and only then is the next one written. The arm waits for a full stop only after the **final** waypoint, so intermediate waypoints are still not stop-points — the arm flows through them.
@@ -446,6 +460,31 @@ Both have floors you cannot configure away. The planner adds a `0.001` epsilon t
 - `extra: {"pose_cloud": {...}}` — supplies a raw `referenceframe.PoseCloud`, replacing the cone entirely (expert mode). Keys are **lowercase**: `x`, `y`, `z`, `ox`, `oy`, `oz`, `theta`. Note the Viam docs render these fields as `OX`/`OY` and the protobuf wire format spells them `o_x` — **neither of those is accepted here**; an unknown key is rejected with an error rather than silently ignored, so a typo fails loudly instead of quietly producing a near-zero-leeway cloud that fails every move. Any field you omit means ~zero leeway for that field.
 
 Passing both `goal_metric_type` and `pose_cloud` in the same `extra` map is an error.
+
+## Servo gains
+
+`disable_servo_gains` (bool, default `false`) leaves the servos' `p_gain`/`d_gain`/`i_gain` registers untouched at init. Leave it `false` to get the tuned table below; set it if you have tuned gains of your own (`pidtune apply` writes the same registers this module does).
+
+The tuned per-joint table, against a stock `32/32/0` (gripper `16/32/0`):
+
+| servo id | joint | P | D | I |
+|---|---|---|---|---|
+| 1 | shoulder pan | 32 | 48 | 0 |
+| 2 | shoulder lift | 48 | 64 | 2 |
+| 3 | elbow | 48 | 64 | 4 |
+| 4 | wrist flex | 48 | 64 | 2 |
+| 5 | wrist roll | 48 | 48 | 0 |
+| 6 | gripper | *untested — never written* | | |
+
+These are EEPROM writes, applied during `doServoInitialization` (so on every `Reconfigure`, not just the first construction), and skipped register-by-register when the servo already holds the target value — both because EEPROM has finite write endurance and because `initializeServosWithRetry` can run this same path up to 3 times in one bring-up. They are never sent to a servo outside the arm's own `servo_ids`: a 4-DOF arm configured with `servo_ids: [1,2,3,4]` leaves servo 5 alone even though the table has an entry for it. A gain write failing does not fail arm construction — the arm comes up at whatever gains the servo already holds.
+
+**Why this table.** Stock `P=32` is too weak to hold the gravity-loaded joints (shoulder lift, elbow) against load: at `I=0` they sit at a permanent, direction-independent steady-state error that scales as `1/P`. Adding integral gain removes it. Measured on joint 2: steady-state error drops roughly **4×, 0.90° → 0.22°** (10.2 → 2.5 encoder counts, 0.088°/count). The gravity-free joints (pan, wrist roll) need no integral term and get only the derivative bump.
+
+**The write order is D, then I, then P, and a failed write is terminal for that servo.** A non-zero `I` is only stable against a raised `D` — joint 2 oscillated at `D=32, I=4` and was stable at `D=48, I=4` — so writing derivative first means every prefix of the sequence (`{D}`, `{D,I}`, `{D,I,P}`) is at least as stable as the state before it. If a write fails partway, the loop stops for that servo rather than continuing to the next register: continuing could land `{I,P}` without `D` — 48/32/4 on servo 3, the exact combination measured to oscillate — and strand it there in EEPROM with nothing to retry it (a gain-write failure never fails the arm, so nothing re-triggers this path outside the next `Reconfigure`).
+
+**Peak current rises steeply with `D`.** Taking a joint's `D` from 32 to 64 is not free: at `P=32`, a 100-count step measured 388 current units at `D=16` versus 691 at `D=48`. Servos idled at 37–43°C and rose only 1–2°C over the measurement session, so this was not a thermal problem there — but it would matter under sustained high-duty motion.
+
+**Measured on one arm, once.** 12.2–12.3 V bus, 2026-09-02. Unit-to-unit and supply-voltage variation are unquantified. If your arm needs different gains, set `disable_servo_gains: true` and run `pidtune apply` — it writes the same registers this module does.
 
 ## Manual Mode
 

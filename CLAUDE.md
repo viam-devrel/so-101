@@ -526,3 +526,36 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
   be mistaken for having done anything. `abort`'s advertised states are unchanged — only the
   guard was added. One gap remains by choice: `error` still accepts `abort` without advertising
   it, which is harmless because `reset` is the escape hatch offered there.
+- **Compliance zeroes `i_gain`, not just `p_gain` — and a failed READ falls through to the
+  WRITE, not away from it.** The integral path is independent of P, so lowering P to 8 during
+  hand-guided compliance used to leave a live integrator; inert until the tuned gains carry a
+  non-zero I (`internal/servo/gains.go`), which they now do. Gated on `p_gain > 0`, the
+  documented per-register opt-out; `d_gain` is deliberately left alone (reasoned drag, never
+  measured). Both `applyCompliance`/`restoreCompliance` and `applyServoGains` route every gain
+  write through one `writeGainIfChanged` (`components/arm/gains.go`) because these are EEPROM
+  registers entered/exited (or reconfigured) repeatedly — and it treats a read it cannot trust
+  as unable to prove a no-op, so it falls through to the write rather than skipping it. The
+  asymmetry is deliberate: `applyCompliance` failing outright leaves the arm stiff, which is
+  safe; `restoreCompliance` skipping a write on a flaky read would leave a joint at `p_gain
+  8`/`i_gain 0` in EEPROM — soft, across power cycles — on a transient this hardware really
+  produces, with nothing retrying it. Don't make either path bail out on a read error.
+- **Tuned gains are written during `doServoInitialization`, in D→I→P order, and a failed WRITE
+  is terminal for that servo.** `applyServoGains` BREAKS its per-servo loop on the first write
+  failure rather than logging and continuing: without the break, {I,P}-without-D is reachable —
+  48/32/4 on servo 3, the exact combination measured to oscillate on a gravity-loaded joint —
+  and it would be stranded in EEPROM with nothing to retry it (`applyServoGains` returns no
+  error, so `initializeServosWithRetry` never re-runs for a gain failure alone). The read-first
+  skip is the EEPROM wear guard, and it runs on every `Reconfigure` as well as up to 3× within
+  one bring-up. `servo.Gains` fields are `byte`, not `int`, so an out-of-range retune is a
+  compile error rather than a silent truncation to less damping. Config is one
+  `disable_servo_gains` bool; there are no per-joint overrides — `pidtune apply` is the
+  escape hatch for a differently-tuned arm.
+- **`Acc: 0` is right for teleop and wrong for everything else, and the bypass skips the
+  coordination READ too, not just the ramp.** `MinAccUnits = 1` still forbids Acc 0 on the
+  profiled path — Acc 1 delivers ~43 deg/s², measurably worse than the measured acc=32 row, so a
+  low *configured* acceleration is not a substitute. The teleop bypass in `MoveToJointPositions`
+  (`components/arm/motion.go`) branches to `moveJointsUniform` BEFORE the `currentJoints()` read
+  that a ramped move uses to give `CoordinatedProfiles` a travel reference — coordinated arrival
+  is meaningless for a goal superseded in ~10ms, so the read buys nothing there either. Measured
+  in tests: one bus packet per call (the goal write) instead of two (a position read, then the
+  write). Do not unify this path with the profiled one.
