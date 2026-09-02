@@ -25,6 +25,7 @@ type FakeTransport struct {
 	mu        sync.Mutex
 	proto     *feetech.Protocol
 	registers map[int]map[byte][]byte // servo id -> address -> value
+	regWrites map[int]map[byte]int    // servo id -> address -> write count
 	pending   []byte                  // queued response bytes
 	unplugged bool
 	writes    int
@@ -38,6 +39,7 @@ func NewFakeTransport() *FakeTransport {
 	ft := &FakeTransport{
 		proto:     feetech.NewProtocol(feetech.ProtocolSTS),
 		registers: make(map[int]map[byte][]byte),
+		regWrites: make(map[int]map[byte]int),
 	}
 	for id := 1; id <= 6; id++ {
 		ft.registers[id] = map[byte][]byte{
@@ -133,6 +135,10 @@ func (ft *FakeTransport) reply(req []byte) {
 		}
 		if regs, ok := ft.registers[id]; ok {
 			regs[params[0]] = append([]byte(nil), params[1:]...)
+			if _, ok := ft.regWrites[id]; !ok {
+				ft.regWrites[id] = map[byte]int{}
+			}
+			ft.regWrites[id][params[0]]++
 		}
 		ft.queue(id, nil)
 	case 0x82: // SYNC_READ [address, length, ids...]
@@ -143,7 +149,21 @@ func (ft *FakeTransport) reply(req []byte) {
 		for _, raw := range params[2:] {
 			ft.queue(int(raw), ft.value(int(raw), address, length))
 		}
-	case 0x83: // SYNC_WRITE -- no response on the wire
+	case 0x83: // SYNC_WRITE -- broadcast, no response on the wire
+		// Params are [address, dataLen, id, data..., id, data...]. The whole blob is stored
+		// at `address`, so a read of the FIRST register in the blob reads back correctly --
+		// which is what a goal write's `acceleration` needs. A read of a register further
+		// into the blob (goal_position, at address+1) does NOT; split per register if a
+		// test ever needs that.
+		if len(params) < 2 {
+			return
+		}
+		address, n := params[0], int(params[1])
+		for i := 2; i+1+n <= len(params); i += 1 + n {
+			if regs, ok := ft.registers[int(params[i])]; ok {
+				regs[address] = append([]byte(nil), params[i+1:i+1+n]...)
+			}
+		}
 	}
 }
 
@@ -181,6 +201,15 @@ func (ft *FakeTransport) CloseCount() int {
 	ft.mu.Lock()
 	defer ft.mu.Unlock()
 	return ft.closes
+}
+
+// WriteCount reports how many WRITE packets have landed on one register, so a test can
+// assert a read-first guard actually skipped a redundant write -- reading the value back
+// cannot distinguish "already correct" from "written again".
+func (ft *FakeTransport) WriteCount(id int, address byte) int {
+	ft.mu.Lock()
+	defer ft.mu.Unlock()
+	return ft.regWrites[id][address]
 }
 
 // EncodeWordLE encodes a 16-bit register value the way the STS protocol expects.
