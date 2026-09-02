@@ -38,12 +38,6 @@ Example configuration with attributes:
 }
 ```
 
-### Behavior
-
-- `MoveToJointPositions`, `MoveThroughJointPositions`, and `GoToInputs` interpolate the joints toward each target over time; the calls block until the arm arrives.
-- `MoveToPosition` plans through the motion service. As with the `devrel:so101:arm` model, it attaches an approach-axis cone (`orientation_tolerance_deg`/`position_tolerance_mm`) to the goal by default instead of ignoring orientation — see [Approach-axis orientation planning](arm.md#approach-axis-orientation-planning) above for the config attributes, the `extra` escape hatches, and the viam-server version requirement.
-- `JointPositions`, `EndPosition`, `Geometries`, and `IsMoving` report the simulated state.
-
 ### DoCommand
 
 #### Get Motion Parameters
@@ -55,6 +49,12 @@ Retrieve the configured joint speed:
   "command": "get_motion_params"
 }
 ```
+
+### Behavior
+
+- `MoveToJointPositions`, `MoveThroughJointPositions`, and `GoToInputs` interpolate the joints toward each target over time; the calls block until the arm arrives.
+- `MoveToPosition` plans through the motion service. As with the `devrel:so101:arm` model, it attaches an approach-axis cone (`orientation_tolerance_deg`/`position_tolerance_mm`) to the goal by default instead of ignoring orientation — see [Approach-axis orientation planning](arm.md#approach-axis-orientation-planning) above for the config attributes, the `extra` escape hatches, and the viam-server version requirement.
+- `JointPositions`, `EndPosition`, `Geometries`, and `IsMoving` report the simulated state.
 
 ## Model devrel:so101:simulated-gripper
 
@@ -100,4 +100,3 @@ Set a target opening percentage (0 = closed, 100 = open); the jaw interpolates t
   "command": "get_position"
 }
 ```
-
