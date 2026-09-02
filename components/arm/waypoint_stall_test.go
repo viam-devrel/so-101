@@ -66,21 +66,24 @@ func TestWaypointDwellIgnoresTheMovingStateOnItsFirstPoll(t *testing.T) {
 		"the stall escape must not fire on the dwell's first poll")
 }
 
-func TestWaypointDwellFallsBackToItsDeadlineWhenTheMovingReadFails(t *testing.T) {
+func TestWaypointDwellFailsWhenTheStateReadFails(t *testing.T) {
 	w0 := []float64{0.20, 0, 0, 0, 0}
 	w1 := []float64{0.40, 0, 0, 0, 0}
-	lagging := shortOfGoal(0.20)
-	s, _ := dwellTestArm(t, [][]float64{lagging})
+	s, _ := dwellTestArm(t, [][]float64{shortOfGoal(0.20)})
 
-	// The moving state is an auxiliary signal. A transient bus error on it must not fail a
-	// move the deadline would have carried through -- unlike a position read, which is
-	// fatal because without it there is no pacing at all.
+	// Position and moving state now share ONE bus transaction, so there is no longer a
+	// "position read worked but moving did not" state to be lenient about -- the read either
+	// yields both or neither. A failure is therefore fatal, exactly as the position read
+	// alone always was: without feedback there is no pacing, and an unpaced stream executes
+	// only its final waypoint.
 	s.servosMoving = func(context.Context) (bool, error) {
 		return false, errors.New("bus transient")
 	}
 
-	require.NoError(t, s.MoveThroughJointPositions(context.Background(),
-		[][]referenceframe.Input{w0, w1}, nil, nil))
+	err := s.MoveThroughJointPositions(context.Background(),
+		[][]referenceframe.Input{w0, w1}, nil, nil)
+	require.Error(t, err, "losing arm state must fail the move, not silently unpace it")
+	assert.ErrorContains(t, err, "bus transient")
 }
 
 // Stop's zeroed velocity is exactly the condition the stall escape fires on, so a cancelled

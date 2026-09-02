@@ -39,6 +39,24 @@ func (s *so101) anyServoMoving(ctx context.Context) (bool, error) {
 	return s.controller.AnyServoMoving(ctx, s.armServoIDs)
 }
 
+// readArmState returns joint positions and whether any arm servo is still executing its
+// move, in ONE bus transaction (see GetJointPositionsAndMovingForServos). The dwell wants
+// both on every poll, and every feetech transaction pays the same ~1ms command gap
+// regardless of payload, so asking twice doubled its bus time.
+//
+// Tests drive the two seams separately, so it honours them separately when either is set.
+func (s *so101) readArmState(ctx context.Context) ([]float64, bool, error) {
+	if s.readJoints != nil || s.servosMoving != nil {
+		positions, err := s.currentJoints(ctx)
+		if err != nil {
+			return nil, false, err
+		}
+		moving, err := s.anyServoMoving(ctx)
+		return positions, moving, err
+	}
+	return s.controller.GetJointPositionsAndMovingForServos(ctx, s.armServoIDs)
+}
+
 // calculateJointLimits dynamically calculates joint limits from calibration data
 func (s *so101) calculateJointLimits() [][2]float64 {
 	limits := make([][2]float64, len(s.armServoIDs))
@@ -279,7 +297,7 @@ func (s *so101) dwellUntilNear(ctx context.Context, goal []float64, lookaheadDeg
 	// flag can be stranded true by any future early `continue`, which would silently disable
 	// the stall escape for the whole dwell.
 	for polls := 0; ; polls++ {
-		current, err := s.currentJoints(ctx)
+		current, moving, err := s.readArmState(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read positions while holding a waypoint: %w", err)
 		}
@@ -291,22 +309,17 @@ func (s *so101) dwellUntilNear(ctx context.Context, goal []float64, lookaheadDeg
 		if remainingDeg <= lookaheadDeg {
 			return current, nil
 		}
-		// A servo parks short of its goal and reports Moving=0, leaving the deadline as the
-		// only exit. Not on the first poll: Moving takes ~2ms to rise after a goal write.
-		// See docs/arm.md, "Waypoint streams".
-		if polls > 0 {
-			moving, mErr := s.anyServoMoving(ctx)
-			switch {
-			case mErr != nil:
-				// Auxiliary signal: a transient must not fail a move the deadline covers.
-				s.logger.Debugf("waypoint dwell: could not read moving state, "+
-					"falling back to the timeout: %v", mErr)
-			case !moving:
-				s.logger.Debugf("waypoint dwell: servos stopped %.2f deg short of the "+
-					"waypoint (lookahead %.2f deg), moving to the next waypoint",
-					remainingDeg, lookaheadDeg)
-				return current, nil
-			}
+		// A servo parks short of its goal and reports Moving=0. That droop exceeds any usable
+		// lookahead at a low P gain, leaving the deadline as the only exit -- which is what
+		// made a nod replay take 8x its recorded duration. See docs/arm.md, "Waypoint
+		// streams". Not consulted on the first poll: Moving takes ~2ms to rise after a goal
+		// write, so the value read there can still be the pre-write zero. It is READ on every
+		// poll regardless -- it shares the position read's transaction, so it is free.
+		if polls > 0 && !moving {
+			s.logger.Debugf("waypoint dwell: servos stopped %.2f deg short of the "+
+				"waypoint (lookahead %.2f deg), moving to the next waypoint",
+				remainingDeg, lookaheadDeg)
+			return current, nil
 		}
 		if time.Now().After(deadline) {
 			// Debug, not Warn: on a dense path a lagging waypoint is routine, and one log
@@ -462,6 +475,11 @@ func (s *so101) MoveThroughJointPositions(ctx context.Context, positions [][]ref
 		return fmt.Errorf("failed to read positions to pace a waypoint stream: %w", err)
 	}
 
+	// lastKnown is where the arm actually was at the most recent read, and lastKnownAt when.
+	// Together they let a waypoint's dwell be SKIPPED outright when it is already provably
+	// satisfiable -- see below.
+	lastKnown, lastKnownAt := from, time.Now()
+
 	for idx, jointPositions := range positions {
 		clamped, err := s.clampPositions(jointPositions)
 		if err != nil {
@@ -481,21 +499,36 @@ func (s *so101) MoveThroughJointPositions(ctx context.Context, positions [][]ref
 			break
 		}
 
-		// Hold this waypoint until the arm has actually reached it (within the lookahead)
-		// before writing the next. Without this the whole stream lands on the bus in a few
-		// tens of milliseconds, each SetGoals superseding the last, and the arm executes
-		// only the final waypoint -- a recorded trajectory replays as a straight line from
-		// its first pose to its last, and a planned path skips the obstacle avoidance it
-		// was planned for.
+		// Skip the dwell entirely when the arm's last known position is ALREADY within the
+		// lookahead of this new goal: the dwell's first read would satisfy it and return, so
+		// the read buys nothing. On a densified stream this is the common case -- an 8x
+		// interpolated 10 Hz recording has sub-degree segments against a multi-degree
+		// lookahead, so the goal may legitimately lead by many waypoints, and this turns one
+		// read per waypoint into one read per lookahead's worth of travel.
 		//
-		// The dwell's own read is the next segment's travel reference: it is where the arm
-		// ACTUALLY is, which matters because a joint whose travel is concentrated earlier
-		// in the path would otherwise show a near-zero delta and be floored to 1 step/s
-		// while its goal is still far away.
+		// The bound has to hold without a fresh read, so it is deliberately conservative:
+		// `speed * elapsed` is the furthest ANY joint could have travelled since lastKnown,
+		// in any direction. Adding it means the estimate can only overstate how far the arm
+		// still has to go, never understate it -- so a skip is only ever taken when the real
+		// dwell would also have returned immediately. Both terms grow as waypoints are
+		// skipped, so this is self-limiting: it stops skipping and reads again.
+		//
+		// This is only safe because of servo.MinExecutableSpeedDegsPerSec. Using the
+		// commanded waypoint rather than a live read as the next travel reference used to
+		// mean a joint whose travel concentrated earlier in the path showed a near-zero
+		// delta and was floored to 1 step/s while its goal was still far away; the speed
+		// floor makes that unreachable.
+		_, projected := servo.JointTravelsDeg(lastKnown, clamped)
+		if projected+speed*time.Since(lastKnownAt).Seconds() <= lookahead {
+			from = clamped
+			continue
+		}
+
 		from, err = s.dwellUntilNear(ctx, clamped, lookahead, speed, dwellTimeout)
 		if err != nil {
 			return err
 		}
+		lastKnown, lastKnownAt = from, time.Now()
 	}
 	return nil
 }

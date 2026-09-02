@@ -118,6 +118,10 @@ Note the derived value grows with the *square* of speed, so a move at the 180 °
 - **Smaller** — the path is tracked more exactly, down to a near-stop at every waypoint at very small values.
 - A joint chasing its goal cruises at roughly `sqrt(accel × lookahead)`, so the derived value above replays a 10 Hz recording at close to its recorded duration.
 
+**Most waypoints are never read at all.** The dwell returns where the arm actually was, so when the next goal is already inside the lookahead of that position the dwell would return on its first read — and is skipped outright instead. On a densified stream this is the common case, cutting reads by roughly 8× at a 25 °/s profile and 16× at 80 °/s. The estimate carries a `speed × elapsed` allowance for motion in any direction since the last read, so it can only overstate the distance remaining; a skip is taken only where a real dwell would also have returned immediately.
+
+When a read is needed, position and moving state arrive in **one** bus transaction — the two registers are 11 bytes apart, and each transaction pays the bus's fixed command gap regardless of payload.
+
 **A waypoint the arm has stopped short of ends immediately.** A servo settles where its position error times its P gain balances the load, then reports `Moving = 0` with the goal unreached. When that droop exceeds the lookahead — which the floor above cannot always prevent, since a `p_gain` 16 arm droops 4.8° — the dwell would otherwise have no exit but its deadline. Because it gates on the **worst** joint, one joint parked short makes every waypoint in the stream wait out its full timeout. Measured on hardware: a 1.5 s recorded trajectory took 31.3 s; with the escape, 6.5 s, and path deviation was unchanged (3.8° → 3.7° mean), so the escape removes dead time without cutting corners.
 
 The moving state is consulted from the dwell's second poll onward, never the first — a servo takes about 2 ms to raise `Moving` after a goal write, so an immediate check could read the pre-write zero and abandon a waypoint before the arm started. A failure to read it is not fatal; the dwell falls back to its deadline.

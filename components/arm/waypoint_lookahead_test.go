@@ -36,11 +36,14 @@ func TestWaypointLookaheadIsDerivedFromTheMoveProfile(t *testing.T) {
 	require.NoError(t, s.MoveThroughJointPositions(context.Background(),
 		[][]referenceframe.Input{w0, w1}, opts, nil))
 
-	// One seeding read plus one dwell read: the derived lookahead is satisfied on the first
-	// poll. Against DefaultLookaheadDeg this residual is never satisfied and the dwell polls
-	// to its deadline instead, so this fails if the derivation is dropped.
-	assert.Equal(t, 2, calls(),
-		"a 6 deg residual must satisfy the lookahead derived for a 100 deg/s move")
+	// The seeding read alone: the 6 deg residual is already inside the derived 12 deg
+	// lookahead, so the predictive skip takes the waypoint without reading again. Against
+	// DefaultLookaheadDeg (3.0) the residual is outside, no skip is possible, and the dwell
+	// polls to its deadline -- so this still fails if the derivation is dropped, and it also
+	// pins that the skip uses the same lookahead the dwell would.
+	assert.Equal(t, 1, calls(),
+		"a 6 deg residual is inside the lookahead derived for a 100 deg/s move, so the "+
+			"dwell should be skipped outright rather than polled")
 }
 
 func TestConfiguredWaypointLookaheadOverridesTheDerivedOne(t *testing.T) {

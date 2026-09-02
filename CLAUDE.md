@@ -182,6 +182,31 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
   with zero, which would otherwise send every dwell down the escape). Test residuals come from
   `shortOfGoal`, derived from `DefaultLookaheadDeg` -- they were once literals chosen against
   a 2.0 floor and silently stopped testing anything when it moved.
+- **A waypoint whose dwell is provably satisfiable is SKIPPED without reading.** The dwell
+  returns where the arm actually was, so if `|lastKnown - nextGoal|` is already inside the
+  lookahead, its first read would return immediately and the read buys nothing. On a densified
+  stream that is the common case -- 8x-interpolated 10 Hz frames give sub-degree segments
+  against a multi-degree lookahead -- so this turns one read per waypoint into one per
+  lookahead's worth of travel: ~8x fewer at the 25 deg/s derived profile, ~16x at an 80 deg/s
+  arm. The bound must hold WITHOUT a fresh read, so it adds `speed * elapsed`, the furthest
+  any joint could have travelled in any direction since that read (a joint may have reversed).
+  That can only overstate the distance remaining, never understate it, so a skip is taken only
+  where the real dwell would also have returned immediately -- and both terms grow as
+  waypoints are skipped, so it stops skipping and reads again on its own.
+  **It is only safe because of `MinExecutableSpeedDegsPerSec`.** Handing the commanded
+  waypoint forward as the next travel reference is what CLAUDE.md previously warned against:
+  a joint whose travel concentrated earlier in the path showed a near-zero delta and was
+  floored to 1 step/s while its goal was still far away. The speed floor makes that
+  unreachable, which is what unlocked this.
+- **The dwell reads position and Moving in ONE transaction** (`GetJointPositionsAndMovingForServos`).
+  `Present_Position` is at 56 and `Moving` at 66, so an 11-byte `SyncRead` covers both, and
+  every feetech transaction pays `enforceCommandGap`'s ~1ms while holding the bus lock -- so
+  payload size is nearly free and a second transaction costs the full gap again. This also
+  DELETED a failure mode rather than making one fatal: with two reads, position could succeed
+  while Moving failed, which the dwell had to treat as "assume still moving". One read cannot
+  land in that state, so the leniency (and the test pinning it) is gone. Moving is still only
+  CONSULTED from the second poll onward -- it takes ~2ms to rise after a goal write -- but it
+  is now read on every poll for free.
 - **The dwell's poll wait is PREDICTED, not fixed, and that was worth 2.4s on a 6.9s
   recording.** A fixed tick quantises every waypoint to a multiple of itself: the arm needs
   some fraction of a tick to close the last of its gap and the dwell cannot notice until the

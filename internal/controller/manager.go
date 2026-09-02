@@ -622,6 +622,60 @@ func (h *ControllerHandle) SyncReadPositions(ctx context.Context, ids []int) (ou
 	return out, err
 }
 
+// GetJointPositionsAndMovingForServos reads joint positions AND whether any of those servos
+// is still executing its move, in ONE bus transaction.
+//
+// Present_Position is at 56 and Moving at 66, so an 11-byte read covers both. That is worth
+// doing because every feetech transaction takes the bus lock for a whole request/response
+// round trip and pays enforceCommandGap's ~1ms sleep while holding it -- so payload size is
+// nearly free and a second transaction costs the full gap again. The waypoint dwell wants
+// both values on every poll, and asking twice doubled its bus time.
+//
+// It also removes a failure mode rather than making one fatal: with two reads, position could
+// succeed while Moving failed, which the dwell had to treat as "assume still moving". One
+// read cannot land in that state.
+func (h *ControllerHandle) GetJointPositionsAndMovingForServos(
+	ctx context.Context, servoIDs []int,
+) (out []float64, moving bool, err error) {
+	movingOffset := int(feetech.RegMoving.Address - feetech.RegPresentPosition.Address)
+	width := movingOffset + int(feetech.RegMoving.Size)
+
+	err = h.withSessionRead(func(sess *busSession) error {
+		data, err := sess.bus.SyncRead(ctx, feetech.RegPresentPosition.Address, width, servoIDs)
+		if err != nil {
+			return err
+		}
+		proto := sess.bus.Protocol()
+		positions := make([]float64, len(servoIDs))
+		for i, servoID := range servoIDs {
+			raw, ok := data[servoID]
+			if !ok || len(raw) < width {
+				return fmt.Errorf("servo %d returned %d bytes, want %d", servoID, len(raw), width)
+			}
+			cs, ok := sess.servos[servoID]
+			if !ok {
+				return fmt.Errorf("servo %d not available", servoID)
+			}
+			// Calibration(), not the field: another resource on this bus can be updating it.
+			normalized, nErr := cs.Calibration().Normalize(int(proto.DecodeWord(raw[:2])))
+			if nErr != nil {
+				return fmt.Errorf("failed to normalize raw servo value for id %d: %w", servoID, nErr)
+			}
+			if isGripperServo(servoID) {
+				positions[i] = (normalized/100.0*2.0 - 1.0) * math.Pi
+			} else {
+				positions[i] = utils.DegToRad(normalized)
+			}
+			if raw[movingOffset] != 0 {
+				moving = true
+			}
+		}
+		out = positions
+		return nil
+	})
+	return out, moving, err
+}
+
 // AnyServoMoving reports whether any of the given servos is still executing a move,
 // in one SyncRead of the Moving register rather than a read per servo.
 func (h *ControllerHandle) AnyServoMoving(ctx context.Context, ids []int) (moving bool, err error) {
