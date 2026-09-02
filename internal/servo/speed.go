@@ -42,8 +42,11 @@ const (
 // floor CoordinatedProfiles applies to every joint it scales down. Below it the register
 // fails in OPPOSITE directions depending on load, so no single correction recovers it.
 //
-// A tuning value, not a hardware constant -- measured on one arm at p_gain 32. See
-// docs/arm.md, "Motion and speed", for the measurements and their limits.
+// A tuning value, not a hardware constant -- measured on one arm at p_gain 32, which is NO
+// LONGER what ships: the tuned table runs the gravity-loaded joints at p_gain 48 (docs/arm.md,
+// "Servo gains"). Not re-derived against it. Higher P partly addresses the load-dependent
+// direction error this floor exists for, so this is an OPPORTUNITY to lower it -- re-measure
+// before doing so. See docs/arm.md, "Motion and speed".
 const MinExecutableSpeedDegsPerSec = 12.0
 
 // Waypoint-lookahead bounds, in degrees: how far ahead of the arm the commanded goal is
@@ -56,6 +59,10 @@ const (
 	// margin; it deliberately does not clear p_gain 16, which the dwell's stall escape
 	// backstops instead. NOT sufficient alone -- see LookaheadDegFor for the other bound.
 	// Measurements: docs/arm.md, "Waypoint streams".
+	//
+	// The shipped gains cut that droop band ~4x (0.90 -> 0.22 deg on joint 2), so this floor
+	// is now wider than it needs to be -- a smaller one would track waypoints more tightly
+	// and dwell less. Not re-derived; do NOT shrink it on the arithmetic alone.
 	DefaultLookaheadDeg = 3.0
 	MinLookaheadDeg     = 0.1
 	MaxLookaheadDeg     = 45.0

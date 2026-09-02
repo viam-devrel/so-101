@@ -28,6 +28,13 @@ const (
 	// maxAccUnits is a conservative round-down below the LOWEST measured knee. Measured
 	// knees were 52, 55 and 63 across three joints; 50 sits under all of them. Above the
 	// knee the register has no further effect, so scaling silently stops working.
+	//
+	// UNRESOLVED: step-response data from 2026-09-02 disagrees. On joint 2, well past that
+	// knee, overshoot and peak current keep climbing (Acc 64 -> 96 -> 128: 2.5 -> 6.0 -> 7.8
+	// counts, 274 -> 489 -> 560 units) where a saturated register would be flat. Most likely
+	// the two studies measured different things -- this calibration recovered arrival timing,
+	// that one endpoint overshoot -- i.e. the register may stop affecting when the joint
+	// arrives while still shaping its deceleration. Settle it before relying on either bound.
 	maxAccUnits = 50
 )
 
