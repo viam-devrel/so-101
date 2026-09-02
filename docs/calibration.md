@@ -25,72 +25,11 @@ _If you have already calibrated the servos on this arm, use the `devrel:so101:di
 
 | Name               | Type     | Required     | Description                                                                                                                     |
 | ------------------ | -------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------- |
-| `port`             | string   | **Required** | Serial port for servo communication (see Communication section below)                                                           |
+| `port`             | string   | **Required** | Serial port for servo communication (see [Communication](#communication))                                                           |
 | `calibration_file` | string   | Optional     | Path where calibration will be saved. If relative path, uses `$VIAM_MODULE_DATA` directory. Default: `"so101_calibration.json"` |
 | `baudrate`         | int      | Optional     | Serial communication speed. Default: `1000000`                                                                                  |
 | `timeout`          | duration | Optional     | Communication timeout. Default: `"5s"`                                                                                          |
 | `servo_ids`        | []int    | Optional     | Servos to calibrate. Defaults to all six (`[1, 2, 3, 4, 5, 6]`).                                                                 |
-
-## Communication
-
-You can use the included [discovery service](discovery.md#model-devrelso101discovery) or find the available serial port options from your machine's command line.
-
-On MacOS, look for `usbmodem` or `usbserial` in the name:
-
-```
-you@machine: ls /dev/tty.*
-/dev/tty.Bluetooth-Incoming-Port
-/dev/tty.debug-console
-/dev/tty.usbmodem58CD1767051
-
-you@machine: ls /dev/cu.*
-/dev/cu.Bluetooth-Incoming-Port
-/dev/cu.debug-console
-/dev/cu.usbmodem58CD1767051
-```
-
-On Linux, look for `ACM` or `USB` in the name:
-
-```
-you@machine: ls /dev/tty*
-/dev/ttyACM0
-/dev/ttyUSB0
-```
-
-On Windows, look for `COM` in the name:
-
-```
-you@machine: mode
-COM0
-COM1
-```
-
-## Usage
-
-### Monitor Progress
-
-Example output:
-
-```json
-{
-  "calibration_state": "range_recording",
-  "instruction": "Recording range of motion. Move every joint through its full range, then stop recording.",
-  "available_commands": ["stop_range_recording", "abort", "reset"],
-  "servo_count": 5,
-  "recording_time_seconds": 15.3,
-  "position_samples": 306,
-  "joints": {
-    "shoulder_pan": {
-      "id": 1,
-      "current_position": 2150,
-      "homing_offset": -103,
-      "recorded_min": 758,
-      "recorded_max": 3292,
-      "is_completed": false
-    }
-  }
-}
-```
 
 ## Available Commands
 
@@ -276,6 +215,67 @@ Motor setup status is included in sensor readings:
 }
 ```
 
+## Communication
+
+You can use the included [discovery service](discovery.md#model-devrelso101discovery) or find the available serial port options from your machine's command line.
+
+On MacOS, look for `usbmodem` or `usbserial` in the name:
+
+```
+you@machine: ls /dev/tty.*
+/dev/tty.Bluetooth-Incoming-Port
+/dev/tty.debug-console
+/dev/tty.usbmodem58CD1767051
+
+you@machine: ls /dev/cu.*
+/dev/cu.Bluetooth-Incoming-Port
+/dev/cu.debug-console
+/dev/cu.usbmodem58CD1767051
+```
+
+On Linux, look for `ACM` or `USB` in the name:
+
+```
+you@machine: ls /dev/tty*
+/dev/ttyACM0
+/dev/ttyUSB0
+```
+
+On Windows, look for `COM` in the name:
+
+```
+you@machine: mode
+COM0
+COM1
+```
+
+## Usage
+
+### Monitor Progress
+
+Example output:
+
+```json
+{
+  "calibration_state": "range_recording",
+  "instruction": "Recording range of motion. Move every joint through its full range, then stop recording.",
+  "available_commands": ["stop_range_recording", "abort", "reset"],
+  "servo_count": 5,
+  "recording_time_seconds": 15.3,
+  "position_samples": 306,
+  "joints": {
+    "shoulder_pan": {
+      "id": 1,
+      "current_position": 2150,
+      "homing_offset": -103,
+      "recorded_min": 758,
+      "recorded_max": 3292,
+      "is_completed": false
+    }
+  }
+}
+```
+
 ## State Machine
 
 The calibration sensor operates as a state machine:
@@ -355,4 +355,3 @@ The sensor saves calibration in the standard format:
 - **Invalid ranges**: Move joints through their complete range of motion
 - **Servo communication errors**: Check port, baudrate, and servo connections
 - **Permission denied**: Ensure proper access to serial port (`sudo chmod 666 /dev/ttyUSB0`)
-

@@ -29,43 +29,6 @@ Where `arm-1` is the name of your `devrel:so101:arm` component. Configure the ar
 | `gripper_type` | string | Optional     | Which gripper meshes `Geometries()` serves for the 3D viewer: `follower` (moving jaw, default) or `leader` (thumb-loop handle + trigger). The moving part articulates with the live gripper opening.                                                  |
 | `mesh_detail`  | string | Optional     | Gripper mesh resolution: `low` (decimated, the default) or `high` (full resolution). `Geometries()` is also the motion-planning collision geometry, so `low` keeps planning fast; `high` is mainly for visual comparison.                             |
 
-## Reference frame (TCP)
-
-Parent the gripper to the arm with a zero offset — the module supplies the rest:
-
-```json
-{
-  "name": "gripper",
-  "frame": { "parent": "arm" }
-}
-```
-
-The gripper reports a kinematic model whose frame is its **tool center point**: the grasp point
-between the tips of the two jaws, `(x: 6.835, y: 0, z: 99.9)` mm ahead of the arm's `tool` frame,
-with the same axes (so `+Z` remains the approach axis). So `GetPose("gripper", "world")` and any
-motion request targeting the gripper resolve to the jaw tips, not to the arm's wrist. Do **not** add
-a compensating `translation` to the gripper's `frame` config — that would double the offset.
-
-The `leader` gripper is a hand-held trigger rather than a pair of jaws, so it has no grasp point;
-its frame stays at the mount.
-
-The model also carries the gripper meshes, which is what makes the gripper a real obstacle for
-motion planning: for `arm`/`gantry`/`gripper` components viam-server takes collision geometry from
-the kinematic model and never calls `Geometries()`. The model is static, so its collision meshes are
-frozen with the jaws **closed**; `Geometries()` still serves the live, articulating jaw to the 3D
-viewer.
-
-The 3D viewer reads the model's frames directly, so a `<gripper>:tcp` node appears in the scene tree
-with its axes drawn at the grasp point — no extra configuration and no placeholder geometry needed.
-
-## Communication
-
-The gripper owns no serial connection of its own: it asks the arm for its servo's live `Moving` state over [`servo_moving`](arm.md#servo-moving), and if the arm cannot answer — including a remote arm running an older module build that does not know the command — it logs at Debug and falls back to whether a gripper command is in flight, rather than returning an error.
-
-## When the arm fails to build
-
-Because the arm is a required dependency, a gripper cannot start unless its arm starts. If the arm fails to configure, the gripper reports `dependency not ready` rather than coming up on its own. Worth knowing when diagnosing: the arm's startup check pings **all six** servos, so a dead *gripper* servo fails the arm, which in turn keeps the gripper down. Check the arm's logs first when a gripper will not configure.
-
 ## DoCommand
 
 The gripper component provides several custom commands:
@@ -247,3 +210,40 @@ Read the current gripper speed and acceleration:
   "acceleration": 300
 }
 ```
+
+## Reference frame (TCP)
+
+Parent the gripper to the arm with a zero offset — the module supplies the rest:
+
+```json
+{
+  "name": "gripper",
+  "frame": { "parent": "arm" }
+}
+```
+
+The gripper reports a kinematic model whose frame is its **tool center point**: the grasp point
+between the tips of the two jaws, `(x: 6.835, y: 0, z: 99.9)` mm ahead of the arm's `tool` frame,
+with the same axes (so `+Z` remains the approach axis). So `GetPose("gripper", "world")` and any
+motion request targeting the gripper resolve to the jaw tips, not to the arm's wrist. Do **not** add
+a compensating `translation` to the gripper's `frame` config — that would double the offset.
+
+The `leader` gripper is a hand-held trigger rather than a pair of jaws, so it has no grasp point;
+its frame stays at the mount.
+
+The model also carries the gripper meshes, which is what makes the gripper a real obstacle for
+motion planning: for `arm`/`gantry`/`gripper` components viam-server takes collision geometry from
+the kinematic model and never calls `Geometries()`. The model is static, so its collision meshes are
+frozen with the jaws **closed**; `Geometries()` still serves the live, articulating jaw to the 3D
+viewer.
+
+The 3D viewer reads the model's frames directly, so a `<gripper>:tcp` node appears in the scene tree
+with its axes drawn at the grasp point — no extra configuration and no placeholder geometry needed.
+
+## Communication
+
+The gripper owns no serial connection of its own: it asks the arm for its servo's live `Moving` state over [`servo_moving`](arm.md#servo-moving), and if the arm cannot answer — including a remote arm running an older module build that does not know the command — it logs at Debug and falls back to whether a gripper command is in flight, rather than returning an error.
+
+## When the arm fails to build
+
+Because the arm is a required dependency, a gripper cannot start unless its arm starts. If the arm fails to configure, the gripper reports `dependency not ready` rather than coming up on its own. Worth knowing when diagnosing: the arm's startup check pings **all six** servos, so a dead *gripper* servo fails the arm, which in turn keeps the gripper down. Check the arm's logs first when a gripper will not configure.

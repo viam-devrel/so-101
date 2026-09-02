@@ -319,34 +319,40 @@ func (h *ControllerHandle) GetJointPositions(ctx context.Context) (out []float64
 	return out, err
 }
 
+// jointRadians converts one servo's raw tick reading into the radian value the arm API
+// expects, through that servo's own live calibration.
+//
+// Shared by every position read on this handle: they differ only in how they get the raw
+// ticks, not in how those ticks are interpreted.
+func (sess *busSession) jointRadians(servoID, raw int) (float64, error) {
+	cs, ok := sess.servos[servoID]
+	if !ok {
+		return 0, fmt.Errorf("servo %d not available", servoID)
+	}
+	// Calibration(), not the field: another resource on this bus can be updating it
+	// concurrently.
+	normalized, err := cs.Calibration().Normalize(raw)
+	if err != nil {
+		return 0, fmt.Errorf("failed to normalize raw servo value for id %d: %w", servoID, err)
+	}
+	if isGripperServo(servoID) {
+		return (normalized/100.0*2.0 - 1.0) * math.Pi, nil
+	}
+	return utils.DegToRad(normalized), nil
+}
+
 func (h *ControllerHandle) GetJointPositionsForServos(ctx context.Context, servoIDs []int) (out []float64, err error) {
 	err = h.withSessionRead(func(sess *busSession) error {
-		positions := make([]float64, len(servoIDs))
-
 		rawPositions, err := sess.group.Positions(ctx)
 		if err != nil {
 			return fmt.Errorf("failed to get raw positions for servos: %w", err)
 		}
-
+		positions := make([]float64, len(servoIDs))
 		for i, servoID := range servoIDs {
-			rawPos := rawPositions[servoID]
-			cs, ok := sess.servos[servoID]
-			if !ok {
-				return fmt.Errorf("servo %d not available", servoID)
-			}
-			// Calibration(), not the field: another resource on this bus can be updating
-			// it concurrently.
-			normalized, err := cs.Calibration().Normalize(rawPos)
-			if err != nil {
-				return fmt.Errorf("failed to normalize raw servo value for id %d: %w", servoID, err)
-			}
-			if isGripperServo(servoID) {
-				positions[i] = (normalized/100.0*2.0 - 1.0) * math.Pi
-			} else {
-				positions[i] = utils.DegToRad(normalized)
+			if positions[i], err = sess.jointRadians(servoID, rawPositions[servoID]); err != nil {
+				return err
 			}
 		}
-
 		out = positions
 		return nil
 	})
@@ -620,6 +626,54 @@ func (h *ControllerHandle) SyncReadPositions(ctx context.Context, ids []int) (ou
 		return nil
 	})
 	return out, err
+}
+
+// The block a single state read covers: Present_Position (56) through Moving (66). Fixed by
+// the STS3215 control table, so it is derived once rather than at every call. Not consts --
+// feetech's register addresses are struct fields, so the expression is not constant.
+var (
+	stateMovingOffset = int(feetech.RegMoving.Address - feetech.RegPresentPosition.Address)
+	stateReadWidth    = stateMovingOffset + int(feetech.RegMoving.Size)
+)
+
+// GetJointPositionsAndMovingForServos reads joint positions AND whether any of those servos
+// is still executing its move, in ONE bus transaction.
+//
+// Present_Position is at 56 and Moving at 66, so an 11-byte read covers both. That is worth
+// doing because every feetech transaction takes the bus lock for a whole request/response
+// round trip and pays enforceCommandGap's ~1ms sleep while holding it -- so payload size is
+// nearly free and a second transaction costs the full gap again. The waypoint dwell wants
+// both values on every poll, and asking twice doubled its bus time.
+//
+// It also removes a failure mode rather than making one fatal: with two reads, position could
+// succeed while Moving failed, which the dwell had to treat as "assume still moving". One
+// read cannot land in that state.
+func (h *ControllerHandle) GetJointPositionsAndMovingForServos(
+	ctx context.Context, servoIDs []int,
+) (out []float64, moving bool, err error) {
+	err = h.withSessionRead(func(sess *busSession) error {
+		data, err := sess.bus.SyncRead(ctx, feetech.RegPresentPosition.Address, stateReadWidth, servoIDs)
+		if err != nil {
+			return err
+		}
+		proto := sess.bus.Protocol()
+		positions := make([]float64, len(servoIDs))
+		for i, servoID := range servoIDs {
+			raw, ok := data[servoID]
+			if !ok || len(raw) < stateReadWidth {
+				return fmt.Errorf("servo %d returned %d bytes, want %d", servoID, len(raw), stateReadWidth)
+			}
+			if positions[i], err = sess.jointRadians(servoID, int(proto.DecodeWord(raw[:2]))); err != nil {
+				return err
+			}
+			if raw[stateMovingOffset] != 0 {
+				moving = true
+			}
+		}
+		out = positions
+		return nil
+	})
+	return out, moving, err
 }
 
 // AnyServoMoving reports whether any of the given servos is still executing a move,
