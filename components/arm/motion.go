@@ -499,25 +499,16 @@ func (s *so101) MoveThroughJointPositions(ctx context.Context, positions [][]ref
 			break
 		}
 
-		// Skip the dwell entirely when the arm's last known position is ALREADY within the
-		// lookahead of this new goal: the dwell's first read would satisfy it and return, so
-		// the read buys nothing. On a densified stream this is the common case -- an 8x
-		// interpolated 10 Hz recording has sub-degree segments against a multi-degree
-		// lookahead, so the goal may legitimately lead by many waypoints, and this turns one
-		// read per waypoint into one read per lookahead's worth of travel.
+		// Skip the dwell when the arm's last known position is already inside the lookahead
+		// of this new goal: the dwell's first read would return immediately, so it buys
+		// nothing. On a densified stream that is the common case, cutting one read per
+		// waypoint to one per lookahead's worth of travel.
 		//
-		// The bound has to hold without a fresh read, so it is deliberately conservative:
-		// `speed * elapsed` is the furthest ANY joint could have travelled since lastKnown,
-		// in any direction. Adding it means the estimate can only overstate how far the arm
-		// still has to go, never understate it -- so a skip is only ever taken when the real
-		// dwell would also have returned immediately. Both terms grow as waypoints are
-		// skipped, so this is self-limiting: it stops skipping and reads again.
-		//
-		// This is only safe because of servo.MinExecutableSpeedDegsPerSec. Using the
-		// commanded waypoint rather than a live read as the next travel reference used to
-		// mean a joint whose travel concentrated earlier in the path showed a near-zero
-		// delta and was floored to 1 step/s while its goal was still far away; the speed
-		// floor makes that unreachable.
+		// `speed * elapsed` bounds how far any joint could have moved in any direction since
+		// that read, so the estimate can only overstate what remains -- and both terms grow
+		// as waypoints are skipped, so it reads again on its own. Safe only because
+		// servo.MinExecutableSpeedDegsPerSec stops a low-k joint being starved when the
+		// commanded waypoint, rather than a live read, becomes the travel reference.
 		_, projected := servo.JointTravelsDeg(lastKnown, clamped)
 		if projected+speed*time.Since(lastKnownAt).Seconds() <= lookahead {
 			from = clamped

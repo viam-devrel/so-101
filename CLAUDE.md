@@ -198,15 +198,13 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
   a joint whose travel concentrated earlier in the path showed a near-zero delta and was
   floored to 1 step/s while its goal was still far away. The speed floor makes that
   unreachable, which is what unlocked this.
-- **The dwell reads position and Moving in ONE transaction** (`GetJointPositionsAndMovingForServos`).
-  `Present_Position` is at 56 and `Moving` at 66, so an 11-byte `SyncRead` covers both, and
-  every feetech transaction pays `enforceCommandGap`'s ~1ms while holding the bus lock -- so
-  payload size is nearly free and a second transaction costs the full gap again. This also
-  DELETED a failure mode rather than making one fatal: with two reads, position could succeed
-  while Moving failed, which the dwell had to treat as "assume still moving". One read cannot
-  land in that state, so the leniency (and the test pinning it) is gone. Moving is still only
-  CONSULTED from the second poll onward -- it takes ~2ms to rise after a goal write -- but it
-  is now read on every poll for free.
+- **The dwell reads position and Moving in ONE transaction**
+  (`GetJointPositionsAndMovingForServos`): the registers are 11 bytes apart, and every feetech
+  transaction pays `enforceCommandGap`'s ~1ms while holding the bus lock, so payload size is
+  nearly free but a second transaction is not. This DELETED a failure mode rather than making
+  one fatal -- position could previously succeed while Moving failed, which the dwell had to
+  treat as "assume still moving"; one read cannot land there. Moving is still only CONSULTED
+  from the second poll (it takes ~2ms to rise after a goal write), just read for free earlier.
 - **The dwell's poll wait is PREDICTED, not fixed, and that was worth 2.4s on a 6.9s
   recording.** A fixed tick quantises every waypoint to a multiple of itself: the arm needs
   some fraction of a tick to close the last of its gap and the dwell cannot notice until the

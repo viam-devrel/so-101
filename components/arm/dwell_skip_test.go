@@ -6,7 +6,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.viam.com/rdk/components/arm"
 	"go.viam.com/rdk/referenceframe"
 	"go.viam.com/rdk/utils"
 
@@ -35,6 +34,14 @@ func TestDenseStreamSkipsDwellReadsWithinTheLookahead(t *testing.T) {
 	// waypoint, every one of which would have returned on its first poll.
 	assert.Equal(t, 1, calls(),
 		"a stream whose whole travel fits inside the lookahead needs only the seeding read")
+
+	// The skip hands the COMMANDED waypoint forward as the next travel reference instead of
+	// a live read, which is only safe while a low-k joint is still commanded a speed the
+	// servo executes. Without that floor this optimisation silently starves such a joint.
+	profiles := servo.CoordinatedProfiles([]float64{20, 0.2}, 50, servo.DefaultAccelDegsPerSecSq, nil)
+	assert.GreaterOrEqual(t, profiles[1].SpeedSteps,
+		servo.DegPerSecToStepsPerSec(servo.MinExecutableSpeedDegsPerSec),
+		"the predictive skip depends on MinExecutableSpeedDegsPerSec")
 }
 
 // The skip must never be taken on a bound that could understate the remaining distance: a
@@ -83,20 +90,4 @@ func TestDwellSkipHonoursAConfiguredLookahead(t *testing.T) {
 			}
 		})
 	}
-}
-
-// Guards the reason the skip is safe at all. Before MinExecutableSpeedDegsPerSec, using the
-// commanded waypoint as the next travel reference meant a joint whose travel concentrated
-// earlier in the path showed a near-zero delta and was floored to 1 step/s while its goal was
-// still far away. The floor makes that unreachable, which is what lets a skipped waypoint
-// hand the commanded pose forward instead of a fresh read.
-func TestSkippedWaypointsCannotStarveAJoint(t *testing.T) {
-	// Joint 0 moves a lot, joint 1 a hundredth as much: k = 0.01, which without the floor
-	// scales to 0.5 deg/s at the 50 deg/s default.
-	profiles := servo.CoordinatedProfiles([]float64{20, 0.2}, 50, servo.DefaultAccelDegsPerSecSq, nil)
-	require.Len(t, profiles, 2)
-	floor := servo.DegPerSecToStepsPerSec(servo.MinExecutableSpeedDegsPerSec)
-	assert.GreaterOrEqual(t, profiles[1].SpeedSteps, floor,
-		"a low-k joint must still be commanded a speed the servo executes")
-	_ = arm.MoveOptions{}
 }
