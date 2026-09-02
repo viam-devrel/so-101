@@ -18,7 +18,12 @@ import (
 var SO101TeleopModel = resource.NewModel("devrel", "so101", "teleop")
 
 const (
-	defaultTeleopRateHz         = 20.0
+	// 100 Hz, from the 2026-09-02 servo characterization: command rate dominates teleop
+	// smoothness far more than gain tuning (30->100 Hz cut chatter ~3.5x and pinned lag at
+	// 40 ms). Measured at unlimited acceleration, which is what the follower now gets.
+	// The loop's ticker drops ticks, so a bus that cannot sustain this degrades to the rate
+	// it can rather than backing up.
+	defaultTeleopRateHz         = 100.0
 	defaultMaxConsecutiveErrors = 10
 	maxTeleopRateHz             = 1000.0
 )
