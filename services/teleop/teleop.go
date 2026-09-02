@@ -5,14 +5,17 @@ package teleop
 import (
 	"context"
 	"fmt"
+	"math"
 	"sync"
 	"time"
 
 	"go.viam.com/rdk/components/arm"
 	"go.viam.com/rdk/components/gripper"
 	"go.viam.com/rdk/logging"
+	"go.viam.com/rdk/referenceframe"
 	"go.viam.com/rdk/resource"
 	"go.viam.com/rdk/services/generic"
+	"go.viam.com/rdk/utils"
 )
 
 var SO101TeleopModel = resource.NewModel("devrel", "so101", "teleop")
@@ -26,6 +29,15 @@ const (
 	defaultTeleopRateHz         = 100.0
 	defaultMaxConsecutiveErrors = 10
 	maxTeleopRateHz             = 1000.0
+
+	// maxStreamStartGapDeg is how close the follower must get to the leader before the
+	// mirror switches from profiled moves to streamed setpoints. A streamed setpoint carries
+	// no speed cap and no acceleration ramp, so handing one a large gap closes it at full
+	// servo speed -- fine for the sub-degree deltas of a running mirror, not for the arms
+	// starting in different poses. 5 deg is comfortably above the arm's steady-state droop
+	// (~0.22 deg tuned, 0.9 deg stock) so it is reachable, and small enough that the switch
+	// happens at a speed a hand is already tracking.
+	maxStreamStartGapDeg = 5.0
 )
 
 func init() {
@@ -93,6 +105,9 @@ type so101Teleop struct {
 	cycles            uint64
 	consecutiveErrors int
 	lastError         string
+	// streaming latches true once the follower has caught up with the leader. Until then the
+	// mirror runs profiled -- see maxStreamStartGapDeg.
+	streaming bool
 }
 
 func newSO101Teleop(
@@ -187,8 +202,12 @@ func (tp *so101Teleop) syncOnce(ctx context.Context) error {
 
 	// No speed cap, no acceleration ramp, no coordination read: the command stream itself
 	// shapes the trajectory, so anything the servo applies between setpoints is pure lag.
+	streamed, err := tp.readyToStream(ctx, positions)
+	if err != nil {
+		return err
+	}
 	if err := tp.followerArm.MoveToJointPositions(ctx, positions,
-		map[string]interface{}{"wait": false, "streamed": true}); err != nil {
+		map[string]interface{}{"wait": false, "streamed": streamed}); err != nil {
 		return fmt.Errorf("write follower joints: %w", err)
 	}
 
@@ -202,6 +221,44 @@ func (tp *so101Teleop) syncOnce(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// readyToStream reports whether this cycle may use a streamed setpoint, latching true the
+// first time the follower is within maxStreamStartGapDeg of the leader on every joint.
+//
+// The latch is the point. A streamed setpoint has no speed cap and no acceleration ramp, so
+// it must not be handed a large gap -- and profiling only the FIRST cycle would not help,
+// because a servo goal write supersedes the previous one: the next cycle 10 ms later would
+// overwrite the profiled goal with an unbounded one while the arm was still far away. So the
+// mirror stays profiled until the gap is actually closed.
+//
+// It costs one extra follower read per cycle, and only until the latch trips.
+func (tp *so101Teleop) readyToStream(ctx context.Context, leader []referenceframe.Input) (bool, error) {
+	tp.mu.Lock()
+	streaming := tp.streaming
+	tp.mu.Unlock()
+	if streaming {
+		return true, nil
+	}
+
+	follower, err := tp.followerArm.JointPositions(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("read follower joints: %w", err)
+	}
+	if len(follower) != len(leader) {
+		return false, fmt.Errorf("follower reports %d joints, leader %d", len(follower), len(leader))
+	}
+	for i := range leader {
+		if math.Abs(utils.RadToDeg(float64(leader[i])-float64(follower[i]))) > maxStreamStartGapDeg {
+			return false, nil
+		}
+	}
+
+	tp.mu.Lock()
+	tp.streaming = true
+	tp.mu.Unlock()
+	tp.logger.Infof("Follower caught up (within %.1f deg); streaming setpoints", maxStreamStartGapDeg)
+	return true, nil
 }
 
 func (tp *so101Teleop) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
@@ -223,6 +280,7 @@ func (tp *so101Teleop) DoCommand(ctx context.Context, cmd map[string]interface{}
 			"consecutive_errors": tp.consecutiveErrors,
 			"last_error":         tp.lastError,
 			"rate_hz":            tp.rateHz,
+			"streaming":          tp.streaming,
 		}, nil
 	default:
 		return nil, fmt.Errorf("unknown command: %v", cmd["command"])
@@ -244,6 +302,7 @@ func (tp *so101Teleop) start(ctx context.Context) error {
 	tp.cycles = 0
 	tp.consecutiveErrors = 0
 	tp.lastError = ""
+	tp.streaming = false
 	tp.wg.Add(1)
 	go tp.runLoop(loopCtx)
 	tp.logger.Infof("Teleop started at %.1f Hz", tp.rateHz)

@@ -389,7 +389,7 @@ The [teleop service](teleop.md) sets this on every follower command. The princip
 
 A plain point-to-point move should keep all three; do not set `streamed` there.
 
-**This removes a bound, so mind the first tick.** With no speed cap and no ramp, a large position error is closed as fast as the servo physically can. Teleop does not gate its first cycle on the follower already being near the leader, so starting teleop with the two arms far apart will snap the follower to the leader pose. Match the poses roughly before starting, or keep hands clear when you do.
+**This removes a bound, so a caller must not hand `streamed` a large position error** — it is closed as fast as the servo physically can. It is the caller's job to be near its target first; the teleop service gates itself on exactly this (see below).
 
 ### Waypoint streams
 

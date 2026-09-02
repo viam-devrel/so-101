@@ -86,6 +86,8 @@ were measured at unlimited acceleration, which is how teleop now drives the foll
 it only if the serial bus or host cannot keep up; the mirror loop's ticker drops ticks rather
 than backing up, so a rate the bus cannot sustain degrades silently to the rate it can.
 
+`streaming` reports whether the mirror has switched from profiled moves to streamed setpoints. Teleop drives the follower with no speed cap and no acceleration ramp, which is what keeps tracking lag down — but that means a large position error is closed at full servo speed, so the mirror will not use a streamed setpoint until the follower is within 5° of the leader on every joint. Until then it mirrors with the arm's configured `speed_degs_per_sec` and acceleration, and `streaming` reads `false`. The switch latches for the session: a running mirror legitimately trails the leader, and dropping back would reintroduce the lag. Starting with the arms in very different poses is therefore safe, but the follower will travel to meet the leader at the configured speed as soon as the loop starts.
+
 `cycles` is the total number of successful mirror cycles since the last start. `consecutive_errors` resets to zero on any successful cycle. When `max_consecutive_errors` is reached the loop sets `running` to `false` and records the triggering error in `last_error`.
 
 ## Notes

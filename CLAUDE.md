@@ -564,6 +564,11 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
   *configured* value is not a substitute (Acc 1 delivers ~43 deg/s², worse than the acc=32 row).
   Measured in tests: one bus packet per call instead of two. Do NOT unify the two paths, and do
   not split `streamed` back into per-register flags — nothing wants them separately, and the
-  read-skip belongs to the same decision. **It removes a bound:** teleop does not gate its first
-  cycle on the follower being near the leader, so a large initial gap is now closed at full
-  servo speed with no ramp.
+  read-skip belongs to the same decision. **It removes a bound**, so a caller must not hand it a large
+  position error. Teleop gates itself: `readyToStream` keeps the mirror on profiled moves
+  until the follower is within `maxStreamStartGapDeg` of the leader, then LATCHES. The latch
+  is the whole point -- profiling only the first cycle would be pointless, because a servo
+  goal write supersedes the previous one, so the next cycle 10ms later would overwrite the
+  profiled goal with an unbounded one while the arm was still far away. It costs one extra
+  follower read per cycle, only until it trips, and it must NOT re-evaluate afterwards: a
+  running mirror legitimately trails the leader by more than the gate.
