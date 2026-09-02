@@ -111,8 +111,8 @@ func (h *ControllerHandle) MoveServosToPositions(ctx context.Context, servoIDs [
 
 // ServoProfile is one servo's speed and acceleration for a coordinated move.
 type ServoProfile struct {
-	SpeedSteps int // goal velocity, steps/sec. Never 0: that means MAX SPEED.
-	AccUnits   int // acceleration register. 0 means UNLIMITED -- only the teleop bypass sends it.
+	SpeedSteps int // goal velocity, steps/sec. 0 means MAX SPEED -- only the streamed bypass sends it.
+	AccUnits   int // acceleration register. 0 means UNLIMITED -- only the streamed bypass sends it.
 }
 
 // MoveServosWithProfiles commands each servo to its angle under its OWN speed and

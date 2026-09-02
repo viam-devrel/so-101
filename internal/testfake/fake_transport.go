@@ -150,18 +150,23 @@ func (ft *FakeTransport) reply(req []byte) {
 			ft.queue(int(raw), ft.value(int(raw), address, length))
 		}
 	case 0x83: // SYNC_WRITE -- broadcast, no response on the wire
-		// Params are [address, dataLen, id, data..., id, data...]. The whole blob is stored
-		// at `address`, so a read of the FIRST register in the blob reads back correctly --
-		// which is what a goal write's `acceleration` needs. A read of a register further
-		// into the blob (goal_position, at address+1) does NOT; split per register if a
-		// test ever needs that.
+		// Params are [address, dataLen, id, data..., id, data...]. A sync write covers a
+		// RANGE of registers (a goal write is acceleration, position, time and velocity in
+		// one 7-byte blob), so store the blob at `address` AND every suffix of it at the
+		// address it starts from. value() copies min(len, stored) bytes, so a later read of
+		// any register inside the range returns its own bytes rather than the blob's head.
 		if len(params) < 2 {
 			return
 		}
 		address, n := params[0], int(params[1])
 		for i := 2; i+1+n <= len(params); i += 1 + n {
-			if regs, ok := ft.registers[int(params[i])]; ok {
-				regs[address] = append([]byte(nil), params[i+1:i+1+n]...)
+			regs, ok := ft.registers[int(params[i])]
+			if !ok {
+				continue
+			}
+			blob := params[i+1 : i+1+n]
+			for off := 0; off < n; off++ {
+				regs[address+byte(off)] = append([]byte(nil), blob[off:]...)
 			}
 		}
 	}

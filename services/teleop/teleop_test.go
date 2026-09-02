@@ -20,14 +20,14 @@ type fakeArm struct {
 	arm.Arm
 	name resource.Name
 
-	mu            sync.Mutex
-	jp            []referenceframe.Input
-	jpErr         error
-	moved         []referenceframe.Input
-	moveWait      interface{}
-	moveUnlimited interface{}
-	moveErr       error
-	torqueLog     []bool
+	mu           sync.Mutex
+	jp           []referenceframe.Input
+	jpErr        error
+	moved        []referenceframe.Input
+	moveWait     interface{}
+	moveStreamed interface{}
+	moveErr      error
+	torqueLog    []bool
 }
 
 func (f *fakeArm) Name() resource.Name { return f.name }
@@ -49,7 +49,7 @@ func (f *fakeArm) MoveToJointPositions(ctx context.Context, positions []referenc
 	}
 	f.moved = positions
 	f.moveWait = extra["wait"]
-	f.moveUnlimited = extra["unlimited_accel"]
+	f.moveStreamed = extra["streamed"]
 	return nil
 }
 
@@ -127,7 +127,7 @@ func TestTeleopSyncOnce(t *testing.T) {
 		test.That(t, err, test.ShouldBeNil)
 		test.That(t, fa.moved, test.ShouldResemble, la.jp)
 		test.That(t, fa.moveWait, test.ShouldEqual, false)
-		test.That(t, fa.moveUnlimited, test.ShouldEqual, true)
+		test.That(t, fa.moveStreamed, test.ShouldEqual, true)
 		test.That(t, fg.setPct, test.ShouldResemble, []float64{42})
 	})
 

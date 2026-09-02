@@ -29,22 +29,25 @@ func accelTestArm(t *testing.T, ft *testfake.FakeTransport) *so101 {
 	}
 }
 
-// Teleop streams small setpoints; an acceleration ramp on each one quadruples tracking error
-// (measured: acc=32 -> 160 ms lag vs 40 ms at acc=0). Acc 0 is the servo's "unlimited"
-// sentinel, which the deg/s^2 conversion path deliberately cannot produce.
-func TestMoveToJointPositionsHonoursUnlimitedAccel(t *testing.T) {
+// Teleop streams small setpoints, so any profile the servo applies between them is pure lag:
+// an acceleration ramp quadruples tracking error (acc=32 -> 160 ms lag vs 40 ms at acc=0),
+// and a speed cap binds the same way once the ramp stops dominating. 0 in either register is
+// the "unbounded" sentinel -- MAX SPEED and UNLIMITED acceleration -- which neither
+// conversion path can produce (minSpeedSteps and MinAccUnits are both 1).
+func TestMoveToJointPositionsHonoursStreamed(t *testing.T) {
 	ft := testfake.NewFakeTransport()
 	s := accelTestArm(t, ft)
-	// Seed a NON-zero acceleration first. An unset register reads back as zero, so without
-	// this the assertion below cannot tell "commanded Acc 0" from "never wrote Acc at all".
+	// Seed NON-zero values first. An unset register reads back as zero, so without this the
+	// assertions below cannot tell "commanded 0" from "never wrote the register at all".
 	for _, id := range s.armServoIDs {
 		ft.SetRegister(id, feetech.RegAcceleration.Address, []byte{0x7F})
+		ft.SetRegister(id, feetech.RegGoalVelocity.Address, testfake.EncodeWordLE(1234))
 	}
 	goal := []referenceframe.Input{0.3, 0.3, 0.3, 0.3, 0.3}
 
 	before := ft.PacketCount()
 	require.NoError(t, s.MoveToJointPositions(context.Background(), goal,
-		map[string]interface{}{"wait": false, "unlimited_accel": true}))
+		map[string]interface{}{"wait": false, "streamed": true}))
 	// Snapshot before the assertion loop below -- each of its reads is a packet too.
 	moved := ft.PacketCount() - before
 
@@ -52,6 +55,11 @@ func TestMoveToJointPositionsHonoursUnlimitedAccel(t *testing.T) {
 		got, err := s.controller.ReadServoRegister(context.Background(), id, "acceleration")
 		require.NoError(t, err)
 		assert.Equal(t, byte(0), got[0], "servo %d must be commanded at unlimited acceleration", id)
+		// 0 here is the servo's MAX SPEED sentinel, not "stopped". A cap binds teleop
+		// tracking once the ramp stops dominating -- found on hardware.
+		vel, err := s.controller.ReadServoRegister(context.Background(), id, "goal_velocity")
+		require.NoError(t, err)
+		assert.Equal(t, []byte{0, 0}, vel, "servo %d must be commanded at max speed", id)
 	}
 	// One SyncWrite and nothing else. Skipping the coordination read is half the point of
 	// the branch -- at 100 Hz the read plus the write is ~3 ms of a 10 ms budget -- and it
@@ -59,8 +67,8 @@ func TestMoveToJointPositionsHonoursUnlimitedAccel(t *testing.T) {
 	assert.Equal(t, 1, moved, "the unlimited path must issue one packet: the goal write")
 }
 
-// The point-to-point default keeps its ramp: 500 deg/s^2 maps to Acc 49.
-func TestMoveToJointPositionsRampsByDefault(t *testing.T) {
+// The point-to-point default keeps both its ramp and its speed cap.
+func TestMoveToJointPositionsProfilesByDefault(t *testing.T) {
 	ft := testfake.NewFakeTransport()
 	s := accelTestArm(t, ft)
 	goal := []referenceframe.Input{0.3, 0.3, 0.3, 0.3, 0.3}
@@ -74,6 +82,9 @@ func TestMoveToJointPositionsRampsByDefault(t *testing.T) {
 		got, err := s.controller.ReadServoRegister(context.Background(), id, "acceleration")
 		require.NoError(t, err)
 		assert.NotZero(t, got[0], "servo %d must keep its acceleration ramp", id)
+		vel, err := s.controller.ReadServoRegister(context.Background(), id, "goal_velocity")
+		require.NoError(t, err)
+		assert.NotEqual(t, []byte{0, 0}, vel, "servo %d must keep its speed cap", id)
 	}
 	// SyncRead for the travel reference, then SyncWrite. This is the traffic the unlimited
 	// path exists to avoid.

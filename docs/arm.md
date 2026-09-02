@@ -374,20 +374,22 @@ A per-joint `MaxVelRadsJoints` cap still wins over the floor: a cap slower than 
 
 `MoveThroughJointPositions` accepts `MoveOptions.MaxVelRads` and `MaxAccRads` to override the configured defaults for one move, and the per-joint forms `MaxVelRadsJoints` and `MaxAccRadsJoints`. Setting a per-joint slice makes the matching scalar ignored, per `arm.proto`; a slice whose length doesn't match the arm's joint count is rejected. A per-joint limit slows the whole move rather than that joint, so the joints stay coordinated. `GoToInputs` routes through this same path.
 
-### Streamed setpoints: `wait` and `unlimited_accel`
+### Streamed setpoints: `wait` and `streamed`
 
 `MoveToJointPositions` accepts two optional booleans in its `extra` map:
 
 ```json
-{ "wait": false, "unlimited_accel": true }
+{ "wait": false, "streamed": true }
 ```
 
 - **`wait`** (default `true`) — block until the move settles, or return as soon as the goal is written.
-- **`unlimited_accel`** (default `false`) — command the servos' acceleration register to `0`, the servo's "unlimited" sentinel, instead of the configured `acceleration_degs_per_sec_per_sec` ramp, and skip the coordination read that a ramped move uses to give the other joints a travel reference for arriving together.
+- **`streamed`** (default `false`) — the caller is streaming setpoints, not making a one-off move. Commands the servos' acceleration **and** speed registers to `0` — the "unlimited" and "maximum" sentinels, not "none" and "stopped" — instead of the configured `acceleration_degs_per_sec_per_sec` ramp and `speed_degs_per_sec` cap, and skips the coordination read that a profiled move uses to give the joints a travel reference for arriving together.
 
-Both skips are for a caller **streaming setpoints** rather than making a one-off point-to-point move — the [teleop service](teleop.md) sets it on every follower command. An acceleration ramp is close to a free win for a single move, but it is measurably catastrophic for continuously-updated tracking: `acc=32` quadrupled RMS tracking error and took lag from 40ms to 160ms versus `acc=0`, because the servo re-ramps on every new goal instead of ever reaching speed. The coordination read is skipped for the same reason it's pointless here — coordinated arrival is meaningless for a goal about to be superseded in ~10ms — and skipping it is measured to halve the bus traffic per call, one packet (the goal write) instead of two (a position read, then the write). A plain point-to-point move should keep both the ramp and the coordinated read; do not set `unlimited_accel` there.
+The [teleop service](teleop.md) sets this on every follower command. The principle behind all three effects is the same: a streamed caller shapes the trajectory with its own update rate, so **any profile the servo applies between setpoints is pure lag**. An acceleration ramp is close to a free win for a single move but is measurably catastrophic for continuously-updated tracking — `acc=32` quadrupled RMS tracking error and took lag from 40ms to 160ms versus `acc=0`, because the servo re-ramps on every new goal instead of ever reaching speed. The speed cap binds the same way once the ramp stops dominating: raising `speed_degs_per_sec` was found on hardware to keep improving teleop tracking, which is what motivated uncapping it entirely. And coordinated arrival is meaningless for a goal about to be superseded in ~10ms, so skipping the read costs nothing and halves the bus traffic per call — one packet (the goal write) instead of two (a position read, then the write).
 
-One caveat, unmeasured: the speed cap is **not** bypassed alongside the ramp. The characterization's advice was to leave speed at maximum and shape motion with acceleration alone, but this module never commands the servo's `Speed: 0` (which means *maximum*, not stopped), so a streamed setpoint is still capped by `speed_degs_per_sec`. At 100 Hz that cap can bind before the acceleration bypass helps — a 50 °/s cap needs ~12 ms to cover a 0.6° per-tick leader motion against a 10 ms budget. The cap is kept deliberately, as a safety bound on a follower tracking a human hand; if teleop still feels laggy after this, suspect the cap before the ramp.
+A plain point-to-point move should keep all three; do not set `streamed` there.
+
+**This removes a bound, so mind the first tick.** With no speed cap and no ramp, a large position error is closed as fast as the servo physically can. Teleop does not gate its first cycle on the follower already being near the leader, so starting teleop with the two arms far apart will snap the follower to the leader pose. Match the poses roughly before starting, or keep hands clear when you do.
 
 ### Waypoint streams
 

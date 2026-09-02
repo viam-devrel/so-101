@@ -185,10 +185,10 @@ func (tp *so101Teleop) syncOnce(ctx context.Context) error {
 		gripperPct = pct
 	}
 
-	// acc=0 (unlimited) for streamed setpoints -- an acceleration limit is catastrophic for
-	// tracking. The command stream itself shapes the trajectory here.
+	// No speed cap, no acceleration ramp, no coordination read: the command stream itself
+	// shapes the trajectory, so anything the servo applies between setpoints is pure lag.
 	if err := tp.followerArm.MoveToJointPositions(ctx, positions,
-		map[string]interface{}{"wait": false, "unlimited_accel": true}); err != nil {
+		map[string]interface{}{"wait": false, "streamed": true}); err != nil {
 		return fmt.Errorf("write follower joints: %w", err)
 	}
 

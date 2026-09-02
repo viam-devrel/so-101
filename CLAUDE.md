@@ -550,12 +550,20 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
   compile error rather than a silent truncation to less damping. Config is one
   `disable_servo_gains` bool; there are no per-joint overrides — `pidtune apply` is the
   escape hatch for a differently-tuned arm.
-- **`Acc: 0` is right for teleop and wrong for everything else, and the bypass skips the
-  coordination READ too, not just the ramp.** `MinAccUnits = 1` still forbids Acc 0 on the
-  profiled path — Acc 1 delivers ~43 deg/s², measurably worse than the measured acc=32 row, so a
-  low *configured* acceleration is not a substitute. The teleop bypass in `MoveToJointPositions`
-  (`components/arm/motion.go`) branches to `moveJointsUniform` BEFORE the `currentJoints()` read
-  that a ramped move uses to give `CoordinatedProfiles` a travel reference — coordinated arrival
-  is meaningless for a goal superseded in ~10ms, so the read buys nothing there either. Measured
-  in tests: one bus packet per call (the goal write) instead of two (a position read, then the
-  write). Do not unify this path with the profiled one.
+- **A streamed setpoint gets Speed 0 AND Acc 0 AND no coordination read; a profiled move gets
+  none of the three.** The `"streamed": true` key in `MoveToJointPositions`'s `extra` map
+  (`components/arm/motion.go`) branches to `moveJointsUniform` before the `currentJoints()` read
+  and forces both registers to their unbounded sentinel — 0 is MAXIMUM speed and UNLIMITED
+  acceleration, not stopped and not still. One principle covers all three: a streamed caller
+  shapes the trajectory with its own update rate, so any profile the servo applies *between*
+  setpoints is pure lag, and coordinated arrival is meaningless for a goal superseded in ~10ms.
+  Both halves were confirmed on hardware, acceleration first (acc=32 quadrupled RMS error and
+  took lag 40ms→160ms) and speed second — raising `speed_degs_per_sec` kept improving teleop
+  tracking until the cap stopped binding, which is what motivated removing it. `minSpeedSteps`
+  and `MinAccUnits` are both still 1, so the profiled path cannot reach either sentinel: a low
+  *configured* value is not a substitute (Acc 1 delivers ~43 deg/s², worse than the acc=32 row).
+  Measured in tests: one bus packet per call instead of two. Do NOT unify the two paths, and do
+  not split `streamed` back into per-register flags — nothing wants them separately, and the
+  read-skip belongs to the same decision. **It removes a bound:** teleop does not gate its first
+  cycle on the follower being near the leader, so a large initial gap is now closed at full
+  servo speed with no ramp.
