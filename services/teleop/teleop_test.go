@@ -20,13 +20,14 @@ type fakeArm struct {
 	arm.Arm
 	name resource.Name
 
-	mu        sync.Mutex
-	jp        []referenceframe.Input
-	jpErr     error
-	moved     []referenceframe.Input
-	moveWait  interface{}
-	moveErr   error
-	torqueLog []bool
+	mu           sync.Mutex
+	jp           []referenceframe.Input
+	jpErr        error
+	moved        []referenceframe.Input
+	moveWait     interface{}
+	moveStreamed interface{}
+	moveErr      error
+	torqueLog    []bool
 }
 
 func (f *fakeArm) Name() resource.Name { return f.name }
@@ -48,6 +49,7 @@ func (f *fakeArm) MoveToJointPositions(ctx context.Context, positions []referenc
 	}
 	f.moved = positions
 	f.moveWait = extra["wait"]
+	f.moveStreamed = extra["streamed"]
 	return nil
 }
 
@@ -116,7 +118,7 @@ func newTestTeleop(t testing.TB, la, fa *fakeArm, lg, fg *fakeGripper) *so101Tel
 func TestTeleopSyncOnce(t *testing.T) {
 	t.Run("forwards joints non-blocking and gripper percentage", func(t *testing.T) {
 		la := &fakeArm{name: arm.Named("l"), jp: []referenceframe.Input{0.1, 0.2, 0.3, 0.4, 0.5}}
-		fa := &fakeArm{name: arm.Named("f")}
+		fa := &fakeArm{name: arm.Named("f"), jp: []referenceframe.Input{0.1, 0.2, 0.3, 0.4, 0.5}}
 		lg := &fakeGripper{name: gripper.Named("lg"), pct: 42}
 		fg := &fakeGripper{name: gripper.Named("fg")}
 		tp := newTestTeleop(t, la, fa, lg, fg)
@@ -125,12 +127,13 @@ func TestTeleopSyncOnce(t *testing.T) {
 		test.That(t, err, test.ShouldBeNil)
 		test.That(t, fa.moved, test.ShouldResemble, la.jp)
 		test.That(t, fa.moveWait, test.ShouldEqual, false)
+		test.That(t, fa.moveStreamed, test.ShouldEqual, true)
 		test.That(t, fg.setPct, test.ShouldResemble, []float64{42})
 	})
 
 	t.Run("arm-only when grippers absent", func(t *testing.T) {
 		la := &fakeArm{name: arm.Named("l"), jp: []referenceframe.Input{1}}
-		fa := &fakeArm{name: arm.Named("f")}
+		fa := &fakeArm{name: arm.Named("f"), jp: []referenceframe.Input{1}}
 		tp := newTestTeleop(t, la, fa, nil, nil)
 		err := tp.syncOnce(context.Background())
 		test.That(t, err, test.ShouldBeNil)
@@ -214,7 +217,7 @@ func TestTeleopStartStopStatus(t *testing.T) {
 
 func TestTeleopTickErrorThreshold(t *testing.T) {
 	la := &fakeArm{name: arm.Named("l"), jpErr: errors.New("boom")}
-	fa := &fakeArm{name: arm.Named("f")}
+	fa := &fakeArm{name: arm.Named("f"), jp: []referenceframe.Input{0.5}}
 	tp := newTestTeleop(t, la, fa, nil, nil)
 	tp.maxConsecutiveErr = 3
 	tp.running = true
@@ -237,6 +240,63 @@ func TestTeleopTickErrorThreshold(t *testing.T) {
 	test.That(t, tp.tick(context.Background()), test.ShouldBeFalse)
 	test.That(t, tp.consecutiveErrors, test.ShouldEqual, 0)
 	test.That(t, tp.cycles, test.ShouldEqual, uint64(1))
+}
+
+// A streamed setpoint has no speed cap and no ramp, so the mirror must not use one until
+// the follower has actually caught up -- otherwise starting teleop with the arms in
+// different poses snaps the follower across at full servo speed.
+func TestTeleopMirrorsProfiledUntilTheFollowerCatchesUp(t *testing.T) {
+	la := &fakeArm{name: arm.Named("l"), jp: []referenceframe.Input{1.0}}
+	fa := &fakeArm{name: arm.Named("f"), jp: []referenceframe.Input{0.0}} // ~57 deg away
+	tp := newTestTeleop(t, la, fa, nil, nil)
+
+	test.That(t, tp.syncOnce(context.Background()), test.ShouldBeNil)
+	test.That(t, fa.moveStreamed, test.ShouldEqual, false)
+	test.That(t, tp.streaming, test.ShouldBeFalse)
+
+	// Follower arrives within the gate.
+	fa.mu.Lock()
+	fa.jp = []referenceframe.Input{1.0}
+	fa.mu.Unlock()
+
+	test.That(t, tp.syncOnce(context.Background()), test.ShouldBeNil)
+	test.That(t, fa.moveStreamed, test.ShouldEqual, true)
+	test.That(t, tp.streaming, test.ShouldBeTrue)
+}
+
+// Once latched it stays latched: a running mirror legitimately runs a lag behind the leader,
+// and dropping back to profiled moves mid-session would reintroduce the lag the streamed
+// path exists to remove.
+func TestTeleopStreamingLatches(t *testing.T) {
+	la := &fakeArm{name: arm.Named("l"), jp: []referenceframe.Input{0.0}}
+	fa := &fakeArm{name: arm.Named("f"), jp: []referenceframe.Input{0.0}}
+	tp := newTestTeleop(t, la, fa, nil, nil)
+
+	test.That(t, tp.syncOnce(context.Background()), test.ShouldBeNil)
+	test.That(t, fa.moveStreamed, test.ShouldEqual, true)
+
+	// The leader lunges far away; the mirror must keep streaming.
+	la.mu.Lock()
+	la.jp = []referenceframe.Input{2.0}
+	la.mu.Unlock()
+
+	test.That(t, tp.syncOnce(context.Background()), test.ShouldBeNil)
+	test.That(t, fa.moveStreamed, test.ShouldEqual, true)
+}
+
+// start() must clear the latch, or a second session inherits the first one's catch-up.
+func TestTeleopStartClearsTheStreamingLatch(t *testing.T) {
+	la := &fakeArm{name: arm.Named("l"), jp: []referenceframe.Input{0.0}}
+	fa := &fakeArm{name: arm.Named("f"), jp: []referenceframe.Input{0.0}}
+	tp := newTestTeleop(t, la, fa, nil, nil)
+	tp.streaming = true
+
+	test.That(t, tp.start(context.Background()), test.ShouldBeNil)
+	defer tp.stop()
+	tp.mu.Lock()
+	streaming := tp.streaming
+	tp.mu.Unlock()
+	test.That(t, streaming, test.ShouldBeFalse)
 }
 
 func TestTeleopCloseStopsLoop(t *testing.T) {

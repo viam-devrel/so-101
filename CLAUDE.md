@@ -526,3 +526,49 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
   be mistaken for having done anything. `abort`'s advertised states are unchanged — only the
   guard was added. One gap remains by choice: `error` still accepts `abort` without advertising
   it, which is harmless because `reset` is the escape hatch offered there.
+- **Compliance zeroes `i_gain`, not just `p_gain` — and a failed READ falls through to the
+  WRITE, not away from it.** The integral path is independent of P, so lowering P to 8 during
+  hand-guided compliance used to leave a live integrator; inert until the tuned gains carry a
+  non-zero I (`internal/servo/gains.go`), which they now do. Gated on `p_gain > 0`, the
+  documented per-register opt-out; `d_gain` is deliberately left alone (reasoned drag, never
+  measured). Both `applyCompliance`/`restoreCompliance` and `applyServoGains` route every gain
+  write through one `writeGainIfChanged` (`components/arm/gains.go`) because these are EEPROM
+  registers entered/exited (or reconfigured) repeatedly — and it treats a read it cannot trust
+  as unable to prove a no-op, so it falls through to the write rather than skipping it. The
+  asymmetry is deliberate: `applyCompliance` failing outright leaves the arm stiff, which is
+  safe; `restoreCompliance` skipping a write on a flaky read would leave a joint at `p_gain
+  8`/`i_gain 0` in EEPROM — soft, across power cycles — on a transient this hardware really
+  produces, with nothing retrying it. Don't make either path bail out on a read error.
+- **Tuned gains are written during `doServoInitialization`, in D→I→P order, and a failed WRITE
+  is terminal for that servo.** `applyServoGains` BREAKS its per-servo loop on the first write
+  failure rather than logging and continuing: without the break, {I,P}-without-D is reachable —
+  48/32/4 on servo 3, the exact combination measured to oscillate on a gravity-loaded joint —
+  and it would be stranded in EEPROM with nothing to retry it (`applyServoGains` returns no
+  error, so `initializeServosWithRetry` never re-runs for a gain failure alone). The read-first
+  skip is the EEPROM wear guard, and it runs on every `Reconfigure` as well as up to 3× within
+  one bring-up. `servo.Gains` fields are `byte`, not `int`, so an out-of-range retune is a
+  compile error rather than a silent truncation to less damping. Config is one
+  `disable_servo_gains` bool; there are no per-joint overrides — `pidtune apply` is the
+  escape hatch for a differently-tuned arm.
+- **A streamed setpoint gets Speed 0 AND Acc 0 AND no coordination read; a profiled move gets
+  none of the three.** The `"streamed": true` key in `MoveToJointPositions`'s `extra` map
+  (`components/arm/motion.go`) branches to `moveJointsUniform` before the `currentJoints()` read
+  and forces both registers to their unbounded sentinel — 0 is MAXIMUM speed and UNLIMITED
+  acceleration, not stopped and not still. One principle covers all three: a streamed caller
+  shapes the trajectory with its own update rate, so any profile the servo applies *between*
+  setpoints is pure lag, and coordinated arrival is meaningless for a goal superseded in ~10ms.
+  Both halves were confirmed on hardware, acceleration first (acc=32 quadrupled RMS error and
+  took lag 40ms→160ms) and speed second — raising `speed_degs_per_sec` kept improving teleop
+  tracking until the cap stopped binding, which is what motivated removing it. `minSpeedSteps`
+  and `MinAccUnits` are both still 1, so the profiled path cannot reach either sentinel: a low
+  *configured* value is not a substitute (Acc 1 delivers ~43 deg/s², worse than the acc=32 row).
+  Measured in tests: one bus packet per call instead of two. Do NOT unify the two paths, and do
+  not split `streamed` back into per-register flags — nothing wants them separately, and the
+  read-skip belongs to the same decision. **It removes a bound**, so a caller must not hand it a large
+  position error. Teleop gates itself: `readyToStream` keeps the mirror on profiled moves
+  until the follower is within `maxStreamStartGapDeg` of the leader, then LATCHES. The latch
+  is the whole point -- profiling only the first cycle would be pointless, because a servo
+  goal write supersedes the previous one, so the next cycle 10ms later would overwrite the
+  profiled goal with an unbounded one while the arm was still far away. It costs one extra
+  follower read per cycle, only until it trips, and it must NOT re-evaluate afterwards: a
+  running mirror legitimately trails the leader by more than the gate.

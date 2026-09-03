@@ -343,10 +343,13 @@ func (s *so101) dwellUntilNear(ctx context.Context, goal []float64, lookaheadDeg
 	}
 }
 
-// moveJointsUniform is the pre-coordination path, retained only as the fallback for when
-// the travel-reference read fails. It commands every joint at one shared speed, which is
-// why joints arrive at different times.
-func (s *so101) moveJointsUniform(ctx context.Context, to []float64, speedDegsPerSec, accelDegsPerSecSq float64, wait bool) error {
+// moveJointsUniform is the pre-coordination path, used as the fallback for when the
+// travel-reference read fails and as the streamed-setpoint path. It commands every joint at
+// one shared speed, which is why joints arrive at different times.
+//
+// streamed forces BOTH registers to 0 -- max speed, unlimited acceleration. See CLAUDE.md,
+// "A streamed setpoint gets Speed 0 AND Acc 0".
+func (s *so101) moveJointsUniform(ctx context.Context, to []float64, speedDegsPerSec, accelDegsPerSecSq float64, streamed, wait bool) error {
 	// Writes an explicit UNIFORM profile rather than a bare position write. A coordinated
 	// move leaves each servo's Speed and Acc registers at its own scaled value -- as low as
 	// 1 step/s and Acc 1 -- and a position-only write does not touch either. So without
@@ -355,6 +358,10 @@ func (s *so101) moveJointsUniform(ctx context.Context, to []float64, speedDegsPe
 	profile := controller.ServoProfile{
 		SpeedSteps: servo.DegPerSecToStepsPerSec(speedDegsPerSec),
 		AccUnits:   servo.DegPerSecSqToAccUnits(accelDegsPerSecSq),
+	}
+	if streamed {
+		// 0 is MAX SPEED and UNLIMITED acceleration, not stopped and not still.
+		profile.SpeedSteps, profile.AccUnits = 0, 0
 	}
 	profiles := make([]controller.ServoProfile, len(s.armServoIDs))
 	for i := range profiles {
@@ -393,6 +400,13 @@ func (s *so101) MoveToJointPositions(ctx context.Context, positions []referencef
 	accel := float64(s.defaultAcc)
 	s.mu.RUnlock()
 
+	// A streamed caller shapes the trajectory with its own update rate, so any profile the
+	// servo applies between setpoints is pure lag and the coordination read buys nothing.
+	// See docs/arm.md, "Motion and speed".
+	if streamed, _ := extra["streamed"].(bool); streamed {
+		return s.moveJointsUniform(ctx, clamped, speed, accel, true, servocmd.WaitArg(extra))
+	}
+
 	// The position read is now unconditional, where it used to happen only when waiting.
 	// Coordination needs a travel reference, and on v0.6.1 this read costs about 1ms
 	// against roughly 12ms on v0.6.0 -- which is why the version bump is a correctness
@@ -400,15 +414,16 @@ func (s *so101) MoveToJointPositions(ctx context.Context, positions []referencef
 	//
 	// A read failure degrades to the old uniform-speed path rather than failing the move.
 	// Before this change the read happened only when waiting and a failure was a warning;
-	// making it fatal would mean a transient bus error aborts a teleop setpoint that used
-	// to go through, at 30-50 Hz on the wait:false path.
+	// making it fatal would mean a transient bus error aborts a streamed wait:false setpoint
+	// that used to go through. (Teleop no longer reaches this read at all -- it takes the
+	// unlimited-acceleration branch above -- but other wait:false callers still do.)
 	current, err := s.currentJoints(ctx)
 	if err != nil {
 		s.logger.Warnf("failed to read positions for coordinated move, falling back to "+
 			"uniform speed: %v", err)
 		// No arm.MoveOptions here, so caps is always nil -- kept for symmetry with
 		// MoveThroughJointPositions' fallback.
-		return s.moveJointsUniform(ctx, clamped, servo.UniformSpeedUnderCaps(speed, nil), accel, servocmd.WaitArg(extra))
+		return s.moveJointsUniform(ctx, clamped, servo.UniformSpeedUnderCaps(speed, nil), accel, false, servocmd.WaitArg(extra))
 	}
 
 	// Single move: there is no next waypoint, so the dwell timeout is not wanted.

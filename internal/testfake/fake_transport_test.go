@@ -49,3 +49,33 @@ func TestFakeTransportIsSilentForAbsentServos(t *testing.T) {
 	assert.ErrorIs(t, err, feetech.ErrNoResponse,
 		"a silent servo must be distinguishable from an unplugged port")
 }
+
+func TestWriteCountTracksRegisterWrites(t *testing.T) {
+	ft := NewFakeTransport()
+	if got := ft.WriteCount(1, feetech.RegPGain.Address); got != 0 {
+		t.Fatalf("expected 0 writes before any traffic, got %d", got)
+	}
+	// Seeding a register is not a write.
+	ft.SetRegister(1, feetech.RegPGain.Address, []byte{32})
+	if got := ft.WriteCount(1, feetech.RegPGain.Address); got != 0 {
+		t.Fatalf("SetRegister must not count as a write, got %d", got)
+	}
+}
+
+// Goal writes reach the bus as SYNC_WRITE, so without this a test cannot see what speed or
+// acceleration was commanded.
+func TestSyncWriteLandsInTheRegisterStore(t *testing.T) {
+	ft := NewFakeTransport()
+	// [address, dataLen, id, data..., id, data...]
+	params := []byte{feetech.RegAcceleration.Address, 2, 1, 0x11, 0x22, 3, 0x33, 0x44}
+	ft.mu.Lock()
+	ft.reply(append([]byte{0xFF, 0xFF, 0xFE, byte(len(params) + 2), 0x83}, append(params, 0)...))
+	ft.mu.Unlock()
+
+	if got := ft.value(1, feetech.RegAcceleration.Address, 1); got[0] != 0x11 {
+		t.Fatalf("servo 1 acc: got %#x, want 0x11", got[0])
+	}
+	if got := ft.value(3, feetech.RegAcceleration.Address, 1); got[0] != 0x33 {
+		t.Fatalf("servo 3 acc: got %#x, want 0x33", got[0])
+	}
+}

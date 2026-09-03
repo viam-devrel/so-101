@@ -71,6 +71,10 @@ type SO101ArmConfig struct {
 	// the feature / uses built-in defaults throughout.
 	ManualMode *ManualModeConfig `json:"manual_mode,omitempty"`
 
+	// DisableServoGains leaves the servos' PID registers untouched at init. Set it if you
+	// tuned gains externally. See docs/arm.md, "Servo gains".
+	DisableServoGains bool `json:"disable_servo_gains,omitempty"`
+
 	// OrientationToleranceDeg is the half-angle, in degrees, of the cone of acceptable
 	// end-effector approach directions around the goal orientation. Roll about that axis
 	// is NOT constrained. Valid range [0, 180]. Zero or unset means
@@ -419,6 +423,10 @@ func (s *so101) doServoInitialization() error {
 		return fmt.Errorf("servo ping failed: %w", err)
 	}
 	s.logger.Debug("All servos ping successful")
+
+	if !s.cfg.DisableServoGains {
+		applyServoGains(ctx, s.controller, s.armServoIDs, servo.DefaultArmGains, s.logger)
+	}
 
 	// Enable torque for all servos (controller manages all 6)
 	s.logger.Debug("Enabling torque for all servos...")

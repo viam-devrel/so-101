@@ -28,6 +28,11 @@ const (
 	// maxAccUnits is a conservative round-down below the LOWEST measured knee. Measured
 	// knees were 52, 55 and 63 across three joints; 50 sits under all of them. Above the
 	// knee the register has no further effect, so scaling silently stops working.
+	//
+	// UNRESOLVED: step-response data from 2026-09-02 disagrees -- past that knee, overshoot
+	// and peak current keep climbing where a saturated register would be flat. Likely the two
+	// studies measured different things (arrival timing vs deceleration shape). Settle it
+	// before relying on either bound.
 	maxAccUnits = 50
 )
 

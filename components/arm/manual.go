@@ -221,9 +221,15 @@ type controllerManualIO struct {
 	controller *controller.ControllerHandle
 	ids        []int
 	limits     map[int][2]float64
-	origPGain  map[int]int // captured lazily on applyCompliance for restore
-	origTorque map[int]int // captured lazily on applyCompliance for restore
+	// orig holds the pre-compliance register values, captured on applyCompliance. The two
+	// flags say which fields in it are live: compliance is per-register opt-out, so a
+	// restore must not write a register the apply never touched.
+	orig        map[int]savedRegs
+	savedGains  bool
+	savedTorque bool
 }
+
+type savedRegs struct{ pGain, iGain, torque int }
 
 func newControllerManualIO(c *controller.ControllerHandle, ids []int, limits [][2]float64) *controllerManualIO {
 	lm := map[int][2]float64{}
@@ -232,7 +238,7 @@ func newControllerManualIO(c *controller.ControllerHandle, ids []int, limits [][
 			lm[id] = limits[i]
 		}
 	}
-	return &controllerManualIO{controller: c, ids: ids, limits: lm, origPGain: map[int]int{}, origTorque: map[int]int{}}
+	return &controllerManualIO{controller: c, ids: ids, limits: lm, orig: map[int]savedRegs{}}
 }
 
 func (a *controllerManualIO) servoIDs() []int { return a.ids }
@@ -272,18 +278,19 @@ func (a *controllerManualIO) applyCompliance(ctx context.Context, pGain, torqueL
 	// Capture originals for every register we intend to change BEFORE writing anything, so a
 	// later restore always covers every servo we touch (fail-safe: on any read error, change
 	// nothing and let manual mode run at full stiffness — the arm still holds).
-	pg := map[int]int{}
-	tq := map[int]int{}
+	orig := map[int]savedRegs{}
 	for _, id := range a.ids {
+		var s savedRegs
 		if pGain > 0 {
-			cur, err := a.controller.ReadServoRegister(ctx, id, "p_gain")
-			if err != nil {
-				return fmt.Errorf("read p_gain servo %d: %w", id, err)
+			// i_gain is captured alongside p_gain because the integral path is independent
+			// of P, so lowering P alone leaves it live. Same pGain>0 opt-out, per manualIO.
+			var err error
+			if s.pGain, err = a.readGainByte(ctx, id, "p_gain"); err != nil {
+				return err
 			}
-			if len(cur) != 1 {
-				return fmt.Errorf("unexpected p_gain width %d for servo %d", len(cur), id)
+			if s.iGain, err = a.readGainByte(ctx, id, "i_gain"); err != nil {
+				return err
 			}
-			pg[id] = int(cur[0])
 		}
 		if torqueLimit > 0 {
 			cur, err := a.controller.ReadServoRegister(ctx, id, "torque_limit")
@@ -293,14 +300,19 @@ func (a *controllerManualIO) applyCompliance(ctx context.Context, pGain, torqueL
 			if len(cur) != 2 {
 				return fmt.Errorf("unexpected torque_limit width %d for servo %d", len(cur), id)
 			}
-			tq[id] = int(cur[0]) | int(cur[1])<<8 // STS3215 is little-endian
+			s.torque = int(cur[0]) | int(cur[1])<<8 // STS3215 is little-endian
 		}
+		orig[id] = s
 	}
-	a.origPGain = pg
-	a.origTorque = tq
+	a.orig, a.savedGains, a.savedTorque = orig, pGain > 0, torqueLimit > 0
 	for _, id := range a.ids {
 		if pGain > 0 {
-			if err := a.controller.WriteServoRegister(ctx, id, "p_gain", []byte{byte(pGain)}); err != nil {
+			// Zeroed, not lowered: the integral path is independent of P, so an arm held
+			// off-target by hand accumulates error and pushes back when released.
+			if err := writeGainIfChanged(ctx, a.controller, id, "i_gain", 0); err != nil {
+				return err
+			}
+			if err := writeGainIfChanged(ctx, a.controller, id, "p_gain", byte(pGain)); err != nil {
 				return err
 			}
 		}
@@ -316,18 +328,35 @@ func (a *controllerManualIO) applyCompliance(ctx context.Context, pGain, torqueL
 
 func (a *controllerManualIO) restoreCompliance(ctx context.Context) error {
 	var firstErr error
-	for id, v := range a.origPGain {
-		if err := a.controller.WriteServoRegister(ctx, id, "p_gain", []byte{byte(v)}); err != nil && firstErr == nil {
+	keep := func(err error) {
+		if err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
-	for id, v := range a.origTorque {
-		if err := a.controller.WriteServoRegister(ctx, id, "torque_limit",
-			[]byte{byte(v & 0xFF), byte((v >> 8) & 0xFF)}); err != nil && firstErr == nil {
-			firstErr = err
+	for id, v := range a.orig {
+		if a.savedGains {
+			keep(writeGainIfChanged(ctx, a.controller, id, "p_gain", byte(v.pGain)))
+			keep(writeGainIfChanged(ctx, a.controller, id, "i_gain", byte(v.iGain)))
+		}
+		if a.savedTorque {
+			keep(a.controller.WriteServoRegister(ctx, id, "torque_limit",
+				[]byte{byte(v.torque & 0xFF), byte((v.torque >> 8) & 0xFF)}))
 		}
 	}
 	return firstErr
+}
+
+// readGainByte reads a one-byte gain register, rejecting a short read rather than indexing
+// into it.
+func (a *controllerManualIO) readGainByte(ctx context.Context, id int, name string) (int, error) {
+	cur, err := a.controller.ReadServoRegister(ctx, id, name)
+	if err != nil {
+		return 0, fmt.Errorf("read %s servo %d: %w", name, id, err)
+	}
+	if len(cur) != 1 {
+		return 0, fmt.Errorf("unexpected %s width %d for servo %d", name, len(cur), id)
+	}
+	return int(cur[0]), nil
 }
 
 // Bench-validated compliance defaults: the lowest settings found to still hold a fully

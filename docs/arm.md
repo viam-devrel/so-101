@@ -34,6 +34,7 @@ The following attributes are available for the arm component:
 | `use_urdf`         | bool     | Optional     | When `true`, sources kinematics and collision geometry from the bundled `assets/urdf/so101.urdf` instead of the embedded `so101.json`, and requires `VIAM_MODULE_ROOT` (viam-server sets this). A drop-in swap — frame names, TCP, and kinematics are identical; only the collision geometry upgrades from primitive shapes to per-link meshes. Default `false`. |
 | `mesh_decimation_ratios` | []float | Optional | Per-mesh simplification ratios, one per arm link in document order (base, shoulder, upper_arm, lower_arm, wrist). Only values strictly inside `(0, 1)` decimate; lower is more aggressive. Used only with `use_urdf`. Defaults to `0.9` for all five. |
 | `manual_mode`      | object   | Optional     | Tuning for hand-guided [manual mode](#manual-mode) (see below). Omit for the built-in defaults. |
+| `disable_servo_gains` | bool  | Optional     | When `true`, leaves the servos' P/D/I registers untouched at init instead of writing the tuned defaults. Set it if you tuned gains externally (e.g. with `pidtune apply`). Default `false`. See [Servo gains](#servo-gains). |
 | `orientation_tolerance_deg` | float | Optional | Half-angle, in degrees, of the cone of acceptable end-effector approach directions around the goal orientation, used by `MoveToPosition`. **Roll about that axis is NOT constrained.** Range `[0, 180]`; `0`/unset means `30`. See [Approach-axis orientation planning](#approach-axis-orientation-planning). |
 | `position_tolerance_mm` | float | Optional | Per-axis positional leeway, in millimetres, of the `MoveToPosition` goal cloud. Default `1.0`. See [Approach-axis orientation planning](#approach-axis-orientation-planning). |
 **If you're building and setting up an arm for the first time, please see the [calibration sensor component](calibration.md#model-devrelso101calibration) for setup instructions.**
@@ -373,6 +374,23 @@ A per-joint `MaxVelRadsJoints` cap still wins over the floor: a cap slower than 
 
 `MoveThroughJointPositions` accepts `MoveOptions.MaxVelRads` and `MaxAccRads` to override the configured defaults for one move, and the per-joint forms `MaxVelRadsJoints` and `MaxAccRadsJoints`. Setting a per-joint slice makes the matching scalar ignored, per `arm.proto`; a slice whose length doesn't match the arm's joint count is rejected. A per-joint limit slows the whole move rather than that joint, so the joints stay coordinated. `GoToInputs` routes through this same path.
 
+### Streamed setpoints: `wait` and `streamed`
+
+`MoveToJointPositions` accepts two optional booleans in its `extra` map:
+
+```json
+{ "wait": false, "streamed": true }
+```
+
+- **`wait`** (default `true`) — block until the move settles, or return as soon as the goal is written.
+- **`streamed`** (default `false`) — the caller is streaming setpoints, not making a one-off move. Commands the servos' acceleration **and** speed registers to `0` — the "unlimited" and "maximum" sentinels, not "none" and "stopped" — instead of the configured `acceleration_degs_per_sec_per_sec` ramp and `speed_degs_per_sec` cap, and skips the coordination read that a profiled move uses to give the joints a travel reference for arriving together.
+
+The [teleop service](teleop.md) sets this on every follower command. The principle behind all three effects is the same: a streamed caller shapes the trajectory with its own update rate, so **any profile the servo applies between setpoints is pure lag**. An acceleration ramp is close to a free win for a single move but is measurably catastrophic for continuously-updated tracking — `acc=32` quadrupled RMS tracking error and took lag from 40ms to 160ms versus `acc=0`, because the servo re-ramps on every new goal instead of ever reaching speed. The speed cap binds the same way once the ramp stops dominating: raising `speed_degs_per_sec` was found on hardware to keep improving teleop tracking, which is what motivated uncapping it entirely. And coordinated arrival is meaningless for a goal about to be superseded in ~10ms, so skipping the read costs nothing and halves the bus traffic per call — one packet (the goal write) instead of two (a position read, then the write).
+
+A plain point-to-point move should keep all three; do not set `streamed` there.
+
+**This removes a bound, so a caller must not hand `streamed` a large position error** — it is closed as fast as the servo physically can. It is the caller's job to be near its target first; the teleop service gates itself on exactly this (see below).
+
 ### Waypoint streams
 
 `MoveThroughJointPositions` (and `GoToInputs`, which routes through it) paces its waypoints against the arm's real position: a waypoint is commanded, then held until every joint is within `waypoint_lookahead_deg` of it, and only then is the next one written. The arm waits for a full stop only after the **final** waypoint, so intermediate waypoints are still not stop-points — the arm flows through them.
@@ -446,6 +464,29 @@ Both have floors you cannot configure away. The planner adds a `0.001` epsilon t
 - `extra: {"pose_cloud": {...}}` — supplies a raw `referenceframe.PoseCloud`, replacing the cone entirely (expert mode). Keys are **lowercase**: `x`, `y`, `z`, `ox`, `oy`, `oz`, `theta`. Note the Viam docs render these fields as `OX`/`OY` and the protobuf wire format spells them `o_x` — **neither of those is accepted here**; an unknown key is rejected with an error rather than silently ignored, so a typo fails loudly instead of quietly producing a near-zero-leeway cloud that fails every move. Any field you omit means ~zero leeway for that field.
 
 Passing both `goal_metric_type` and `pose_cloud` in the same `extra` map is an error.
+
+## Servo gains
+
+`disable_servo_gains` (bool, default `false`) leaves the servos' `p_gain`/`d_gain`/`i_gain` registers untouched at init. Set it if you tuned gains yourself — `pidtune apply` writes the same registers.
+
+The tuned table, against a stock `32/32/0` (gripper `16/32/0`):
+
+| servo id | joint | P | D | I |
+|---|---|---|---|---|
+| 1 | shoulder pan | 32 | 48 | 0 |
+| 2 | shoulder lift | 48 | 64 | 2 |
+| 3 | elbow | 48 | 64 | 4 |
+| 4 | wrist flex | 48 | 64 | 2 |
+| 5 | wrist roll | 48 | 48 | 0 |
+| 6 | gripper | *untested — never written* | | |
+
+Stock `P=32` is too weak for the gravity-loaded joints: at `I=0` they park at a permanent steady-state error scaling as `1/P`, and only integral gain removes it. On joint 2 the error drops ~4×, **0.90° → 0.22°**. The gravity-free joints need no integral term. Nothing exceeds `P=48` — `P=64` oscillated at every `D` tested.
+
+These are EEPROM writes applied during servo init, so they run on every `Reconfigure`; each register is skipped when the servo already holds the value. Servos outside the arm's own `servo_ids` are never written, and a failed write does not fail arm construction.
+
+Writes go D, then I, then P, and a failed one stops that servo. A non-zero `I` is only stable against a raised `D` (joint 2 oscillated at `D=32, I=4`, stable at `D=48, I=4`), so damping-first keeps every reachable partial state at least as stable as stock.
+
+Two caveats. Peak current rises steeply with `D` — a 100-count step drew 388 units at `D=16` versus 691 at `D=48`; not thermal in testing (37–43°C, +1–2°C), but it would matter under sustained high-duty motion. And this was measured on one arm at 12.2–12.3 V; unit-to-unit and voltage variation are unquantified.
 
 ## Manual Mode
 
