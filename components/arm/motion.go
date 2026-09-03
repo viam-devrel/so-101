@@ -347,9 +347,8 @@ func (s *so101) dwellUntilNear(ctx context.Context, goal []float64, lookaheadDeg
 // travel-reference read fails and as the streamed-setpoint path. It commands every joint at
 // one shared speed, which is why joints arrive at different times.
 //
-// streamed forces BOTH registers to 0 -- max speed, unlimited acceleration -- instead of the
-// deg/s and deg/s^2 conversions. The teleop bypass in MoveToJointPositions is the only caller
-// that sets it true. See CLAUDE.md, "Speed: 0 means MAXIMUM".
+// streamed forces BOTH registers to 0 -- max speed, unlimited acceleration. See CLAUDE.md,
+// "A streamed setpoint gets Speed 0 AND Acc 0".
 func (s *so101) moveJointsUniform(ctx context.Context, to []float64, speedDegsPerSec, accelDegsPerSecSq float64, streamed, wait bool) error {
 	// Writes an explicit UNIFORM profile rather than a bare position write. A coordinated
 	// move leaves each servo's Speed and Acc registers at its own scaled value -- as low as
@@ -361,12 +360,7 @@ func (s *so101) moveJointsUniform(ctx context.Context, to []float64, speedDegsPe
 		AccUnits:   servo.DegPerSecSqToAccUnits(accelDegsPerSecSq),
 	}
 	if streamed {
-		// Both registers to their "unbounded" sentinel: 0 is MAX SPEED and UNLIMITED
-		// acceleration, not stopped and not still. A streamed caller shapes the trajectory
-		// with its own update rate, so any profile the servo applies between setpoints is
-		// pure lag -- confirmed on hardware in both directions, first for acceleration and
-		// then for speed, where raising the cap improved teleop tracking until it stopped
-		// binding at all. See the branch in MoveToJointPositions.
+		// 0 is MAX SPEED and UNLIMITED acceleration, not stopped and not still.
 		profile.SpeedSteps, profile.AccUnits = 0, 0
 	}
 	profiles := make([]controller.ServoProfile, len(s.armServoIDs))
@@ -406,11 +400,9 @@ func (s *so101) MoveToJointPositions(ctx context.Context, positions []referencef
 	accel := float64(s.defaultAcc)
 	s.mu.RUnlock()
 
-	// A streamed caller (teleop) gets no speed cap, no acceleration ramp, and no
-	// coordination read. An acceleration limit is catastrophic for tracking -- measured,
-	// acc=32 quadrupled RMS error and took lag from 40 ms to 160 ms -- a speed cap binds
-	// the same way once the ramp stops dominating, and coordinated arrival is meaningless
-	// for a goal that will be superseded in ~10 ms. See docs/arm.md, "Motion and speed".
+	// A streamed caller shapes the trajectory with its own update rate, so any profile the
+	// servo applies between setpoints is pure lag and the coordination read buys nothing.
+	// See docs/arm.md, "Motion and speed".
 	if streamed, _ := extra["streamed"].(bool); streamed {
 		return s.moveJointsUniform(ctx, clamped, speed, accel, true, servocmd.WaitArg(extra))
 	}

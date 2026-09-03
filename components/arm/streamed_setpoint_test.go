@@ -29,16 +29,13 @@ func accelTestArm(t *testing.T, ft *testfake.FakeTransport) *so101 {
 	}
 }
 
-// Teleop streams small setpoints, so any profile the servo applies between them is pure lag:
-// an acceleration ramp quadruples tracking error (acc=32 -> 160 ms lag vs 40 ms at acc=0),
-// and a speed cap binds the same way once the ramp stops dominating. 0 in either register is
-// the "unbounded" sentinel -- MAX SPEED and UNLIMITED acceleration -- which neither
-// conversion path can produce (minSpeedSteps and MinAccUnits are both 1).
+// 0 in either register is the "unbounded" sentinel -- MAX SPEED and UNLIMITED acceleration --
+// which neither conversion path can produce (minSpeedSteps and MinAccUnits are both 1).
 func TestMoveToJointPositionsHonoursStreamed(t *testing.T) {
 	ft := testfake.NewFakeTransport()
 	s := accelTestArm(t, ft)
-	// Seed NON-zero values first. An unset register reads back as zero, so without this the
-	// assertions below cannot tell "commanded 0" from "never wrote the register at all".
+	// Seed NON-zero: an unset register reads back as zero, so without this the assertions
+	// cannot tell "commanded 0" from "never wrote the register".
 	for _, id := range s.armServoIDs {
 		ft.SetRegister(id, feetech.RegAcceleration.Address, []byte{0x7F})
 		ft.SetRegister(id, feetech.RegGoalVelocity.Address, testfake.EncodeWordLE(1234))
@@ -55,15 +52,12 @@ func TestMoveToJointPositionsHonoursStreamed(t *testing.T) {
 		got, err := s.controller.ReadServoRegister(context.Background(), id, "acceleration")
 		require.NoError(t, err)
 		assert.Equal(t, byte(0), got[0], "servo %d must be commanded at unlimited acceleration", id)
-		// 0 here is the servo's MAX SPEED sentinel, not "stopped". A cap binds teleop
-		// tracking once the ramp stops dominating -- found on hardware.
 		vel, err := s.controller.ReadServoRegister(context.Background(), id, "goal_velocity")
 		require.NoError(t, err)
 		assert.Equal(t, []byte{0, 0}, vel, "servo %d must be commanded at max speed", id)
 	}
-	// One SyncWrite and nothing else. Skipping the coordination read is half the point of
-	// the branch -- at 100 Hz the read plus the write is ~3 ms of a 10 ms budget -- and it
-	// leaves no trace in the register store, so only the packet count can pin it.
+	// Skipping the coordination read leaves no trace in the register store, so only the
+	// packet count can pin it.
 	assert.Equal(t, 1, moved, "the unlimited path must issue one packet: the goal write")
 }
 
@@ -86,7 +80,6 @@ func TestMoveToJointPositionsProfilesByDefault(t *testing.T) {
 		require.NoError(t, err)
 		assert.NotEqual(t, []byte{0, 0}, vel, "servo %d must keep its speed cap", id)
 	}
-	// SyncRead for the travel reference, then SyncWrite. This is the traffic the unlimited
-	// path exists to avoid.
+	// SyncRead for the travel reference, then SyncWrite.
 	assert.Equal(t, 2, moved, "the coordinated path reads before it writes")
 }

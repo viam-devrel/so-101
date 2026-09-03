@@ -150,11 +150,10 @@ func (ft *FakeTransport) reply(req []byte) {
 			ft.queue(int(raw), ft.value(int(raw), address, length))
 		}
 	case 0x83: // SYNC_WRITE -- broadcast, no response on the wire
-		// Params are [address, dataLen, id, data..., id, data...]. A sync write covers a
-		// RANGE of registers (a goal write is acceleration, position, time and velocity in
-		// one 7-byte blob), so store the blob at `address` AND every suffix of it at the
-		// address it starts from. value() copies min(len, stored) bytes, so a later read of
-		// any register inside the range returns its own bytes rather than the blob's head.
+		// Params are [address, dataLen, id, data..., id, data...]. A sync write spans a RANGE
+		// of registers, so store every suffix of the blob at the address it starts from --
+		// value() copies min(len, stored), so a read of any register inside the range then
+		// returns its own bytes rather than the blob's head.
 		if len(params) < 2 {
 			return
 		}
@@ -208,18 +207,16 @@ func (ft *FakeTransport) CloseCount() int {
 	return ft.closes
 }
 
-// PacketCount reports how many request packets have been written to the transport, so a
-// test can assert a code path's bus traffic rather than only its effect -- a skipped read
-// leaves no trace in the register store.
+// PacketCount reports total request packets, so a test can assert a code path's bus traffic
+// rather than only its effect -- a skipped read leaves no trace in the register store.
 func (ft *FakeTransport) PacketCount() int {
 	ft.mu.Lock()
 	defer ft.mu.Unlock()
 	return ft.writes
 }
 
-// WriteCount reports how many WRITE packets have landed on one register, so a test can
-// assert a read-first guard actually skipped a redundant write -- reading the value back
-// cannot distinguish "already correct" from "written again".
+// WriteCount reports WRITE packets landed on one register, so a test can assert a read-first
+// guard skipped a redundant write -- the value alone cannot show that.
 func (ft *FakeTransport) WriteCount(id int, address byte) int {
 	ft.mu.Lock()
 	defer ft.mu.Unlock()

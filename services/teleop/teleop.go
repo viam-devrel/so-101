@@ -30,13 +30,10 @@ const (
 	defaultMaxConsecutiveErrors = 10
 	maxTeleopRateHz             = 1000.0
 
-	// maxStreamStartGapDeg is how close the follower must get to the leader before the
-	// mirror switches from profiled moves to streamed setpoints. A streamed setpoint carries
-	// no speed cap and no acceleration ramp, so handing one a large gap closes it at full
-	// servo speed -- fine for the sub-degree deltas of a running mirror, not for the arms
-	// starting in different poses. 5 deg is comfortably above the arm's steady-state droop
-	// (~0.22 deg tuned, 0.9 deg stock) so it is reachable, and small enough that the switch
-	// happens at a speed a hand is already tracking.
+	// maxStreamStartGapDeg is how close the follower must get before the mirror switches to
+	// streamed setpoints, which carry no speed cap and no ramp. Above the arm's steady-state
+	// droop (~0.22 deg tuned) so it is reachable, small enough that the switch happens at a
+	// speed a hand is already tracking.
 	maxStreamStartGapDeg = 5.0
 )
 
@@ -200,8 +197,7 @@ func (tp *so101Teleop) syncOnce(ctx context.Context) error {
 		gripperPct = pct
 	}
 
-	// No speed cap, no acceleration ramp, no coordination read: the command stream itself
-	// shapes the trajectory, so anything the servo applies between setpoints is pure lag.
+	// No speed cap, no ramp, no coordination read once the follower has caught up.
 	streamed, err := tp.readyToStream(ctx, positions)
 	if err != nil {
 		return err
@@ -226,13 +222,9 @@ func (tp *so101Teleop) syncOnce(ctx context.Context) error {
 // readyToStream reports whether this cycle may use a streamed setpoint, latching true the
 // first time the follower is within maxStreamStartGapDeg of the leader on every joint.
 //
-// The latch is the point. A streamed setpoint has no speed cap and no acceleration ramp, so
-// it must not be handed a large gap -- and profiling only the FIRST cycle would not help,
-// because a servo goal write supersedes the previous one: the next cycle 10 ms later would
-// overwrite the profiled goal with an unbounded one while the arm was still far away. So the
-// mirror stays profiled until the gap is actually closed.
-//
-// It costs one extra follower read per cycle, and only until the latch trips.
+// It LATCHES because a servo goal write supersedes the previous one: profiling only the first
+// cycle would be overwritten 10 ms later while the arm was still far away. Costs one extra
+// follower read per cycle until it trips. See CLAUDE.md, "A streamed setpoint".
 func (tp *so101Teleop) readyToStream(ctx context.Context, leader []referenceframe.Input) (bool, error) {
 	if tp.latched() {
 		return true, nil

@@ -67,10 +67,9 @@ func (o *orderRecordingTransport) Write(p []byte) (int, error) {
 	return o.FakeTransport.Write(p)
 }
 
-// Damping is written before the integral term, and the integral term before proportional. A
-// non-zero I is only stable against a raised D, so any other order leaves a window where a
-// bus failure strands the servo above its stable I. Reading final register values cannot
-// catch this -- they are order-independent -- so it needs the wire.
+// A non-zero I is only stable against a raised D, so any other order leaves a window where a
+// bus failure strands the servo above its stable I. Final register values are
+// order-independent, so this needs the wire.
 func TestApplyServoGainsWritesDampingBeforeIntegral(t *testing.T) {
 	ft := testfake.NewFakeTransport()
 	seedGains(ft, 32, 32, 0, 1, 2, 3, 4, 5, 6)
@@ -176,9 +175,8 @@ func TestApplyServoGainsFailureDoesNotFailInit(t *testing.T) {
 
 	// Servo 2's d_gain write failed, so it must be left exactly as found.
 	assert.Equal(t, byte(32), readServoGain(t, s, 2, "d_gain"), "servo 2 d_gain must be left as found after a write failure")
-	// The failure IS terminal for the rest of servo 2's gains, on purpose: 48/32/4 -- I and
-	// P applied over a stock D -- is the combination the write order exists to prevent, and
-	// it would persist in EEPROM with no retry to clear it.
+	// Terminal for the rest of servo 2's gains on purpose: 48/32/4 is the combination the
+	// write order exists to prevent, and it would persist in EEPROM with no retry.
 	assert.Equal(t, byte(0), readServoGain(t, s, 2, "i_gain"), "servo 2 i_gain must not land over a stock d_gain")
 	assert.Equal(t, byte(32), readServoGain(t, s, 2, "p_gain"), "servo 2 p_gain must not land over a stock d_gain")
 	// It must NOT cascade to any other servo.

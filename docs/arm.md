@@ -467,9 +467,9 @@ Passing both `goal_metric_type` and `pose_cloud` in the same `extra` map is an e
 
 ## Servo gains
 
-`disable_servo_gains` (bool, default `false`) leaves the servos' `p_gain`/`d_gain`/`i_gain` registers untouched at init. Leave it `false` to get the tuned table below; set it if you have tuned gains of your own (`pidtune apply` writes the same registers this module does).
+`disable_servo_gains` (bool, default `false`) leaves the servos' `p_gain`/`d_gain`/`i_gain` registers untouched at init. Set it if you tuned gains yourself — `pidtune apply` writes the same registers.
 
-The tuned per-joint table, against a stock `32/32/0` (gripper `16/32/0`):
+The tuned table, against a stock `32/32/0` (gripper `16/32/0`):
 
 | servo id | joint | P | D | I |
 |---|---|---|---|---|
@@ -480,15 +480,13 @@ The tuned per-joint table, against a stock `32/32/0` (gripper `16/32/0`):
 | 5 | wrist roll | 48 | 48 | 0 |
 | 6 | gripper | *untested — never written* | | |
 
-These are EEPROM writes, applied during `doServoInitialization` (so on every `Reconfigure`, not just the first construction), and skipped register-by-register when the servo already holds the target value — both because EEPROM has finite write endurance and because `initializeServosWithRetry` can run this same path up to 3 times in one bring-up. They are never sent to a servo outside the arm's own `servo_ids`: a 4-DOF arm configured with `servo_ids: [1,2,3,4]` leaves servo 5 alone even though the table has an entry for it. A gain write failing does not fail arm construction — the arm comes up at whatever gains the servo already holds.
+Stock `P=32` is too weak for the gravity-loaded joints: at `I=0` they park at a permanent steady-state error scaling as `1/P`, and only integral gain removes it. On joint 2 the error drops ~4×, **0.90° → 0.22°**. The gravity-free joints need no integral term. Nothing exceeds `P=48` — `P=64` oscillated at every `D` tested.
 
-**Why this table.** Stock `P=32` is too weak to hold the gravity-loaded joints (shoulder lift, elbow) against load: at `I=0` they sit at a permanent, direction-independent steady-state error that scales as `1/P`. Adding integral gain removes it. Measured on joint 2: steady-state error drops roughly **4×, 0.90° → 0.22°** (10.2 → 2.5 encoder counts, 0.088°/count). The gravity-free joints (pan, wrist roll) need no integral term and get only the derivative bump.
+These are EEPROM writes applied during servo init, so they run on every `Reconfigure`; each register is skipped when the servo already holds the value. Servos outside the arm's own `servo_ids` are never written, and a failed write does not fail arm construction.
 
-**The write order is D, then I, then P, and a failed write is terminal for that servo.** A non-zero `I` is only stable against a raised `D` — joint 2 oscillated at `D=32, I=4` and was stable at `D=48, I=4` — so writing derivative first means every prefix of the sequence (`{D}`, `{D,I}`, `{D,I,P}`) is at least as stable as the state before it. If a write fails partway, the loop stops for that servo rather than continuing to the next register: continuing could land `{I,P}` without `D` — 48/32/4 on servo 3, the exact combination measured to oscillate — and strand it there in EEPROM with nothing to retry it (a gain-write failure never fails the arm, so nothing re-triggers this path outside the next `Reconfigure`).
+Writes go D, then I, then P, and a failed one stops that servo. A non-zero `I` is only stable against a raised `D` (joint 2 oscillated at `D=32, I=4`, stable at `D=48, I=4`), so damping-first keeps every reachable partial state at least as stable as stock.
 
-**Peak current rises steeply with `D`.** Taking a joint's `D` from 32 to 64 is not free: at `P=32`, a 100-count step measured 388 current units at `D=16` versus 691 at `D=48`. Servos idled at 37–43°C and rose only 1–2°C over the measurement session, so this was not a thermal problem there — but it would matter under sustained high-duty motion.
-
-**Measured on one arm, once.** 12.2–12.3 V bus, 2026-09-02. Unit-to-unit and supply-voltage variation are unquantified. If your arm needs different gains, set `disable_servo_gains: true` and run `pidtune apply` — it writes the same registers this module does.
+Two caveats. Peak current rises steeply with `D` — a 100-count step drew 388 units at `D=16` versus 691 at `D=48`; not thermal in testing (37–43°C, +1–2°C), but it would matter under sustained high-duty motion. And this was measured on one arm at 12.2–12.3 V; unit-to-unit and voltage variation are unquantified.
 
 ## Manual Mode
 
