@@ -1,6 +1,7 @@
 package geometry
 
 import (
+	"encoding/json"
 	"maps"
 	"math"
 	"slices"
@@ -85,11 +86,11 @@ func TestGripperTCPLiesBetweenTheJawTips(t *testing.T) {
 
 // TestBuildGripperModelPlacesFrameAtTCP is the core of the reference-frame change: the gripper's
 // kinematic model must be zero-DoF and end at the TCP, so the frame system reports the gripper's
-// pose at the jaw tips rather than at the arm's wrist.
+// pose at the jaw tips rather than at the arm's wrist. This is also the jawDoF: false contract.
 func TestBuildGripperModelPlacesFrameAtTCP(t *testing.T) {
 	for _, gt := range []string{FollowerGripper, LeaderGripper} {
 		t.Run(gt, func(t *testing.T) {
-			model, err := BuildGripperModel(gt, LowDetail, "gripper")
+			model, err := BuildGripperModel(gt, LowDetail, "gripper", false)
 			require.NoError(t, err)
 			require.NotNil(t, model)
 
@@ -121,7 +122,7 @@ func TestBuildGripperModelCarriesMeshes(t *testing.T) {
 		{LeaderGripper, 3},
 	} {
 		t.Run(tc.gripperType, func(t *testing.T) {
-			model, err := BuildGripperModel(tc.gripperType, LowDetail, "gripper")
+			model, err := BuildGripperModel(tc.gripperType, LowDetail, "gripper", false)
 			require.NoError(t, err)
 
 			gif, err := model.Geometries(nil)
@@ -129,12 +130,20 @@ func TestBuildGripperModelCarriesMeshes(t *testing.T) {
 			require.Len(t, gif.Geometries(), tc.meshes)
 
 			// Model geometry must land exactly where Geometries() draws the closed gripper,
-			// so the collision volume and the rendered meshes agree.
+			// so the collision volume and the rendered meshes agree. Both position AND
+			// orientation: the moving mesh's pose ORIGIN is invariant under the Yaw rotation
+			// (a pure-Z offset rotated about Z), so a point-only check can't catch the model
+			// freezing the wrong jaw angle -- see TestArticulatedGripperModelShape's comment
+			// on the same fact.
 			want, err := BuildGripperMeshes(tc.gripperType, LowDetail, GripperJointMin)
 			require.NoError(t, err)
 			for i, got := range gif.Geometries() {
 				assert.Lessf(t, got.Pose().Point().Sub(want[i].Pose().Point()).Norm(), 1e-6,
 					"model geometry %d at %v, want %v", i, got.Pose().Point(), want[i].Pose().Point())
+				oriD := spatialmath.QuatToR3AA(
+					spatialmath.OrientationBetween(got.Pose().Orientation(), want[i].Pose().Orientation()).Quaternion()).Norm()
+				assert.InDeltaf(t, 0, oriD, 1e-9,
+					"model geometry %d orientation differs by %.4f rad from BuildGripperMeshes", i, oriD)
 			}
 		})
 	}
@@ -146,7 +155,7 @@ func TestBuildGripperModelCarriesMeshes(t *testing.T) {
 // assembled in memory without OriginalFile transmits as UNSPECIFIED and the server sees nothing --
 // which every in-process check would miss.
 func TestGripperModelSurvivesSerialization(t *testing.T) {
-	model, err := BuildGripperModel(FollowerGripper, LowDetail, "gripper")
+	model, err := BuildGripperModel(FollowerGripper, LowDetail, "gripper", false)
 	require.NoError(t, err)
 
 	resp := referenceframe.KinematicModelToProtobuf(model)
@@ -171,7 +180,7 @@ func TestGripperModelSurvivesSerialization(t *testing.T) {
 func TestGripperFrameResolvesToTCPInFrameSystem(t *testing.T) {
 	armModel, err := ArmModelJSON("arm")
 	require.NoError(t, err)
-	gripperModel, err := BuildGripperModel(FollowerGripper, LowDetail, "gripper")
+	gripperModel, err := BuildGripperModel(FollowerGripper, LowDetail, "gripper", false)
 	require.NoError(t, err)
 
 	armLink, err := (&referenceframe.LinkConfig{ID: "arm", Parent: referenceframe.World}).ParseConfig()
@@ -204,4 +213,168 @@ func TestGripperFrameResolvesToTCPInFrameSystem(t *testing.T) {
 	gif, ok := geoms["gripper"]
 	require.True(t, ok, "the gripper contributed no geometry to the frame system: %v", slices.Collect(maps.Keys(geoms)))
 	assert.Len(t, gif.Geometries(), 2, "gripper meshes missing from frame-system geometry")
+}
+
+// TestJawAngleBijection pins the percent<->radian mapping: the single definition both
+// directions live in. A drift here silently rescales every jaw command.
+func TestJawAngleBijection(t *testing.T) {
+	require.Greater(t, GripperJointMax, GripperJointMin, "zero-range joint makes the mapping divide by zero")
+
+	assert.InDelta(t, GripperJointMin, JawRadiansFromPct(0), 1e-12)
+	assert.InDelta(t, GripperJointMax, JawRadiansFromPct(100), 1e-12)
+	assert.InDelta(t, 50.0, JawPctFromRadians((GripperJointMin+GripperJointMax)/2), 1e-9)
+
+	for _, pct := range []float64{0, 12.5, 50, 87.3, 100} {
+		back := JawPctFromRadians(JawRadiansFromPct(pct))
+		assert.InDeltaf(t, pct, back, 1e-9, "round trip lost %v", pct)
+	}
+
+	// Out-of-range inputs saturate rather than extrapolating into the servo stops.
+	assert.InDelta(t, GripperJointMin, JawRadiansFromPct(-25), 1e-12)
+	assert.InDelta(t, GripperJointMax, JawRadiansFromPct(150), 1e-12)
+	assert.InDelta(t, 0.0, JawPctFromRadians(GripperJointMin-1e-6), 1e-12)
+	assert.InDelta(t, 100.0, JawPctFromRadians(GripperJointMax+1e-6), 1e-12)
+}
+
+// TestArticulatedGripperModelShape is the core contract of the jaw-DoF experiment. Note the
+// limits assertion: JointConfig.Min/Max are DEGREES in SVA JSON (frame_json.go:152 applies
+// DegToRad), while GripperJointMin/Max are radians. Asserting the PARSED limits is what
+// catches a missing conversion -- checking the written values would not.
+func TestArticulatedGripperModelShape(t *testing.T) {
+	for _, gt := range []string{FollowerGripper, LeaderGripper} {
+		t.Run(gt, func(t *testing.T) {
+			m, err := BuildGripperModel(gt, LowDetail, "gripper", true)
+			require.NoError(t, err)
+
+			dof := m.DoF()
+			require.Len(t, dof, 1, "articulated gripper must expose exactly one jaw DoF")
+			assert.InDeltaf(t, GripperJointMin, dof[0].Min, 1e-9,
+				"jaw lower limit %v rad; degrees/radians conversion is wrong", dof[0].Min)
+			assert.InDeltaf(t, GripperJointMax, dof[0].Max, 1e-9,
+				"jaw upper limit %v rad; degrees/radians conversion is wrong", dof[0].Max)
+
+			// The whole point of output_frames: the TCP must not move with the jaw.
+			want := GripperTCPPose.Point()
+			if gt == LeaderGripper {
+				want = r3.Vector{}
+			}
+			for _, theta := range []float64{GripperJointMin, 0, GripperJointMax} {
+				p, err := m.Transform([]referenceframe.Input{theta})
+				require.NoError(t, err)
+				assert.Lessf(t, p.Point().Sub(want).Norm(), 1e-9,
+					"TCP moved to %v at jaw=%.4f rad; it must be invariant", p.Point(), theta)
+				// A motion goal is a full pose, not just a point -- check orientation too. Every
+				// link on the static tcp branch has an identity transform, so the TCP's
+				// orientation is the tool frame's own, unrotated by the jaw.
+				assert.Truef(t, spatialmath.OrientationAlmostEqual(p.Orientation(), spatialmath.NewZeroOrientation()),
+					"TCP orientation %v rotated at jaw=%.4f rad; it must be invariant", p.Orientation(), theta)
+			}
+
+			// The jaw mesh, by contrast, must move. Note WHAT is asserted here:
+			// gripperMovingVisualPose is a pure +Z translation and the joint rotates about
+			// local +Z, so Rz(theta) leaves the mesh's pose ORIGIN exactly where it was --
+			// comparing Pose().Point() would compare two identical points and can never pass.
+			// The jaw swings because the mesh VERTICES are offset from that origin, so compare
+			// the transformed vertices (and the orientation, which does change).
+			closed, err := m.Geometries([]referenceframe.Input{GripperJointMin})
+			require.NoError(t, err)
+			opened, err := m.Geometries([]referenceframe.Input{GripperJointMax})
+			require.NoError(t, err)
+			cg := closed.GeometryByName("gripper:gripper_moving")
+			og := opened.GeometryByName("gripper:gripper_moving")
+			require.NotNil(t, cg)
+			require.NotNil(t, og)
+
+			oriD := spatialmath.QuatToR3AA(
+				spatialmath.OrientationBetween(cg.Pose().Orientation(), og.Pose().Orientation()).Quaternion()).Norm()
+			assert.InDeltaf(t, GripperJointMax-GripperJointMin, oriD, 1e-6,
+				"jaw rotated %.4f rad between the limits, want the full %.4f rad range",
+				oriD, GripperJointMax-GripperJointMin)
+
+			// meshWorldPoints already exists at gripper_frame_test.go:17.
+			cp := meshWorldPoints(cg.(*spatialmath.Mesh))
+			op := meshWorldPoints(og.(*spatialmath.Mesh))
+			require.Equal(t, len(cp), len(op))
+			var maxMoved float64
+			for i := range cp {
+				maxMoved = math.Max(maxMoved, cp[i].Sub(op[i]).Norm())
+			}
+			assert.Greaterf(t, maxMoved, 1.0,
+				"no jaw vertex moved more than %.4fmm between the closed and open limits", maxMoved)
+		})
+	}
+}
+
+// TestModelGeometriesMatchBuiltMeshes closes the drift risk introduced by articulation: the jaw
+// pose is now computed twice -- by the frame system from the jaw joint (collision geometry) and
+// by hand in BuildGripperMeshes (the 3D viewer). The two must agree at every angle or the
+// planner will avoid a jaw that is not where the user sees it.
+func TestModelGeometriesMatchBuiltMeshes(t *testing.T) {
+	for _, gt := range []string{FollowerGripper, LeaderGripper} {
+		t.Run(gt, func(t *testing.T) {
+			m, err := BuildGripperModel(gt, LowDetail, "gripper", true)
+			require.NoError(t, err)
+
+			steps := 9
+			for i := 0; i <= steps; i++ {
+				// Clamp: at i==steps the linspace lands one ULP above GripperJointMax, which
+				// trips the joint's strict bound check even though the literal constant itself
+				// is in range. Unrelated to the pose comparison below.
+				theta := math.Min(GripperJointMax, GripperJointMin+(GripperJointMax-GripperJointMin)*float64(i)/float64(steps))
+
+				gif, err := m.Geometries([]referenceframe.Input{theta})
+				require.NoError(t, err)
+				fromModel := gif.GeometryByName("gripper:gripper_moving")
+				require.NotNilf(t, fromModel, "model has no jaw geometry at %.4f rad", theta)
+
+				built, err := BuildGripperMeshes(gt, LowDetail, theta)
+				require.NoError(t, err)
+				fromMeshes := built[len(built)-1]
+				require.Equal(t, "gripper_moving", fromMeshes.Label())
+
+				a, b := fromModel.Pose(), fromMeshes.Pose()
+				assert.Lessf(t, a.Point().Sub(b.Point()).Norm(), 1e-9,
+					"jaw=%.4f rad: model places the mesh at %v, BuildGripperMeshes at %v", theta, a.Point(), b.Point())
+				oriD := spatialmath.QuatToR3AA(
+					spatialmath.OrientationBetween(a.Orientation(), b.Orientation()).Quaternion()).Norm()
+				assert.Lessf(t, oriD, 1e-9,
+					"jaw=%.4f rad: jaw mesh orientation differs by %.3e rad between the two paths", theta, oriD)
+			}
+		})
+	}
+}
+
+// TestJawMountOrientationIsEuler pins the encoding, not the value. spatialmath.Compose returns a
+// *Quaternion, so NewOrientationConfig emits "quaternion" -- which rdk parses correctly but the
+// 3D viewer rendered wrong, splaying the jaw branch. Every orientation in so101.json is
+// euler_angles, and the arm renders correctly, so the gripper matches it.
+func TestJawMountOrientationIsEuler(t *testing.T) {
+	for _, gt := range []string{FollowerGripper, LeaderGripper} {
+		t.Run(gt, func(t *testing.T) {
+			m, err := BuildGripperModel(gt, LowDetail, "gripper", true)
+			require.NoError(t, err)
+
+			var raw struct {
+				Links []struct {
+					ID          string `json:"id"`
+					Orientation *struct {
+						Type string `json:"type"`
+					} `json:"orientation"`
+				} `json:"links"`
+			}
+			require.NoError(t, json.Unmarshal(m.ModelConfig().OriginalFile.Bytes, &raw))
+
+			var checked int
+			for _, l := range raw.Links {
+				if l.Orientation == nil {
+					continue
+				}
+				checked++
+				assert.Equalf(t, "euler_angles", l.Orientation.Type,
+					"link %q ships a %q orientation; the 3D viewer only renders euler_angles correctly",
+					l.ID, l.Orientation.Type)
+			}
+			assert.Positive(t, checked, "no link carried an orientation -- the guard checked nothing")
+		})
+	}
 }

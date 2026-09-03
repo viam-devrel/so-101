@@ -139,7 +139,7 @@ func newSO101Gripper(ctx context.Context, deps resource.Dependencies, conf resou
 		meshDetail = geometry.LowDetail
 	}
 
-	model, err := geometry.BuildGripperModel(gripperType, meshDetail, conf.ResourceName().ShortName())
+	model, err := geometry.BuildGripperModel(gripperType, meshDetail, conf.ResourceName().ShortName(), false)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build gripper kinematic model: %w", err)
 	}
@@ -335,8 +335,7 @@ func (g *so101Gripper) jawAngle(ctx context.Context) float64 {
 	if err != nil {
 		return geometry.GripperJointMin
 	}
-	pct := math.Max(0, math.Min(1, percent/100.0))
-	return geometry.GripperJointMin + pct*(geometry.GripperJointMax-geometry.GripperJointMin)
+	return geometry.JawRadiansFromPct(percent)
 }
 
 // Geometries serves the gripper as meshes: a static body and a moving part posed by
