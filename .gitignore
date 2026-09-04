@@ -39,4 +39,6 @@ docs/plans/
 
 # stray binary that `go build ./...` drops at the repo root (named for cmd/module)
 /module
+# stray binary that `go build ./tools/...` drops at the repo root (named for tools/stream_trajectory)
+/stream_trajectory
 docs/superpowers/plans/
