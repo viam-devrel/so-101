@@ -17,7 +17,7 @@ const streamStartGapDeg = 5.0
 
 // MoveThroughJointPositionsStreamed writes each point as an unbounded goal at start + Time.
 // The producer owns the timing: a late point is written immediately, never dropped, and
-// Constraints are ignored. See docs/arm.md, "Streaming trajectories".
+// Constraints are ignored.
 //
 // Only the FIRST point is gated. A large jump between consecutive points, or a schedule
 // slip that lets the goal race ahead of the arm, reaches the servos unbounded; no policy

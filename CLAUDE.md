@@ -24,7 +24,7 @@ internal/planning/     approach-axis goal clouds
 internal/servocmd/     the servo_* DoCommand wire protocol
 internal/testfake/     test doubles shared across package boundaries
 assets/urdf/           runtime-loaded URDF + collision meshes + SO-ARM100 license
-tools/                 mesh/URDF generator scripts
+tools/                 mesh/URDF generator scripts + stream_trajectory (Go, not in the binary)
 docs/                  one file per model; README.md is an index
 ```
 
@@ -141,8 +141,9 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
 - Lint/format with `gofmt -s -w .` (the Makefile `lint` target); also run `go vet`.
 - Tests that need `VIAM_MODULE_ROOT` must use `testfake.RepoRoot()`, never `"."` — tests run
   from their own package directory, not the repo root.
-- `go build ./...` drops a stray binary named `module` at the repo root (Go names it after
-  `cmd/module`'s directory). It is gitignored.
+- `go build ./...` drops stray binaries named `module` and `stream_trajectory` at the repo root
+  (Go names them after `cmd/module`'s and `tools/stream_trajectory`'s directories). Both are
+  gitignored.
 
 ## Gotchas
 
@@ -586,8 +587,15 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
   close the channel (the server's recv goroutine watches the stream ctx). Requires rdk ≥ v1.1.0
   (the method is on `arm.Arm`); `FakeTransport.WriteCount` counts `SYNC_WRITE`s by start
   address so tests can count goal writes -- `SetGoals` is a sync write at `RegAcceleration`.
+  A REMOTE caller is also validated by rdk's arm client against the model's static `DoF()`
+  limits (so101.json / URDF), point by point, and the stream is torn down client-side on a
+  violation -- before any point reaches the module's `clampPositions`, which clamps to the
+  CALIBRATED limits. Two different limit sets; in-process tests only ever see the second.
 - **rdk ≥ v1.6.0's `Frame.Transform` does NOT bounds-check joints** (`OOBErrString` is dead
-  upstream), so `geometry.ComputeOOBPosition`'s clamp and `so101.clampPositions` are the ONLY
-  joint-limit enforcement in this module. `oob_test.go` used to pin the old rdk truncation bug
-  and now pins only the clamp. Do not "simplify away" either clamp on the assumption that rdk
-  rejects an out-of-limit input -- it composes the full chain and returns a pose with no error.
+  upstream). On the WRITE path that makes `so101.clampPositions` the only joint-limit
+  enforcement in this module -- do not "simplify it away" on the assumption that rdk rejects an
+  out-of-limit input; it composes the full chain and returns a pose with no error. On the READ
+  path `geometry.ComputeOOBPosition`'s clamp was a workaround for the OLD truncate-and-error
+  behaviour and is now lossy: `EndPosition` for a joint drooped past its limit reports the pose
+  AT the limit where an unclamped `Transform` would be correct. `oob_test.go` now pins only that
+  clamp; removing it is a deliberate small follow-up, not an accident to guard against.
