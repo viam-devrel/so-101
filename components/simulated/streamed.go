@@ -2,6 +2,7 @@ package simulated
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"go.viam.com/rdk/components/arm"
@@ -42,6 +43,14 @@ func (s *simulatedSO101) MoveThroughJointPositionsStreamed(
 			}
 			if err := s.clock.WaitUntil(ctx, start.Add(p.Time)); err != nil {
 				return err
+			}
+			if idx > 0 {
+				s.mu.Lock()
+				stopped := s.operation.stopped
+				s.mu.Unlock()
+				if stopped {
+					return errors.New("stopped before reaching target")
+				}
 			}
 			if err := s.startMove(ctx, p.Positions); err != nil {
 				return err
