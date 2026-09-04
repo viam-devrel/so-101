@@ -159,10 +159,15 @@ func (ft *FakeTransport) reply(req []byte) {
 		}
 		address, n := params[0], int(params[1])
 		for i := 2; i+1+n <= len(params); i += 1 + n {
-			regs, ok := ft.registers[int(params[i])]
+			id := int(params[i])
+			regs, ok := ft.registers[id]
 			if !ok {
 				continue
 			}
+			if _, ok := ft.regWrites[id]; !ok {
+				ft.regWrites[id] = map[byte]int{}
+			}
+			ft.regWrites[id][address]++
 			blob := params[i+1 : i+1+n]
 			for off := 0; off < n; off++ {
 				regs[address+byte(off)] = append([]byte(nil), blob[off:]...)
@@ -215,8 +220,9 @@ func (ft *FakeTransport) PacketCount() int {
 	return ft.writes
 }
 
-// WriteCount reports WRITE packets landed on one register, so a test can assert a read-first
-// guard skipped a redundant write -- the value alone cannot show that.
+// WriteCount reports WRITE packets landed on one register -- plus SYNC_WRITE packets that
+// STARTED at it -- so a test can count goal writes (SetGoals is a sync write at
+// RegAcceleration) or assert a read-first guard skipped a redundant write.
 func (ft *FakeTransport) WriteCount(id int, address byte) int {
 	ft.mu.Lock()
 	defer ft.mu.Unlock()

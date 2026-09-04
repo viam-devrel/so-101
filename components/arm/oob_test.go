@@ -11,11 +11,10 @@ import (
 	"so_arm/internal/testfake"
 )
 
-// TestComputeOOBPositionFullChain guards against the rdk v0.123 regression where
-// Frame.Transform early-returns at the first out-of-bounds joint, yielding a pose
-// truncated at that joint (and every link downstream). geometry.ComputeOOBPosition must still
-// compose the full chain for a joint driven past its calibrated limit -- otherwise
-// EndPosition silently reports a wildly wrong TCP (the base-mount pose) with no error.
+// TestComputeOOBPositionFullChain pins that ComputeOOBPosition clamps an out-of-range joint
+// to its limit and composes the full chain. It began as a guard against rdk v0.123's
+// Frame.Transform truncating the pose at the first out-of-bounds joint; rdk >= v1.6.0
+// composes the full chain itself, so the clamp is now the only behavior this adds.
 func TestComputeOOBPositionFullChain(t *testing.T) {
 	for _, useURDF := range []bool{false, true} {
 		name := "json"
@@ -35,11 +34,6 @@ func TestComputeOOBPositionFullChain(t *testing.T) {
 			// Joints 1-4 nonzero so a full-chain FK is clearly distinguishable from a
 			// pose truncated at joint 0.
 			base := []referenceframe.Input{0, 0.5, 0.3, 0.1, 0.1}
-
-			// Raw Transform surfaces the OOB error along with its truncated pose; the
-			// OOBErrString it carries is what previously got swallowed here.
-			_, err = model.Transform([]referenceframe.Input{limits[0].Max + 1.0, 0.5, 0.3, 0.1, 0.1})
-			require.ErrorContains(t, err, referenceframe.OOBErrString)
 
 			// Drive joint 0 just past its max limit.
 			overMax := make([]referenceframe.Input, 5)

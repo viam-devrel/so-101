@@ -217,6 +217,9 @@ type so101 struct {
 	// servosMoving, when non-nil, replaces the bus read behind anyServoMoving. Tests only.
 	servosMoving func(context.Context) (bool, error)
 
+	// clock schedules streamed trajectory points. Zero value is the real clock; tests only.
+	clock servo.Clock
+
 	mu       sync.RWMutex
 	moveLock sync.Mutex
 	isMoving atomic.Bool

@@ -13,6 +13,7 @@ import (
 	"go.viam.com/rdk/referenceframe"
 	"go.viam.com/rdk/resource"
 
+	"so_arm/internal/servo"
 	"so_arm/internal/testfake"
 )
 
@@ -330,4 +331,120 @@ func TestSimulatedEEFrameMarker(t *testing.T) {
 	onGeoms, err := onArm.Geometries(ctx, nil)
 	require.NoError(t, err)
 	assert.Len(t, onGeoms, 6)
+}
+
+// The stream re-targets the interpolator per point without waiting; the call returns only
+// once the arm has converged on the LAST point.
+func TestSimulatedStreamedFollowsPointsAndAcksPerBatch(t *testing.T) {
+	ctx := context.Background()
+	sim := newTestSimArm(t, 1.0) // 1 rad/s
+	defer func() { require.NoError(t, sim.Close(ctx)) }()
+
+	epoch := time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC)
+	var deadlines []time.Time // written by the call goroutine; read only after it returns
+	sim.clock = servo.Clock{
+		Now:        func() time.Time { return epoch },
+		SleepUntil: func(ctx context.Context, d time.Time) error { deadlines = append(deadlines, d); return ctx.Err() },
+	}
+	p := func(at time.Duration, q float64) arm.TrajectoryPoint {
+		return arm.TrajectoryPoint{Time: at, Positions: []referenceframe.Input{q, 0, 0, 0, 0}}
+	}
+
+	in := make(chan []arm.TrajectoryPoint)
+	out := make(chan arm.Response)
+	moveErr := make(chan error, 1)
+	go func() { moveErr <- sim.MoveThroughJointPositionsStreamed(ctx, in, out, nil) }()
+
+	in <- []arm.TrajectoryPoint{p(0, 0.1), p(10*time.Millisecond, 0.2)}
+	<-out
+	in <- []arm.TrajectoryPoint{} // no ack
+	in <- []arm.TrajectoryPoint{p(20*time.Millisecond, 0.5)}
+	<-out
+	close(in)
+
+	// Nothing moves until the simulated clock is pumped, and the call is still waiting.
+	inputs, err := sim.JointPositions(ctx, nil)
+	require.NoError(t, err)
+	assert.Equal(t, []referenceframe.Input{0, 0, 0, 0, 0}, inputs)
+	select {
+	case <-moveErr:
+		t.Fatal("returned before the arm arrived")
+	default:
+	}
+
+	base := time.Time{}
+	sim.updateForTime(base.Add(250 * time.Millisecond))
+	inputs, err = sim.JointPositions(ctx, nil)
+	require.NoError(t, err)
+	assert.InDeltaSlice(t, []float64{0.25, 0, 0, 0, 0}, inputs, 1e-9, "heading for the last point")
+
+	sim.updateForTime(base.Add(500 * time.Millisecond))
+	select {
+	case err := <-moveErr:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("did not return after converging on the last point")
+	}
+	inputs, err = sim.JointPositions(ctx, nil)
+	require.NoError(t, err)
+	assert.InDeltaSlice(t, []float64{0.5, 0, 0, 0, 0}, inputs, 1e-9)
+	assert.Equal(t, []time.Time{epoch, epoch.Add(10 * time.Millisecond), epoch.Add(20 * time.Millisecond)}, deadlines)
+}
+
+func TestSimulatedStreamedRejectsNonZeroFirstTime(t *testing.T) {
+	ctx := context.Background()
+	sim := newTestSimArm(t, 1.0)
+	defer func() { require.NoError(t, sim.Close(ctx)) }()
+
+	in := make(chan []arm.TrajectoryPoint)
+	out := make(chan arm.Response)
+	moveErr := make(chan error, 1)
+	go func() { moveErr <- sim.MoveThroughJointPositionsStreamed(ctx, in, out, nil) }()
+
+	in <- []arm.TrajectoryPoint{{Time: 10 * time.Millisecond, Positions: []referenceframe.Input{0.1, 0, 0, 0, 0}}}
+	select {
+	case err := <-moveErr:
+		require.Error(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("did not reject the first point")
+	}
+	moving, err := sim.IsMoving(ctx)
+	require.NoError(t, err)
+	assert.False(t, moving, "nothing was targeted")
+}
+
+// Stop must end a stream between points, not be erased by the next re-target.
+func TestSimulatedStreamedStopEndsTheStream(t *testing.T) {
+	ctx := context.Background()
+	sim := newTestSimArm(t, 1.0)
+	defer func() { require.NoError(t, sim.Close(ctx)) }()
+	sim.clock = servo.Clock{
+		Now:        func() time.Time { return time.Time{} },
+		SleepUntil: func(ctx context.Context, _ time.Time) error { return ctx.Err() },
+	}
+	p := func(at time.Duration, q float64) arm.TrajectoryPoint {
+		return arm.TrajectoryPoint{Time: at, Positions: []referenceframe.Input{q, 0, 0, 0, 0}}
+	}
+
+	in := make(chan []arm.TrajectoryPoint)
+	out := make(chan arm.Response)
+	moveErr := make(chan error, 1)
+	go func() { moveErr <- sim.MoveThroughJointPositionsStreamed(ctx, in, out, nil) }()
+
+	in <- []arm.TrajectoryPoint{p(0, 0.1)}
+	<-out
+	require.NoError(t, sim.Stop(ctx, nil))
+	in <- []arm.TrajectoryPoint{p(10*time.Millisecond, 0.2)} // must not be applied
+
+	select {
+	case err := <-moveErr:
+		require.ErrorContains(t, err, "stopped")
+	case <-time.After(time.Second):
+		t.Fatal("stream outlived Stop")
+	}
+	// The stopped target is the FIRST point, untouched by the second.
+	sim.mu.Lock()
+	target := append([]float64(nil), sim.operation.targetInputs...)
+	sim.mu.Unlock()
+	assert.InDelta(t, 0.1, target[0], 1e-9)
 }
