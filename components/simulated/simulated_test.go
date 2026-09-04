@@ -412,3 +412,39 @@ func TestSimulatedStreamedRejectsNonZeroFirstTime(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, moving, "nothing was targeted")
 }
+
+// Stop must end a stream between points, not be erased by the next re-target.
+func TestSimulatedStreamedStopEndsTheStream(t *testing.T) {
+	ctx := context.Background()
+	sim := newTestSimArm(t, 1.0)
+	defer func() { require.NoError(t, sim.Close(ctx)) }()
+	sim.clock = servo.Clock{
+		Now:        func() time.Time { return time.Time{} },
+		SleepUntil: func(ctx context.Context, _ time.Time) error { return ctx.Err() },
+	}
+	p := func(at time.Duration, q float64) arm.TrajectoryPoint {
+		return arm.TrajectoryPoint{Time: at, Positions: []referenceframe.Input{q, 0, 0, 0, 0}}
+	}
+
+	in := make(chan []arm.TrajectoryPoint)
+	out := make(chan arm.Response)
+	moveErr := make(chan error, 1)
+	go func() { moveErr <- sim.MoveThroughJointPositionsStreamed(ctx, in, out, nil) }()
+
+	in <- []arm.TrajectoryPoint{p(0, 0.1)}
+	<-out
+	require.NoError(t, sim.Stop(ctx, nil))
+	in <- []arm.TrajectoryPoint{p(10*time.Millisecond, 0.2)} // must not be applied
+
+	select {
+	case err := <-moveErr:
+		require.ErrorContains(t, err, "stopped")
+	case <-time.After(time.Second):
+		t.Fatal("stream outlived Stop")
+	}
+	// The stopped target is the FIRST point, untouched by the second.
+	sim.mu.Lock()
+	target := append([]float64(nil), sim.operation.targetInputs...)
+	sim.mu.Unlock()
+	assert.InDelta(t, 0.1, target[0], 1e-9)
+}
