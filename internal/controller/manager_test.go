@@ -222,6 +222,49 @@ func TestServoReadsSurviveAConditionFlag(t *testing.T) {
 		assert.True(t, moving, "the Moving bit is valid and must survive")
 		assert.Equal(t, feetech.ErrOverload, cond)
 	})
+
+	t.Run("SyncReadPositions", func(t *testing.T) {
+		want, err := clean.SyncReadPositions(ctx, []int{1, 2, 3, 4, 5, 6})
+		require.NoError(t, err)
+		got, err := flagged.SyncReadPositions(ctx, []int{1, 2, 3, 4, 5, 6})
+		require.NoError(t, err)
+		assert.Equal(t, want, got)
+	})
+
+	t.Run("GetJointPositionsAndMovingForServos", func(t *testing.T) {
+		want, wantMoving, err := clean.GetJointPositionsAndMovingForServos(ctx, testArmIDs)
+		require.NoError(t, err)
+		got, moving, err := flagged.GetJointPositionsAndMovingForServos(ctx, testArmIDs)
+		require.NoError(t, err)
+		assert.Equal(t, want, got)
+		assert.Equal(t, wantMoving, moving)
+		assert.True(t, moving)
+	})
+
+	t.Run("GetJointPositions", func(t *testing.T) {
+		want, err := clean.GetJointPositions(ctx)
+		require.NoError(t, err)
+		got, err := flagged.GetJointPositions(ctx)
+		require.NoError(t, err)
+		assert.Equal(t, want, got)
+	})
+
+	t.Run("GetJointPositionsForServos", func(t *testing.T) {
+		want, err := clean.GetJointPositionsForServos(ctx, testArmIDs)
+		require.NoError(t, err)
+		got, err := flagged.GetJointPositionsForServos(ctx, testArmIDs)
+		require.NoError(t, err)
+		assert.Equal(t, want, got)
+	})
+
+	t.Run("LoadForServos", func(t *testing.T) {
+		want, err := clean.LoadForServos(ctx, testArmIDs)
+		require.NoError(t, err)
+		got, err := flagged.LoadForServos(ctx, testArmIDs)
+		require.NoError(t, err, "load is the read most likely to meet an overload flag")
+		assert.Equal(t, want, got)
+		assert.Equal(t, 404, got[3])
+	})
 }
 
 // The other half of the policy: a request-rejection flag means the servo did not answer the

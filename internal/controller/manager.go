@@ -291,7 +291,7 @@ func (h *ControllerHandle) GetJointPositions(ctx context.Context) (out []float64
 
 		// Read arm positions using ServoGroup
 		servoPositions, err := sess.group.Positions(ctx)
-		if err != nil {
+		if _, err = tolerateCondition(err); err != nil {
 			return fmt.Errorf("failed to read servo positions: %w", err)
 		}
 
@@ -348,7 +348,7 @@ func (sess *busSession) jointRadians(servoID, raw int) (float64, error) {
 func (h *ControllerHandle) GetJointPositionsForServos(ctx context.Context, servoIDs []int) (out []float64, err error) {
 	err = h.withSessionRead(func(sess *busSession) error {
 		rawPositions, err := sess.group.Positions(ctx)
-		if err != nil {
+		if _, err = tolerateCondition(err); err != nil {
 			return fmt.Errorf("failed to get raw positions for servos: %w", err)
 		}
 		positions := make([]float64, len(servoIDs))
@@ -458,7 +458,7 @@ func (h *ControllerHandle) LoadForServos(ctx context.Context, servoIDs []int) (o
 				return fmt.Errorf("servo %d not available", id)
 			}
 			load, err := servo.Load(ctx)
-			if err != nil {
+			if _, err = tolerateCondition(err); err != nil {
 				return fmt.Errorf("failed to read load for servo %d: %w", id, err)
 			}
 			loads[id] = load
@@ -616,7 +616,7 @@ func GetCurrentCalibrationForPort(portPath string) SO101FullCalibration {
 func (h *ControllerHandle) SyncReadPositions(ctx context.Context, ids []int) (out map[int]int, err error) {
 	err = h.withSessionRead(func(sess *busSession) error {
 		data, err := sess.bus.SyncRead(ctx, feetech.RegPresentPosition.Address, 2, ids)
-		if err != nil {
+		if _, err = tolerateCondition(err); err != nil {
 			return err
 		}
 		proto := sess.bus.Protocol()
@@ -657,7 +657,7 @@ func (h *ControllerHandle) GetJointPositionsAndMovingForServos(
 ) (out []float64, moving bool, err error) {
 	err = h.withSessionRead(func(sess *busSession) error {
 		data, err := sess.bus.SyncRead(ctx, feetech.RegPresentPosition.Address, stateReadWidth, servoIDs)
-		if err != nil {
+		if _, err = tolerateCondition(err); err != nil {
 			return err
 		}
 		proto := sess.bus.Protocol()
