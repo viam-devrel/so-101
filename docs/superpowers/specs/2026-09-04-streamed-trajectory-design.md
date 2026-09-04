@@ -45,18 +45,24 @@ type Response struct{}                     // empty ack today
 Same envelope as `MoveThroughJointPositions`: `opMgr.New(ctx)`, `exitManualLocked`,
 `moveLock`, `isMoving.Store(true)` / deferred `false`.
 
-1. **First point gate.** Read `currentJoints()` once. If any joint is farther than
-   `streamStartGapDeg = 5` (teleop's `maxStreamStartGapDeg`) from point 0, run a
-   blocking profiled `moveJoints(from, p0, defaultSpeed, defaultAcc, nil, true)` to it.
-   Reason: the streamed write path is `Speed 0 / Acc 0` (unbounded), so it must never be
-   handed a large position error (CLAUDE.md, "It removes a bound"). Then `start = now()`.
-2. **Every point** (including point 0 after the gate): `clampPositions`; validate
-   `Time` strictly increasing (first must be 0) else return an error; sleep until
-   `start + p.Time` via a `sleepUntil(ctx, t) error` seam (returns `ctx.Err()` on cancel);
-   write with the existing `moveJointsUniform(ctx, clamped, speed, accel, streamed=true,
-   wait=false)` — one `SetGoals` packet, no coordination read. A point whose time has
-   already passed is written immediately, never dropped: a later goal supersedes it in
-   ~1 ms and dropping would need a policy nothing has measured yet.
+1. **Validate first, then gate, then start the clock.** The gate keys off the *first
+   point received* (a `first` flag inside `for batch := range batches`, since the client
+   forwards an empty batch if a caller hands it one, so "first batch" is not "first
+   point"). On that point: require `p0.Time == 0` (error, no write yet). Read
+   `currentJoints()` once. If any joint is farther than `streamStartGapDeg = 5`
+   (teleop's `maxStreamStartGapDeg`) from `p0`, run a blocking profiled
+   `moveJoints(from, p0, defaultSpeed, defaultAcc, nil, true)` to it. Reason: the
+   streamed write path is `Speed 0 / Acc 0` (unbounded), so it must never be handed a
+   large position error (CLAUDE.md, "It removes a bound"). Then `start = now()` via a
+   `now func() time.Time` seam.
+2. **Every point** (including `p0` after the gate): require `p.Time > prev.Time` (error
+   before writing *this* point; earlier points are legitimately already on the bus);
+   `clampPositions`; sleep until `start + p.Time` via a `sleepUntil(ctx, t) error` seam
+   (returns `ctx.Err()` on cancel); write with the existing
+   `moveJointsUniform(ctx, clamped, speed, accel, streamed=true, wait=false)` — one
+   `SetGoals` packet, no coordination read. A point whose time has already passed is
+   written immediately, never dropped: a later goal supersedes it in ~1 ms and dropping
+   would need a policy nothing has measured yet.
 3. **Per batch:** after its last point, `select { case responses <- arm.Response{}:
    case <-ctx.Done(): return ctx.Err() }`.
 4. **End:** when `batches` closes, `WaitForServosToStop(ctx, armServoIDs,
@@ -66,6 +72,9 @@ Same envelope as `MoveThroughJointPositions`: `opMgr.New(ctx)`, `exitManualLocke
    `moveJointsUniform` already reads.
 6. `Stop` needs no change: `opMgr.CancelRunning` cancels ctx, the sleep/select returns,
    the loop exits before `controller.Stop` zeroes goals.
+7. `moveLock` is held while parked on `range batches`, so a stalled producer blocks every
+   other move on this arm until the stream ends or is cancelled. Same shape as the paced
+   path, but now bounded by the network rather than the arm. Documented in `docs/arm.md`.
 
 ### Simulated arm (`components/simulated/simulated.go`)
 
@@ -78,28 +87,38 @@ do not create a package for it).
 
 ### Client for hardware experiments (`tools/stream_trajectory/`)
 
-A small Go program on rdk v1.6.0: connects to a machine, loads an arm-recorder session
-JSON (its `Frames` with timestamps), optionally linearly densifies to a target Hz
-(default 100), and streams it in batches of N points via
-`arm.Client.MoveThroughJointPositionsStreamed`, draining acks. arm-recorder itself is on
-rdk v0.131 and cannot call the RPC, and trajex is a library, not an arm caller, so
-nothing else can exercise this on hardware today. Kept out of the module binary.
+A small Go program in **this** module (same `go.mod`, so it gets rdk v1.6.0 and
+`go vet ./...` for free; the Makefile's `GO_SRC` only walks `cmd internal components
+services` and the tarball ships `assets/`, so it stays out of `bin/arm` and
+`module.tar.gz` with no Makefile edits). It connects to a machine, loads an arm-recorder
+session JSON — schema at `~/src/arm-recorder/session.go:13-22`: `frequency_hz` (scalar),
+`joint_count`, `frames [][]float64` (radians), `gripper_positions` (ignored) — derives
+`Time = i / frequency_hz` (there are **no per-frame timestamps**), optionally linearly
+densifies to a target Hz (default 100), and streams it in batches of N points via
+`arm.Client.MoveThroughJointPositionsStreamed`. Acks are drained in a separate goroutine
+concurrently with sending: a client that sends every batch and only then reads acks can
+wedge once gRPC flow-control windows fill. arm-recorder itself is on rdk v0.131 and
+cannot call the RPC, and trajex is a library, not an arm caller, so nothing else can
+exercise this on hardware today.
 
 ## Tests (`components/arm`, `components/simulated`)
 
-Use `accelTestArm`/`FakeTransport` and a `sleepUntil` seam pinned to "return
-immediately, record the deadline". Pin:
+Use `accelTestArm`/`FakeTransport`, a `now` seam pinned to a fixed instant, and a
+`sleepUntil` seam pinned to "return immediately, record the deadline". Pin:
 
 - one bus packet per point after the gate (`PacketCount()` delta), zero reads inside the
   loop;
-- deadlines recorded equal `start + p.Time` in order;
+- recorded deadlines equal the pinned `now + p.Time`, in order;
 - gate: first point within 5° → no profiled move; outside → exactly one profiled
-  `moveJoints` (its coordination read + write) before streaming;
-- one `Response{}` per batch, none for an empty batch is *not* required (server never
-  sends one);
+  `moveJoints` (its coordination read + write) before streaming; an empty first batch
+  does not trip or skip the gate;
+- one `Response{}` per non-empty batch;
 - ctx cancel mid-stream returns `ctx.Err()` and writes no further goal;
-- non-zero first `Time` or non-increasing `Time` → error before any write;
-- simulated: `currInputs` converge to the last point; ack per batch.
+- non-zero first `Time` → error with zero bus packets; non-increasing `Time` at point k →
+  error with exactly k packets written;
+- simulated: run the streamed call in a goroutine with `SimulateTime` off and pump
+  `updateForTime` manually (the existing test style), asserting `currInputs` converge to
+  the last point and one ack per non-empty batch.
 
 `go test ./...`, `-race` on both arm packages, `go vet`, `gofmt -s`.
 
