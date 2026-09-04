@@ -572,3 +572,22 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
   profiled goal with an unbounded one while the arm was still far away. It costs one extra
   follower read per cycle, only until it trips, and it must NOT re-evaluate afterwards: a
   running mirror legitimately trails the leader by more than the gate.
+- **`MoveThroughJointPositionsStreamed` is time-scheduled and UNBOUNDED; the 5° gate is what
+  makes that safe.** Each point goes out on the `streamed` path (`Speed 0 / Acc 0`, one
+  `SetGoals` packet) at `start + p.Time`, via `servo.Clock` so tests never sleep. Before the
+  first point, `closeStreamStartGap` (`components/arm/streamed.go`) reads once and runs one
+  profiled `moveJoints` if any joint is > `streamStartGapDeg` away -- the same 5 as teleop's
+  `maxStreamStartGapDeg`, duplicated because components must not import services. ONLY the
+  first point is gated; a mid-stream jump or a schedule slip reaches the servos unbounded, and
+  `TestStreamedDoesNotGateAMidStreamJump` pins that so a later policy is a visible change. Late
+  points are WRITTEN, not dropped (no policy has been measured). `Constraints` are ignored. Both
+  arms receive batches with a `select` on `ctx.Done()` rather than `range batches`, because
+  `Stop`'s `opMgr.CancelRunning` blocks until the op returns and cancelling our ctx does not
+  close the channel (the server's recv goroutine watches the stream ctx). Requires rdk ≥ v1.1.0
+  (the method is on `arm.Arm`); `FakeTransport.WriteCount` counts `SYNC_WRITE`s by start
+  address so tests can count goal writes -- `SetGoals` is a sync write at `RegAcceleration`.
+- **rdk ≥ v1.6.0's `Frame.Transform` does NOT bounds-check joints** (`OOBErrString` is dead
+  upstream), so `geometry.ComputeOOBPosition`'s clamp and `so101.clampPositions` are the ONLY
+  joint-limit enforcement in this module. `oob_test.go` used to pin the old rdk truncation bug
+  and now pins only the clamp. Do not "simplify away" either clamp on the assumption that rdk
+  rejects an out-of-limit input -- it composes the full chain and returns a pose with no error.

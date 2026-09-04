@@ -448,6 +448,28 @@ Each query costs a serial transaction (~1.3ms measured); polling it in a tight l
 
 Enforcing acceleration costs some speed, because the servos now ramp instead of jumping straight to full velocity. At the default of 500 °/s² a 20° move takes about 25% longer than before. Lowering the value costs more: at 100 °/s² the same move takes roughly twice as long again.
 
+### Streaming trajectories (experimental)
+
+`MoveThroughJointPositionsStreamed` (rdk ≥ v1.1.0 and a viam-server ≥ 1.1.0 to route the RPC; this module builds against v1.6.0) takes a stream of time-stamped `TrajectoryPoint`s and follows the **producer's** timing instead of pacing each waypoint by position. It exists to measure whether time-scheduled streaming tracks a dense trajectory (a TOTG sampled at 100 Hz, or an arm-recorder replay) better than [waypoint streams](#waypoint-streams); it is not yet a replacement for them.
+
+- **Each point is an unbounded goal write at `start + Time`** -- the same `Speed 0 / Acc 0` path as [`streamed`](#streamed-setpoints-wait-and-streamed), one `SetGoals` packet per point, no position read in the loop. `Time` must be `0` for the first point and strictly increasing after it; a violation fails the call, with every earlier point already on the bus.
+- **5° start gate.** Before the first point is written, the arm reads its position once; if any joint is more than 5° from that point it makes one blocking *profiled* move there first. The clock starts after the gate. Only the first point is gated: a large jump between later points, or a schedule slip that lets the goal race ahead of the arm, reaches the servos unbounded. No policy for either has been measured yet.
+- **Late points are written, not dropped.** A point whose time has already passed is written immediately; the next goal supersedes it in about a millisecond. Dropping stale points is a policy nothing has measured yet.
+- **`Constraints` (velocities/accelerations) and `extra` are ignored.** The producer shapes the trajectory; any servo-side profile between setpoints is lag.
+- **One ack per non-empty batch**, sent after the batch's last point is written. The call returns once the servos report stopped after the final point.
+- **The move lock is held for the whole stream**, including while waiting for the next batch, so a stalled producer blocks every other move on this arm until the stream ends, is cancelled, or `Stop()` is called. `Stop()` ends a stream even while it is waiting on its producer.
+
+The simulated arm implements the same contract by re-targeting its interpolator at each point's time; `Stop()` ends its stream between points.
+
+To try it on hardware, `tools/stream_trajectory` replays an [arm-recorder](https://github.com/HipsterBrown/arm-recorder) session (`frequency_hz` + `frames` in radians), linearly densified to `-hz` (default 100) and sent in batches of `-batch` points:
+
+```sh
+VIAM_API_KEY=... VIAM_API_KEY_ID=... \
+  go run ./tools/stream_trajectory -address <machine>.viam.cloud -arm follower-arm -session nod.json
+```
+
+It prints the point count, ack count, trajectory duration and wall time. The tool is not part of the module binary.
+
 ## Approach-axis orientation planning
 
 The SO-101 is a 5-DOF arm, so most six-DOF pose targets are unreachable exactly. Rather than discard orientation wholesale, `MoveToPosition` attaches a `referenceframe.PoseCloud` to the goal: a cone that constrains where the tool points (the approach axis), while **roll about that axis is free**. `orientation_tolerance_deg` sets the cone's half-angle; `position_tolerance_mm` sets the per-axis positional leeway, applied as a **box along the goal frame's axes, not a radius** — worst-case corner deviation is `sqrt(3)` times the value (~`1.73mm` at the default `1.0`).
