@@ -79,3 +79,21 @@ func TestSyncWriteLandsInTheRegisterStore(t *testing.T) {
 		t.Fatalf("servo 3 acc: got %#x, want 0x33", got[0])
 	}
 }
+
+// SetGoals is a SYNC_WRITE starting at RegAcceleration, so a goal write must be countable
+// per servo at that address the way an individual WRITE is.
+func TestFakeTransportWriteCountCountsSyncWritesByStartAddress(t *testing.T) {
+	ft := NewFakeTransport()
+	bus, err := feetech.NewBus(feetech.BusConfig{Transport: ft, Timeout: 50 * time.Millisecond})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = bus.Close() })
+
+	data := map[int][]byte{1: {0, 0, 8, 0, 0, 0, 0}, 2: {0, 0, 8, 0, 0, 0, 0}}
+	require.NoError(t, bus.SyncWrite(context.Background(), feetech.RegAcceleration.Address, 7, data))
+	require.NoError(t, bus.SyncWrite(context.Background(), feetech.RegAcceleration.Address, 7, data))
+
+	assert.Equal(t, 2, ft.WriteCount(1, feetech.RegAcceleration.Address))
+	assert.Equal(t, 2, ft.WriteCount(2, feetech.RegAcceleration.Address))
+	assert.Zero(t, ft.WriteCount(3, feetech.RegAcceleration.Address), "servo 3 was not in the sync write")
+	assert.Zero(t, ft.WriteCount(1, feetech.RegGoalPosition.Address), "only the start address is keyed")
+}
