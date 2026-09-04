@@ -41,6 +41,8 @@ func TestClockZeroValueIsTheRealClock(t *testing.T) {
 	assert.False(t, c.Time().Before(before))
 	// A deadline already past returns at once, and reports nil on a live ctx.
 	require.NoError(t, c.WaitUntil(context.Background(), before))
+	// The timer path, which production takes on every point.
+	require.NoError(t, c.WaitUntil(context.Background(), time.Now().Add(time.Millisecond)))
 }
 
 func TestClockWaitUntilHonoursCancel(t *testing.T) {
