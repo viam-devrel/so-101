@@ -65,8 +65,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer func() { _ = machine.Close(context.Background()) }()
-	a, err := arm.FromRobot(machine, *armName)
+	a, err := arm.FromProvider(machine, *armName)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -103,6 +102,7 @@ func main() {
 
 	fmt.Printf("%d points at %.0f Hz, %d acks, trajectory %.2fs, wall %.2fs, err=%v\n",
 		len(points), rate, acks, points[len(points)-1].Time.Seconds(), time.Since(started).Seconds(), err)
+	_ = machine.Close(context.Background())
 	if err != nil {
 		os.Exit(1)
 	}
@@ -115,7 +115,7 @@ func densify(frames [][]float64, fromHz, toHz float64) ([][]float64, float64) {
 		return frames, fromHz
 	}
 	total := float64(len(frames)-1) / fromHz
-	n := int(math.Floor(total*toHz+1e-9)) + 1
+	n := int(math.Ceil(total*toHz-1e-9)) + 1
 	out := make([][]float64, n)
 	last := len(frames) - 1
 	for k := range out {
