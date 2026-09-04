@@ -212,8 +212,11 @@ func (h *ControllerHandle) MoveServoRaw(ctx context.Context, id, raw int) error 
 }
 
 // ServoPositionPercent reads one servo's position as both a percentage of its calibrated
-// range and the underlying raw tick value.
-func (h *ControllerHandle) ServoPositionPercent(ctx context.Context, id int) (percent float64, rawOut int, err error) {
+// range and the underlying raw tick value. condition carries any servo condition flags that
+// accompanied the reading; it does not make the reading invalid.
+func (h *ControllerHandle) ServoPositionPercent(
+	ctx context.Context, id int,
+) (percent float64, rawOut int, condition feetech.StatusError, err error) {
 	err = h.withSessionRead(func(sess *busSession) error {
 		cs, ok := sess.servos[id]
 		if !ok {
@@ -225,7 +228,7 @@ func (h *ControllerHandle) ServoPositionPercent(ctx context.Context, id int) (pe
 		}
 
 		raw, err := servo.Position(ctx)
-		if err != nil {
+		if condition, err = tolerateCondition(err); err != nil {
 			return fmt.Errorf("failed to read position for servo %d: %w", id, err)
 		}
 		rawOut = raw
@@ -241,7 +244,7 @@ func (h *ControllerHandle) ServoPositionPercent(ctx context.Context, id int) (pe
 		percent = normalizedToPercent(cal, normalized)
 		return nil
 	})
-	return percent, rawOut, err
+	return percent, rawOut, condition, err
 }
 
 // StopServo halts a single servo. Unlike Stop, it leaves every other servo on the bus
@@ -411,7 +414,7 @@ func (h *ControllerHandle) WaitForServosToStop(ctx context.Context, servoIDs []i
 	defer ticker.Stop()
 
 	for {
-		moving, err := h.AnyServoMoving(ctx, ids)
+		moving, _, err := h.AnyServoMoving(ctx, ids)
 		if err != nil {
 			return fmt.Errorf("failed to read moving state for servos %v: %w", ids, err)
 		}
@@ -676,12 +679,15 @@ func (h *ControllerHandle) GetJointPositionsAndMovingForServos(
 	return out, moving, err
 }
 
-// AnyServoMoving reports whether any of the given servos is still executing a move,
-// in one SyncRead of the Moving register rather than a read per servo.
-func (h *ControllerHandle) AnyServoMoving(ctx context.Context, ids []int) (moving bool, err error) {
+// AnyServoMoving reports whether any of the given servos is still executing a move, in one
+// SyncRead of the Moving register rather than a read per servo. condition is the OR of any
+// condition flags those servos set; it does not make the answer invalid.
+func (h *ControllerHandle) AnyServoMoving(
+	ctx context.Context, ids []int,
+) (moving bool, condition feetech.StatusError, err error) {
 	err = h.withSessionRead(func(sess *busSession) error {
 		data, err := sess.bus.SyncRead(ctx, feetech.RegMoving.Address, int(feetech.RegMoving.Size), ids)
-		if err != nil {
+		if condition, err = tolerateCondition(err); err != nil {
 			return err
 		}
 		for _, id := range ids {
@@ -692,7 +698,7 @@ func (h *ControllerHandle) AnyServoMoving(ctx context.Context, ids []int) (movin
 		}
 		return nil
 	})
-	return moving, err
+	return moving, condition, err
 }
 
 // PingServo pings one servo and returns its model number.

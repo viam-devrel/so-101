@@ -7,6 +7,8 @@ import (
 	"context"
 	"fmt"
 	"strings"
+
+	"github.com/hipsterbrown/feetech-servo/feetech"
 )
 
 // The servo_* DoCommand family. The gripper owns no serial connection: it drives its servo
@@ -28,10 +30,13 @@ const (
 type ServoOps interface {
 	MoveServoPercent(ctx context.Context, id int, percent float64, speed int) error
 	MoveServoRaw(ctx context.Context, id, raw int) error
-	ServoPositionPercent(ctx context.Context, id int) (percent float64, raw int, err error)
+	// ServoPositionPercent reports the opening as a percentage. condition carries any servo
+	// condition flags (overload, overheat) that accompanied an otherwise-good reading -- a
+	// condition does NOT mean the value is invalid.
+	ServoPositionPercent(ctx context.Context, id int) (percent float64, raw int, condition feetech.StatusError, err error)
 	StopServo(ctx context.Context, id int) error
 	WaitForServosToStop(ctx context.Context, ids []int, timeoutMs int) error
-	AnyServoMoving(ctx context.Context, ids []int) (bool, error)
+	AnyServoMoving(ctx context.Context, ids []int) (moving bool, condition feetech.StatusError, err error)
 }
 
 // IsServoCommand reports whether a DoCommand belongs to this family, so the arm can route
@@ -170,7 +175,7 @@ func HandleServoCommand(
 		return map[string]any{"percent": percent}, nil
 
 	case CmdServoPosition:
-		percent, raw, err := ops.ServoPositionPercent(ctx, id)
+		percent, raw, _, err := ops.ServoPositionPercent(ctx, id)
 		if err != nil {
 			return nil, err
 		}
@@ -183,7 +188,7 @@ func HandleServoCommand(
 		return map[string]any{}, nil
 
 	case CmdServoMoving:
-		moving, err := ops.AnyServoMoving(ctx, []int{id})
+		moving, _, err := ops.AnyServoMoving(ctx, []int{id})
 		if err != nil {
 			return nil, err
 		}

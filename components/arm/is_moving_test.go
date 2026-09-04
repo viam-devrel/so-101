@@ -66,3 +66,15 @@ func TestHardwareArmIsMovingReturnsFalseWhenAllStopped(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, moving)
 }
+
+// A hot or clamped joint answers with a condition flag; the arm must still know it is moving.
+func TestHardwareArmIsMovingSurvivesAConditionFlag(t *testing.T) {
+	ft := testfake.NewFakeTransport()
+	ft.SetRegister(3, feetech.RegMoving.Address, []byte{1})
+	s := &so101{controller: testArmHandle(t, ft), armServoIDs: []int{1, 2, 3, 4, 5}}
+	ft.SetStatus(3, feetech.ErrOverload)
+
+	moving, err := s.IsMoving(context.Background())
+	require.NoError(t, err)
+	assert.True(t, moving)
+}
