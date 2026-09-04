@@ -417,6 +417,16 @@ func (s *simulatedSO101) MoveThroughJointPositions(
 	return nil
 }
 
+// MoveThroughJointPositionsStreamed is not implemented yet.
+func (s *simulatedSO101) MoveThroughJointPositionsStreamed(
+	ctx context.Context,
+	batches <-chan []arm.TrajectoryPoint,
+	responses chan<- arm.Response,
+	extra map[string]interface{},
+) error {
+	return errors.ErrUnsupported
+}
+
 // JointPositions returns the current joint positions in radians.
 func (s *simulatedSO101) JointPositions(ctx context.Context, extra map[string]interface{}) ([]referenceframe.Input, error) {
 	s.mu.Lock()
