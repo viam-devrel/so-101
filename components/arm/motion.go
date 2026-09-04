@@ -36,7 +36,8 @@ func (s *so101) anyServoMoving(ctx context.Context) (bool, error) {
 	if s.servosMoving != nil {
 		return s.servosMoving(ctx)
 	}
-	return s.controller.AnyServoMoving(ctx, s.armServoIDs)
+	moving, _, err := s.controller.AnyServoMoving(ctx, s.armServoIDs)
+	return moving, err
 }
 
 // readArmState returns joint positions and whether any arm servo is still executing its
@@ -588,5 +589,6 @@ func (s *so101) IsMoving(ctx context.Context) (bool, error) {
 	// The arm owns the bus, so a read error is the answer and propagates. The gripper
 	// deliberately does the opposite (it may be talking to a remote arm) -- don't
 	// "fix" one to match the other; see so101Gripper.IsMoving.
-	return s.controller.AnyServoMoving(ctx, s.armServoIDs)
+	moving, _, err := s.controller.AnyServoMoving(ctx, s.armServoIDs)
+	return moving, err
 }

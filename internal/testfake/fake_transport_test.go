@@ -79,3 +79,24 @@ func TestSyncWriteLandsInTheRegisterStore(t *testing.T) {
 		t.Fatalf("servo 3 acc: got %#x, want 0x33", got[0])
 	}
 }
+
+// An overloaded STS3215 answers normally with its status byte set. The fake must produce the
+// same shape so the controller's tolerance can be tested without hardware.
+func TestFakeTransportReportsAConditionFlagWithValidData(t *testing.T) {
+	ft := NewFakeTransport()
+	ft.SetRegister(2, feetech.RegPresentPosition.Address, EncodeWordLE(1500))
+	ft.SetStatus(2, feetech.ErrOverload)
+	bus, err := feetech.NewBus(feetech.BusConfig{Transport: ft, Timeout: 50 * time.Millisecond})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = bus.Close() })
+
+	data, err := bus.ReadRegister(context.Background(), 2, feetech.RegPresentPosition.Address, 2)
+	flags, ok := feetech.ConditionStatus(err)
+	require.True(t, ok, "the flag must arrive as a condition, not a failure: %v", err)
+	assert.Equal(t, feetech.ErrOverload, flags)
+	assert.Equal(t, 1500, int(bus.Protocol().DecodeWord(data)), "the payload must still be live")
+
+	// Unflagged servos on the same bus are unaffected.
+	_, err = bus.ReadRegister(context.Background(), 1, feetech.RegPresentPosition.Address, 2)
+	require.NoError(t, err)
+}
