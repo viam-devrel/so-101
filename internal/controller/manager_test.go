@@ -293,3 +293,29 @@ func TestWaitForServosToStopEndsOnAStoppedServoDespiteACondition(t *testing.T) {
 	require.NoError(t, h.WaitForServosToStop(context.Background(), []int{6}, 5000))
 	assert.Less(t, time.Since(start), 2*time.Second, "must not wait out the 5s timeout")
 }
+
+// A clamped gripper answers a ping with its model number and an overload flag; bring-up must
+// not treat that as a dead servo.
+func TestPingSurvivesAConditionFlag(t *testing.T) {
+	ctx := context.Background()
+	ft := testfake.NewFakeTransport()
+	h := testHandle(t, ft)
+	ft.SetStatus(6, feetech.ErrOverload)
+
+	require.NoError(t, h.Ping(ctx), "Ping over all servos must succeed with servo 6 overloaded")
+
+	model, err := h.PingServo(ctx, 6)
+	require.NoError(t, err)
+	assert.Equal(t, testfake.FakeModelNumber, model, "the model number is valid alongside the flag")
+}
+
+func TestPingStillFailsOnARejectionFlag(t *testing.T) {
+	ctx := context.Background()
+	ft := testfake.NewFakeTransport()
+	h := testHandle(t, ft)
+	ft.SetStatus(6, feetech.ErrChecksum)
+
+	require.Error(t, h.Ping(ctx))
+	_, err := h.PingServo(ctx, 6)
+	require.Error(t, err)
+}

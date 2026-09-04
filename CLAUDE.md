@@ -579,7 +579,7 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
   failures and request-rejection flags still error. `servocmd` carries the flags in a
   `condition` response field rather than an error because a typed error does not survive the
   DoCommand boundary to a remote arm, and as text because a protobuf `Struct` mangles numbers.
-  Every position, moving and load read path in the controller routes the decision through
-  `tolerateCondition`; a new read path must too. Since feetech-servo v0.7.1 *writes* also
-  return nil on condition-only flags, nothing on main can infer "overloaded" from a write
-  failure.
+  Every position, moving, load and ping read path in the controller routes the decision
+  through `tolerateCondition`; a new read path must too. Since feetech-servo v0.7.1 *writes*
+  also return nil on condition-only flags, nothing on main can infer "overloaded" from a
+  write failure.

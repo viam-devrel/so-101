@@ -438,8 +438,13 @@ func (h *ControllerHandle) WaitForServosToStop(ctx context.Context, servoIDs []i
 func (h *ControllerHandle) Ping(ctx context.Context) error {
 	return h.withSessionRead(func(sess *busSession) error {
 		for id, servo := range sess.servos {
-			if _, err := servo.Ping(ctx); err != nil {
+			_, err := servo.Ping(ctx)
+			flags, err := tolerateCondition(err)
+			if err != nil {
 				return fmt.Errorf("ping failed for servo %d: %w", id, err)
+			}
+			if flags != 0 {
+				h.logger.Warnf("servo %d answered ping with condition %v", id, flags)
 			}
 		}
 		return nil
@@ -711,7 +716,7 @@ func (h *ControllerHandle) PingServo(ctx context.Context, id int) (model int, er
 			return fmt.Errorf("servo %d not available", id)
 		}
 		m, err := cs.Ping(ctx)
-		if err != nil {
+		if _, err = tolerateCondition(err); err != nil {
 			return err
 		}
 		model = m
