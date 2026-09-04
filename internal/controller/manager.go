@@ -444,7 +444,7 @@ func (h *ControllerHandle) Ping(ctx context.Context) error {
 				return fmt.Errorf("ping failed for servo %d: %w", id, err)
 			}
 			if flags != 0 {
-				h.logger.Warnf("servo %d answered ping with condition %v", id, flags)
+				h.logger.Warnf("servo %d answered ping with %v", id, flags)
 			}
 		}
 		return nil
