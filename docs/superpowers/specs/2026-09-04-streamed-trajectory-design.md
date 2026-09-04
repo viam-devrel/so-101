@@ -55,16 +55,17 @@ Same envelope as `MoveThroughJointPositions`: `opMgr.New(ctx)`, `exitManualLocke
    streamed write path is `Speed 0 / Acc 0` (unbounded), so it must never be handed a
    large position error (CLAUDE.md, "It removes a bound"). Then `start = now()` via a
    `now func() time.Time` seam.
-2. **Every point** (including `p0` after the gate): require `p.Time > prev.Time` (error
-   before writing *this* point; earlier points are legitimately already on the bus);
+2. **Every point** (including `p0` after the gate): from the second point on, require
+   `p.Time > prev.Time` (error before writing *this* point; earlier points are
+   legitimately already on the bus);
    `clampPositions`; sleep until `start + p.Time` via a `sleepUntil(ctx, t) error` seam
    (returns `ctx.Err()` on cancel); write with the existing
    `moveJointsUniform(ctx, clamped, speed, accel, streamed=true, wait=false)` — one
    `SetGoals` packet, no coordination read. A point whose time has already passed is
    written immediately, never dropped: a later goal supersedes it in ~1 ms and dropping
    would need a policy nothing has measured yet.
-3. **Per batch:** after its last point, `select { case responses <- arm.Response{}:
-   case <-ctx.Done(): return ctx.Err() }`.
+3. **Per non-empty batch:** after its last point, `select { case responses <-
+   arm.Response{}: case <-ctx.Done(): return ctx.Err() }`. An empty batch gets no ack.
 4. **End:** when `batches` closes, `WaitForServosToStop(ctx, armServoIDs,
    servo.MaxMoveTimeoutMs)` so completion means "arrived", return nil.
 5. `Constraints` are ignored (the streamed contract is that the producer shapes the
@@ -78,7 +79,8 @@ Same envelope as `MoveThroughJointPositions`: `opMgr.New(ctx)`, `exitManualLocke
 
 ### Simulated arm (`components/simulated/simulated.go`)
 
-Same loop shape. Per point: sleep until `start + p.Time`, then set `s.operation` to a new
+Same loop shape and the same `now`/`sleepUntil` seams (so the manual-pump test does not
+sleep real trajectory time). Per point: sleep until `start + p.Time`, then set `s.operation` to a new
 `simOperation{targetInputs}` **without** waiting for `done`; the existing 10 ms tick loop
 interpolates toward it at the configured speed. Ack per batch. After `batches` closes,
 wait for the final operation's `done`/`stopped`. No `Time` validation beyond the hardware
@@ -106,8 +108,12 @@ exercise this on hardware today.
 Use `accelTestArm`/`FakeTransport`, a `now` seam pinned to a fixed instant, and a
 `sleepUntil` seam pinned to "return immediately, record the deadline". Pin:
 
-- one bus packet per point after the gate (`PacketCount()` delta), zero reads inside the
-  loop;
+- one goal write per point after the gate (`WriteCount(id, RegAcceleration)` — the
+  `SetGoals` sync-write address — per servo), with the speed/acc register bytes `0`
+  (streamed) rather than the non-zero values a profiled write leaves; zero reads inside
+  the loop (`PacketCount()` delta equals the write count). Note `PacketCount()` counts
+  reads too, and a tripped gate's `moveJoints(wait=true)` adds `WaitForServosToStop`
+  polls, so gate assertions count goal writes, not packets;
 - recorded deadlines equal the pinned `now + p.Time`, in order;
 - gate: first point within 5° → no profiled move; outside → exactly one profiled
   `moveJoints` (its coordination read + write) before streaming; an empty first batch
@@ -115,7 +121,7 @@ Use `accelTestArm`/`FakeTransport`, a `now` seam pinned to a fixed instant, and 
 - one `Response{}` per non-empty batch;
 - ctx cancel mid-stream returns `ctx.Err()` and writes no further goal;
 - non-zero first `Time` → error with zero bus packets; non-increasing `Time` at point k →
-  error with exactly k packets written;
+  error with exactly k goal writes;
 - simulated: run the streamed call in a goroutine with `SimulateTime` off and pump
   `updateForTime` manually (the existing test style), asserting `currInputs` converge to
   the last point and one ack per non-empty batch.
