@@ -18,6 +18,11 @@ const streamStartGapDeg = 5.0
 // MoveThroughJointPositionsStreamed writes each point as an unbounded goal at start + Time.
 // The producer owns the timing: a late point is written immediately, never dropped, and
 // Constraints are ignored. See docs/arm.md, "Streaming trajectories".
+//
+// Only the FIRST point is gated. A large jump between consecutive points, or a schedule
+// slip that lets the goal race ahead of the arm, reaches the servos unbounded; no policy
+// for either has been measured yet -- see docs/arm.md, "Streaming trajectories". extra is
+// accepted and ignored.
 func (s *so101) MoveThroughJointPositionsStreamed(
 	ctx context.Context,
 	batches <-chan []arm.TrajectoryPoint,
@@ -96,8 +101,8 @@ func (s *so101) MoveThroughJointPositionsStreamed(
 }
 
 // closeStreamStartGap runs one blocking profiled move to `target` when any joint is more than
-// streamStartGapDeg away. The streamed path removes every bound, so it must never be handed a
-// large position error.
+// streamStartGapDeg away. The streamed path removes every bound, so the FIRST point must not
+// hand it a large position error.
 func (s *so101) closeStreamStartGap(ctx context.Context, target []float64, speed, accel float64) error {
 	current, err := s.currentJoints(ctx)
 	if err != nil {
