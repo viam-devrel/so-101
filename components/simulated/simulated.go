@@ -23,6 +23,7 @@ import (
 
 	"so_arm/internal/geometry"
 	"so_arm/internal/planning"
+	"so_arm/internal/servo"
 )
 
 // SO101SimulatedModel is the model triplet for the hardware-free simulated SO-101 arm.
@@ -162,6 +163,9 @@ type simulatedSO101 struct {
 	// goalCloud is the resolved approach-axis tolerance pair. Set once in
 	// newSimulatedSO101 and never mutated (resource.AlwaysRebuild), so it needs no mutex.
 	goalCloud planning.GoalCloudConfig
+
+	// clock schedules streamed trajectory points. Zero value is the real clock; tests only.
+	clock servo.Clock
 
 	// lifetime management
 	closed     atomic.Bool
@@ -364,6 +368,14 @@ func (s *simulatedSO101) MoveToPosition(ctx context.Context, pose spatialmath.Po
 func (s *simulatedSO101) MoveToJointPositions(
 	ctx context.Context, positions []referenceframe.Input, extra map[string]interface{},
 ) error {
+	if err := s.startMove(ctx, positions); err != nil {
+		return err
+	}
+	return s.awaitOperation(ctx)
+}
+
+// startMove validates positions and replaces the in-flight operation without waiting.
+func (s *simulatedSO101) startMove(ctx context.Context, positions []referenceframe.Input) error {
 	if len(positions) != len(s.model.DoF()) {
 		return fmt.Errorf("expected %d joint positions for the SO-101 arm, got %d",
 			len(s.model.DoF()), len(positions))
@@ -378,8 +390,11 @@ func (s *simulatedSO101) MoveToJointPositions(
 	s.mu.Lock()
 	s.operation = simOperation{targetInputs: target}
 	s.mu.Unlock()
+	return nil
+}
 
-	// MoveToJointPositions blocks until the movement completes or is canceled.
+// awaitOperation blocks until the in-flight operation completes, is stopped, or ctx ends.
+func (s *simulatedSO101) awaitOperation(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
@@ -415,16 +430,6 @@ func (s *simulatedSO101) MoveThroughJointPositions(
 		}
 	}
 	return nil
-}
-
-// MoveThroughJointPositionsStreamed is not implemented yet.
-func (s *simulatedSO101) MoveThroughJointPositionsStreamed(
-	ctx context.Context,
-	batches <-chan []arm.TrajectoryPoint,
-	responses chan<- arm.Response,
-	extra map[string]interface{},
-) error {
-	return errors.ErrUnsupported
 }
 
 // JointPositions returns the current joint positions in radians.
