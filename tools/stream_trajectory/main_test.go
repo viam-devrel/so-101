@@ -17,6 +17,11 @@ func TestDensifyInterpolatesLinearlyAndKeepsEndpoints(t *testing.T) {
 	assert.InDeltaSlice(t, []float64{0.25, 0.5}, out[1], 1e-9)
 	assert.InDeltaSlice(t, []float64{1, 2}, out[4], 1e-9)
 	assert.Equal(t, []float64{2, 4}, out[8])
+
+	// Non-integer ratio: the last sample must still be the last frame, not a near-miss.
+	out, rate = densify([][]float64{{0}, {1}, {2}, {3}}, 10, 25)
+	assert.Equal(t, 25.0, rate)
+	assert.Equal(t, []float64{3}, out[len(out)-1])
 }
 
 func TestDensifyIsANoOpAtOrBelowTheSourceRate(t *testing.T) {
