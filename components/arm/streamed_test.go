@@ -53,8 +53,8 @@ func pt(at time.Duration, q float64) arm.TrajectoryPoint {
 }
 
 // runStream owns both channels the way the rdk server does: feeds batches in order, closes
-// the input, drains acks. Returns the call's error and the ack count.
-func runStream(ctx context.Context, s *so101, batches ...[]arm.TrajectoryPoint) (error, int) {
+// the input, drains acks. Returns the ack count and the call's error.
+func runStream(ctx context.Context, s *so101, batches ...[]arm.TrajectoryPoint) (int, error) {
 	in := make(chan []arm.TrajectoryPoint)
 	out := make(chan arm.Response)
 	go func() {
@@ -78,7 +78,7 @@ func runStream(ctx context.Context, s *so101, batches ...[]arm.TrajectoryPoint) 
 	err := s.MoveThroughJointPositionsStreamed(ctx, in, out, nil)
 	close(out)
 	<-drained
-	return err, acks
+	return acks, err
 }
 
 func assertGoalWrites(t *testing.T, ft *testfake.FakeTransport, s *so101, want int, msgAndArgs ...interface{}) {
@@ -108,7 +108,7 @@ func TestStreamedWritesOneUnboundedGoalPerPoint(t *testing.T) {
 	s, deadlines := streamTestArm(t, ft, zeros)
 
 	before := ft.PacketCount()
-	err, acks := runStream(context.Background(), s,
+	acks, err := runStream(context.Background(), s,
 		[]arm.TrajectoryPoint{pt(0, 0.01), pt(10*time.Millisecond, 0.02), pt(20*time.Millisecond, 0.03)})
 	moved := ft.PacketCount() - before
 	require.NoError(t, err)
@@ -129,7 +129,7 @@ func TestStreamedGateProfilesALargeStartGap(t *testing.T) {
 	s, deadlines := streamTestArm(t, ft, zeros)
 
 	before := ft.PacketCount()
-	err, acks := runStream(context.Background(), s, []arm.TrajectoryPoint{pt(0, 0.3)}) // ~17 deg
+	acks, err := runStream(context.Background(), s, []arm.TrajectoryPoint{pt(0, 0.3)}) // ~17 deg
 	moved := ft.PacketCount() - before
 	require.NoError(t, err)
 
@@ -140,11 +140,25 @@ func TestStreamedGateProfilesALargeStartGap(t *testing.T) {
 	assert.Equal(t, []time.Time{streamEpoch}, deadlines(), "the clock starts after the gate")
 }
 
+// Only the first point is gated: a large jump between consecutive points is written
+// unbounded, with no read in between. Deliberate and unmeasured -- see the method comment.
+func TestStreamedDoesNotGateAMidStreamJump(t *testing.T) {
+	ft := testfake.NewFakeTransport()
+	s, _ := streamTestArm(t, ft, zeros)
+
+	before := ft.PacketCount()
+	_, err := runStream(context.Background(), s,
+		[]arm.TrajectoryPoint{pt(0, 0.01), pt(10*time.Millisecond, 1.0)}) // ~57 deg jump
+	require.NoError(t, err)
+	assertGoalWrites(t, ft, s, 2)
+	assert.Equal(t, 2+1, ft.PacketCount()-before, "two goal writes and the final stop poll; no gate read")
+}
+
 func TestStreamedEmptyBatchesGetNoAckAndDoNotSkipTheGate(t *testing.T) {
 	ft := testfake.NewFakeTransport()
 	s, _ := streamTestArm(t, ft, zeros)
 
-	err, acks := runStream(context.Background(), s,
+	acks, err := runStream(context.Background(), s,
 		[]arm.TrajectoryPoint{},
 		[]arm.TrajectoryPoint{pt(0, 0.3)},
 		[]arm.TrajectoryPoint{},
@@ -160,7 +174,7 @@ func TestStreamedRejectsNonZeroFirstTime(t *testing.T) {
 	s, _ := streamTestArm(t, ft, zeros)
 
 	before := ft.PacketCount()
-	err, acks := runStream(context.Background(), s, []arm.TrajectoryPoint{pt(10*time.Millisecond, 0.01)})
+	acks, err := runStream(context.Background(), s, []arm.TrajectoryPoint{pt(10*time.Millisecond, 0.01)})
 	require.Error(t, err)
 	assert.Zero(t, acks)
 	assert.Zero(t, ft.PacketCount()-before, "rejected before anything reached the bus")
@@ -172,7 +186,7 @@ func TestStreamedRejectsNonIncreasingTime(t *testing.T) {
 			ft := testfake.NewFakeTransport()
 			s, _ := streamTestArm(t, ft, zeros)
 
-			err, _ := runStream(context.Background(), s,
+			_, err := runStream(context.Background(), s,
 				[]arm.TrajectoryPoint{pt(0, 0.01), pt(10*time.Millisecond, 0.02), pt(bad, 0.03)})
 			require.Error(t, err)
 			assertGoalWrites(t, ft, s, 2, "the two valid points were already on the bus")
@@ -194,7 +208,7 @@ func TestStreamedCancelMidStreamWritesNoFurtherGoal(t *testing.T) {
 		return ctx.Err()
 	}
 
-	err, _ := runStream(ctx, s,
+	_, err := runStream(ctx, s,
 		[]arm.TrajectoryPoint{pt(0, 0.01), pt(10*time.Millisecond, 0.02), pt(20*time.Millisecond, 0.03)})
 	assert.True(t, errors.Is(err, context.Canceled), "got %v", err)
 	assertGoalWrites(t, ft, s, 1)
@@ -211,7 +225,7 @@ func TestStreamedStopEndsAStreamParkedOnItsProducer(t *testing.T) {
 	errCh := make(chan error, 1)
 	go func() { errCh <- s.MoveThroughJointPositionsStreamed(context.Background(), in, out, nil) }()
 
-	time.Sleep(20 * time.Millisecond)
+	require.Eventually(t, s.opMgr.OpRunning, time.Second, time.Millisecond)
 	require.NoError(t, s.Stop(context.Background(), nil))
 
 	select {

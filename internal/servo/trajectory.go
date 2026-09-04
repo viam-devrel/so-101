@@ -42,7 +42,7 @@ func (c Clock) WaitUntil(ctx context.Context, t time.Time) error {
 	if c.SleepUntil != nil {
 		return c.SleepUntil(ctx, t)
 	}
-	d := time.Until(t)
+	d := t.Sub(c.Time())
 	if d <= 0 {
 		return ctx.Err()
 	}
