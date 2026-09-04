@@ -233,7 +233,7 @@ func TestServoReadsStillFailOnARejectionFlag(t *testing.T) {
 	ft.SetStatus(6, feetech.ErrChecksum)
 
 	_, _, _, err := h.ServoPositionPercent(ctx, 6)
-	require.Error(t, err)
+	require.ErrorContains(t, err, "failed to read position")
 	_, _, err = h.AnyServoMoving(ctx, []int{6})
 	require.Error(t, err)
 }

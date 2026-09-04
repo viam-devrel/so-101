@@ -62,5 +62,8 @@ func (f *FakeServoOps) WaitForServosToStop(_ context.Context, ids []int, timeout
 
 func (f *FakeServoOps) AnyServoMoving(_ context.Context, ids []int) (bool, feetech.StatusError, error) {
 	f.MovingIDs = ids
-	return f.Moving, f.Condition, f.MovingErr
+	if f.MovingErr != nil {
+		return false, 0, f.MovingErr
+	}
+	return f.Moving, f.Condition, nil
 }

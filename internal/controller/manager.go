@@ -228,6 +228,7 @@ func (h *ControllerHandle) ServoPositionPercent(
 		}
 
 		raw, err := servo.Position(ctx)
+		// `=`, not `:=`: condition is the outer named return, err the closure-local.
 		if condition, err = tolerateCondition(err); err != nil {
 			return fmt.Errorf("failed to read position for servo %d: %w", id, err)
 		}
@@ -687,6 +688,7 @@ func (h *ControllerHandle) AnyServoMoving(
 ) (moving bool, condition feetech.StatusError, err error) {
 	err = h.withSessionRead(func(sess *busSession) error {
 		data, err := sess.bus.SyncRead(ctx, feetech.RegMoving.Address, int(feetech.RegMoving.Size), ids)
+		// `=`, not `:=`: condition is the outer named return, err the closure-local.
 		if condition, err = tolerateCondition(err); err != nil {
 			return err
 		}
