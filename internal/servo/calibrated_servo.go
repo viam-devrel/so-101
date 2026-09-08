@@ -22,10 +22,7 @@ const (
 	NormModeDegrees   = 3 // Normalized to -180° to +180° range
 )
 
-// HomingTick is the raw position the calibration workflow centers position_offset on, so it
-// reads back as the pose the user homed at. NormModeDegrees uses it as 0°, not the
-// RangeMin/RangeMax midpoint, so the kinematic zero stays pinned to that pose regardless of
-// how asymmetric the later-recorded range turns out to be.
+// HomingTick is NormModeDegrees's 0°: the tick setHomingPosition centers position_offset on.
 const HomingTick = 2047
 
 // MotorCalibration defines calibration parameters for a servo motor
@@ -64,7 +61,6 @@ func (c *MotorCalibration) Normalize(rawValue int) (float64, error) {
 		normalized = math.Max(-100, math.Min(100, normalized))
 
 	case NormModeDegrees:
-		// Zero is the homing tick, not the range midpoint -- see HomingTick.
 		maxResolution := float64(4095)
 		normalized = (float64(rawValue) - HomingTick) * 360 / maxResolution
 
@@ -131,9 +127,8 @@ func (c *MotorCalibration) Denormalize(normalizedValue float64) (int, error) {
 		rawValue = int(math.Round(center + clamped/100.0*halfRange))
 
 	case NormModeDegrees:
-		// Zero is the homing tick, not the range midpoint -- see HomingTick.
 		maxResolution := float64(4095)
-		rawValue = int((adjustedValue * maxResolution / 360) + HomingTick)
+		rawValue = int(math.Round(adjustedValue*maxResolution/360 + HomingTick))
 
 	default:
 		return 0, fmt.Errorf("unknown normalization mode: %d", c.NormMode)

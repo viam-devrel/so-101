@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"strings"
 	"time"
 
 	"go.viam.com/rdk/components/arm"
@@ -57,33 +58,19 @@ func (s *so101) readArmState(ctx context.Context) ([]float64, bool, error) {
 	return s.controller.GetJointPositionsAndMovingForServos(ctx, s.armServoIDs)
 }
 
-// calculateJointLimits derives each arm joint's radian limits from its recorded range.
-func (s *so101) calculateJointLimits() [][2]float64 {
-	calibration := s.controller.GetCalibration()
-	return jointLimitsFromCalibration([]*servo.MotorCalibration{
-		calibration.ShoulderPan,
-		calibration.ShoulderLift,
-		calibration.ElbowFlex,
-		calibration.WristFlex,
-		calibration.WristRoll,
-	})
-}
-
-// jointLimitsFromCalibration runs RangeMin/RangeMax through the same Normalize the joint
-// positions use, so the limits share their zero (the homing tick) and drive-mode sign. A
-// missing or unusable calibration falls back to a full turn.
-func jointLimitsFromCalibration(cals []*servo.MotorCalibration) [][2]float64 {
-	limits := make([][2]float64, len(cals))
-	for i, cal := range cals {
+// jointLimitsFor runs each servo's RangeMin/RangeMax through the same Normalize its
+// positions use, so the limits share their zero (HomingTick) and drive-mode sign. Anything
+// but a degrees calibration falls back to a full turn.
+func jointLimitsFor(cal controller.SO101FullCalibration, ids []int) [][2]float64 {
+	limits := make([][2]float64, len(ids))
+	for i, id := range ids {
 		limits[i] = [2]float64{-math.Pi, math.Pi}
-		if cal == nil {
+		mc := cal.GetMotorCalibrationByID(id)
+		if mc == nil || mc.NormMode != servo.NormModeDegrees {
 			continue
 		}
-		lo, errLo := cal.Normalize(cal.RangeMin)
-		hi, errHi := cal.Normalize(cal.RangeMax)
-		if errLo != nil || errHi != nil {
-			continue
-		}
+		lo, _ := mc.Normalize(mc.RangeMin)
+		hi, _ := mc.Normalize(mc.RangeMax)
 		lo, hi = lo*math.Pi/180, hi*math.Pi/180
 		if lo > hi {
 			lo, hi = hi, lo
@@ -148,26 +135,28 @@ func (s *so101) MoveToPosition(ctx context.Context, pose spatialmath.Pose, extra
 
 // clampPositions clamps joint inputs (already in radians) to each joint's calibrated
 // limits, warning on out-of-range values.
-func (s *so101) clampPositions(positions []referenceframe.Input) ([]float64, error) {
+func (s *so101) clampPositions(positions []referenceframe.Input, quiet bool) ([]float64, bool, error) {
 	if len(positions) != len(s.armServoIDs) {
-		return nil, fmt.Errorf("expected %d joint positions for SO-101 arm, got %d", len(s.armServoIDs), len(positions))
+		return nil, false, fmt.Errorf("expected %d joint positions for SO-101 arm, got %d", len(s.armServoIDs), len(positions))
 	}
 
-	values := make([]float64, len(positions))
-	copy(values, positions) // referenceframe.Input is an alias for float64
+	jointLimits := jointLimitsFor(s.controller.GetCalibration(), s.armServoIDs)
 
-	jointLimits := s.calculateJointLimits()
-
-	clamped := make([]float64, len(values))
-	for i, pos := range values {
+	clamped := make([]float64, len(positions))
+	var hits []string
+	for i, pos := range positions {
 		min, max := jointLimits[i][0], jointLimits[i][1]
-		if pos < min || pos > max {
-			s.logger.Warnf("Joint %d position %.3f rad (%.1f°) out of range [%.3f, %.3f] rad ([%.1f°, %.1f°]), clamping",
-				s.armServoIDs[i], pos, pos*180/math.Pi, min, max, min*180/math.Pi, max*180/math.Pi)
+		clamped[i] = math.Max(min, math.Min(max, float64(pos)))
+		if clamped[i] != float64(pos) {
+			hits = append(hits, fmt.Sprintf("servo %d %.1f° -> [%.1f°, %.1f°]",
+				s.armServoIDs[i], pos*180/math.Pi, min*180/math.Pi, max*180/math.Pi))
 		}
-		clamped[i] = math.Max(min, math.Min(max, pos))
 	}
-	return clamped, nil
+	if len(hits) > 0 && !quiet {
+		s.logger.Warnf("clamped to calibrated joint limits; the executed path will deviate from the planned one: %s",
+			strings.Join(hits, "; "))
+	}
+	return clamped, len(hits) > 0, nil
 }
 
 // moveJoints commands a coordinated move from `from` to `to` (both radians, per arm servo),
@@ -386,7 +375,9 @@ func (s *so101) MoveToJointPositions(ctx context.Context, positions []referencef
 	s.isMoving.Store(true)
 	defer s.isMoving.Store(false)
 
-	clamped, err := s.clampPositions(positions)
+	// A streamed caller clamps at its own rate, so it gets the clamp without the warning.
+	streamed, _ := extra["streamed"].(bool)
+	clamped, _, err := s.clampPositions(positions, streamed)
 	if err != nil {
 		return err
 	}
@@ -399,7 +390,7 @@ func (s *so101) MoveToJointPositions(ctx context.Context, positions []referencef
 	// A streamed caller shapes the trajectory with its own update rate, so any profile the
 	// servo applies between setpoints is pure lag and the coordination read buys nothing.
 	// See docs/arm.md, "Motion and speed".
-	if streamed, _ := extra["streamed"].(bool); streamed {
+	if streamed {
 		return s.moveJointsUniform(ctx, clamped, speed, accel, true, servocmd.WaitArg(extra))
 	}
 
@@ -491,11 +482,13 @@ func (s *so101) MoveThroughJointPositions(ctx context.Context, positions [][]ref
 	// satisfiable -- see below.
 	lastKnown, lastKnownAt := from, time.Now()
 
+	warned := false // one clamp warning per stream, not per waypoint
 	for idx, jointPositions := range positions {
-		clamped, err := s.clampPositions(jointPositions)
+		clamped, hit, err := s.clampPositions(jointPositions, warned)
 		if err != nil {
 			return err
 		}
+		warned = warned || hit
 		isLast := idx == len(positions)-1
 
 		dwellTimeout, err := s.moveJoints(ctx, from, clamped, speed, accel, caps, isLast)

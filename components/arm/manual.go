@@ -422,7 +422,7 @@ func (s *so101) enterManualLocked(overrides map[string]interface{}) map[string]i
 		mm = s.cfg.ManualMode
 	}
 	params, pGain, torqueLimit := resolveManualParams(mm, overrides)
-	io := newControllerManualIO(s.controller, s.armServoIDs, s.calculateJointLimits())
+	io := newControllerManualIO(s.controller, s.armServoIDs, jointLimitsFor(s.controller.GetCalibration(), s.armServoIDs))
 	s.manual = newManualSession(s.cancelCtx, io, params, pGain, torqueLimit, s.logger)
 	s.manual.start()
 	return map[string]interface{}{"mode": "manual", "servos": s.armServoIDs}

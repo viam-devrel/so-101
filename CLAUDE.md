@@ -449,6 +449,14 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
   assumes — it lands in the mid-travel-homed state the anchor is *wrong* for (see the design
   doc's "conflict this design knowingly accepts"). Abandoning *before* `set_homing` leaves the
   registers untouched.
+- **A joint's 0° is `servo.HomingTick` (2047), not the recorded-range midpoint.** `set_homing`
+  centers `position_offset` on that tick, so the homed pose IS the kinematic zero;
+  `NormModeDegrees` used to center on `(RangeMin+RangeMax)/2`, which on real hardware sat 6.9°
+  off on the elbow and put the gripper TCP 13-25 mm below the table. `HomingTick` (2047, arm
+  joints) and `GripperClosedStopTick` (2048, servo 6) are different constants for different
+  servos, not a typo. `jointLimitsFor` derives the arm's joint limits through the same
+  `Normalize` so limits and positions cannot disagree about zero again -- the old
+  `calculateJointLimits` was a no-op that returned ±π for every joint.
 - **`Grab()` used to return `true` unconditionally.** Under the old `500/3500` default an empty
   jaw resting at its closed stop (tick 2048) normalized to 51.6%, clearing the `> 15.0` grasp
   threshold regardless of whether anything was held. Anyone who wrote code branching on

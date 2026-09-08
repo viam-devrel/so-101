@@ -343,6 +343,19 @@ The servo register fallback provides better out-of-box experience by using actua
 
 **Note:** Calibration read from servos is used in-memory only and not automatically saved. To persist servo-read calibration, use the calibration sensor component's workflow.
 
+### Where 0° is
+
+A joint reads 0° at the pose it was homed at during calibration (raw tick 2047, where
+`set_homing` centers the servo's `position_offset`), **not** at the middle of its recorded range.
+The recorded `range_min`/`range_max` only bound commanded positions — as the servo's register
+limits, and as the arm's joint limits, which clamp any out-of-range target and log one warning
+per move. An asymmetric range therefore narrows the joint's travel but never moves its zero.
+
+Versions before this convention derived 0° from `(range_min + range_max) / 2`. Upgrading with an
+existing calibration file shifts every arm joint by `(2047 - midpoint) × 360 / 4095` degrees
+(typically a few degrees); recorded trajectories and saved joint poses from before the upgrade
+replay shifted by that amount. The gripper's percent mode is unaffected.
+
 ### Gripper travel guard
 
 A gripper whose position limits are still at the factory `0`-`4095` reads as calibrated, but that range is used as a linear scale factor — 0-100% would map across a full encoder revolution, several times the jaw's travel, driving it into its mechanical stops until the servo latches its overload protection.
