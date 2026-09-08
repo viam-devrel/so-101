@@ -103,9 +103,9 @@ func (cs *so101CalibrationSensor) setHomingPosition(ctx context.Context) (map[st
 	for _, servoID := range cs.cfg.ServoIDs {
 		currentRawPos := int(rawPositions[servoID])
 
-		// Calculate offset to make current position the center (2047.5 for 12-bit encoder)
-		targetCenter := 2047
-		homingOffset := currentRawPos - targetCenter
+		// Calculate offset to make current position the homing tick -- servo.HomingTick is
+		// NormModeDegrees's kinematic zero, so these must not drift apart.
+		homingOffset := currentRawPos - servo.HomingTick
 		// currentRawPos == 4095 (a joint parked at the top of the encoder) yields 2048, which
 		// collides with position_offset's sign bit and would decode back as 0. Trim that one
 		// tick instead of failing the whole workflow; encodePositionOffset still rejects

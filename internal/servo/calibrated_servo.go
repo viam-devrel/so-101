@@ -22,6 +22,9 @@ const (
 	NormModeDegrees   = 3 // Normalized to -180° to +180° range
 )
 
+// HomingTick is NormModeDegrees's 0°: the tick setHomingPosition centers position_offset on.
+const HomingTick = 2047
+
 // MotorCalibration defines calibration parameters for a servo motor
 type MotorCalibration struct {
 	ID           int `json:"id"`
@@ -58,9 +61,8 @@ func (c *MotorCalibration) Normalize(rawValue int) (float64, error) {
 		normalized = math.Max(-100, math.Min(100, normalized))
 
 	case NormModeDegrees:
-		center := float64(c.RangeMin+c.RangeMax) / 2.0
 		maxResolution := float64(4095)
-		normalized = (float64(rawValue) - center) * 360 / maxResolution
+		normalized = (float64(rawValue) - HomingTick) * 360 / maxResolution
 
 	default:
 		return 0, fmt.Errorf("unknown normalization mode: %d", c.NormMode)
@@ -125,9 +127,8 @@ func (c *MotorCalibration) Denormalize(normalizedValue float64) (int, error) {
 		rawValue = int(math.Round(center + clamped/100.0*halfRange))
 
 	case NormModeDegrees:
-		center := float64(c.RangeMin+c.RangeMax) / 2.0
 		maxResolution := float64(4095)
-		rawValue = int((adjustedValue * maxResolution / 360) + center)
+		rawValue = int(math.Round(adjustedValue*maxResolution/360 + HomingTick))
 
 	default:
 		return 0, fmt.Errorf("unknown normalization mode: %d", c.NormMode)

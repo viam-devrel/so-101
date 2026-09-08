@@ -67,6 +67,10 @@ Each returns `success`, the resulting `state`, and a `message` carrying the next
 { "success": true, "state": "homing_position", "homing_offsets": { "1": -103, "2": 47 } }
 ```
 
+The pose the arm holds at `set_homing` becomes each joint's 0° — the arm's kinematic zero — so it
+should be the model's zero pose (arm extended forward, forearm and gripper horizontal, pan
+centered), not just somewhere mid-travel. The range recorded next only sets the joint limits.
+
 ```json
 { "command": "start_range_recording" }
 ```
