@@ -22,7 +22,7 @@ The following attributes are available for the arm component:
 
 | Name               | Type     | Inclusion    | Description                                                                                                                                                            |
 | ------------------ | -------- | ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `port`             | string   | **Required** | The serial port for communication with the SO-101 (see Communication section below).                                                                                   |
+| `port`             | string   | **Required** | The serial port for communication with the SO-101 (see Communication section below). On Windows this is a COM name, e.g. `COM3`.                                       |
 | `calibration_file` | string   | Optional     | Path to the calibration file. If not provided, the module will attempt to read calibration from servo registers. If servo reads fail, uses default calibration values. |
 | `baudrate`         | int      | Optional     | The baud rate for serial communication. Default is `1000000`.                                                                                                          |
 | `servo_ids`        | []int    | Optional     | List of servo IDs for the arm joints. Default is `[1, 2, 3, 4, 5]`.                                                                                                    |

@@ -33,7 +33,7 @@ test:
 
 module.tar.gz: meta.json $(MODULE_BINARY) first_run.sh build-app $(RUNTIME_ASSETS)
 ifeq ($(VIAM_TARGET_OS), windows)
-	jq '.entrypoint = "./bin/arm.exe"' meta.json > temp.json && mv temp.json meta.json
+	jq '.entrypoint = "./bin/arm.exe" | del(.first_run)' meta.json > temp.json && mv temp.json meta.json
 else
 	strip $(MODULE_BINARY)
 endif
