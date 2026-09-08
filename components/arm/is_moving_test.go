@@ -66,3 +66,35 @@ func TestHardwareArmIsMovingReturnsFalseWhenAllStopped(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, moving)
 }
+
+// A hot or clamped joint answers with a condition flag; the arm must still know it is moving.
+func TestHardwareArmIsMovingSurvivesAConditionFlag(t *testing.T) {
+	ft := testfake.NewFakeTransport()
+	ft.SetRegister(3, feetech.RegMoving.Address, []byte{1})
+	s := &so101{controller: testArmHandle(t, ft), armServoIDs: []int{1, 2, 3, 4, 5}}
+	ft.SetStatus(3, feetech.ErrOverload)
+
+	moving, err := s.IsMoving(context.Background())
+	require.NoError(t, err)
+	assert.True(t, moving)
+}
+
+func TestReadArmStateSurvivesAConditionFlag(t *testing.T) {
+	ft := testfake.NewFakeTransport()
+	for id := 1; id <= 5; id++ {
+		ft.SetRegister(id, feetech.RegPresentPosition.Address, testfake.EncodeWordLE(2048))
+	}
+	// readArmState is ONE 11-byte read from Present_Position (56) through Moving (66); the
+	// fake answers from the bytes stored at 56, so the Moving bit has to live in that blob.
+	state := make([]byte, 11)
+	copy(state, testfake.EncodeWordLE(2048))
+	state[10] = 1
+	ft.SetRegister(2, feetech.RegPresentPosition.Address, state)
+	s := &so101{controller: testArmHandle(t, ft), armServoIDs: []int{1, 2, 3, 4, 5}}
+	ft.SetStatus(2, feetech.ErrOverload)
+
+	positions, moving, err := s.readArmState(context.Background())
+	require.NoError(t, err, "the dwell must not abort a move because a joint is overloaded")
+	assert.Len(t, positions, 5)
+	assert.True(t, moving)
+}

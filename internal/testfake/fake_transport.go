@@ -24,9 +24,10 @@ const FakeModelNumber = 777
 type FakeTransport struct {
 	mu        sync.Mutex
 	proto     *feetech.Protocol
-	registers map[int]map[byte][]byte // servo id -> address -> value
-	regWrites map[int]map[byte]int    // servo id -> address -> write count
-	pending   []byte                  // queued response bytes
+	registers map[int]map[byte][]byte     // servo id -> address -> value
+	regWrites map[int]map[byte]int        // servo id -> address -> write count
+	status    map[int]feetech.StatusError // servo id -> flags set on every response
+	pending   []byte                      // queued response bytes
 	unplugged bool
 	writes    int
 	opens     int
@@ -40,6 +41,7 @@ func NewFakeTransport() *FakeTransport {
 		proto:     feetech.NewProtocol(feetech.ProtocolSTS),
 		registers: make(map[int]map[byte][]byte),
 		regWrites: make(map[int]map[byte]int),
+		status:    make(map[int]feetech.StatusError),
 	}
 	for id := 1; id <= 6; id++ {
 		ft.registers[id] = map[byte][]byte{
@@ -184,8 +186,19 @@ func (ft *FakeTransport) queue(id int, params []byte) {
 	if _, known := ft.registers[id]; !known {
 		return // absent servo: silence, which the bus reports as ErrNoResponse
 	}
+	// In a response, Encode writes Instruction as the status byte and ignores Packet.Error.
 	ft.pending = append(ft.pending,
-		ft.proto.Encode(feetech.Packet{ID: byte(id), Instruction: 0, Parameters: params})...)
+		ft.proto.Encode(feetech.Packet{
+			ID: byte(id), Instruction: byte(ft.status[id]), Parameters: params,
+		})...)
+}
+
+// SetStatus makes a servo set these condition flags on every response while still answering
+// with valid register data, the way an overloaded STS3215 does.
+func (ft *FakeTransport) SetStatus(id int, status feetech.StatusError) {
+	ft.mu.Lock()
+	defer ft.mu.Unlock()
+	ft.status[id] = status
 }
 
 var _ feetech.Transport = (*FakeTransport)(nil)

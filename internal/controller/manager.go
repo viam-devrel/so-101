@@ -212,8 +212,11 @@ func (h *ControllerHandle) MoveServoRaw(ctx context.Context, id, raw int) error 
 }
 
 // ServoPositionPercent reads one servo's position as both a percentage of its calibrated
-// range and the underlying raw tick value.
-func (h *ControllerHandle) ServoPositionPercent(ctx context.Context, id int) (percent float64, rawOut int, err error) {
+// range and the underlying raw tick value. condition carries any servo condition flags that
+// accompanied the reading; it does not make the reading invalid.
+func (h *ControllerHandle) ServoPositionPercent(
+	ctx context.Context, id int,
+) (percent float64, rawOut int, condition feetech.StatusError, err error) {
 	err = h.withSessionRead(func(sess *busSession) error {
 		cs, ok := sess.servos[id]
 		if !ok {
@@ -225,7 +228,8 @@ func (h *ControllerHandle) ServoPositionPercent(ctx context.Context, id int) (pe
 		}
 
 		raw, err := servo.Position(ctx)
-		if err != nil {
+		// `=`, not `:=`: condition is the outer named return, err the closure-local.
+		if condition, err = tolerateCondition(err); err != nil {
 			return fmt.Errorf("failed to read position for servo %d: %w", id, err)
 		}
 		rawOut = raw
@@ -241,7 +245,7 @@ func (h *ControllerHandle) ServoPositionPercent(ctx context.Context, id int) (pe
 		percent = normalizedToPercent(cal, normalized)
 		return nil
 	})
-	return percent, rawOut, err
+	return percent, rawOut, condition, err
 }
 
 // StopServo halts a single servo. Unlike Stop, it leaves every other servo on the bus
@@ -287,7 +291,7 @@ func (h *ControllerHandle) GetJointPositions(ctx context.Context) (out []float64
 
 		// Read arm positions using ServoGroup
 		servoPositions, err := sess.group.Positions(ctx)
-		if err != nil {
+		if _, err = tolerateCondition(err); err != nil {
 			return fmt.Errorf("failed to read servo positions: %w", err)
 		}
 
@@ -344,7 +348,7 @@ func (sess *busSession) jointRadians(servoID, raw int) (float64, error) {
 func (h *ControllerHandle) GetJointPositionsForServos(ctx context.Context, servoIDs []int) (out []float64, err error) {
 	err = h.withSessionRead(func(sess *busSession) error {
 		rawPositions, err := sess.group.Positions(ctx)
-		if err != nil {
+		if _, err = tolerateCondition(err); err != nil {
 			return fmt.Errorf("failed to get raw positions for servos: %w", err)
 		}
 		positions := make([]float64, len(servoIDs))
@@ -411,7 +415,7 @@ func (h *ControllerHandle) WaitForServosToStop(ctx context.Context, servoIDs []i
 	defer ticker.Stop()
 
 	for {
-		moving, err := h.AnyServoMoving(ctx, ids)
+		moving, _, err := h.AnyServoMoving(ctx, ids)
 		if err != nil {
 			return fmt.Errorf("failed to read moving state for servos %v: %w", ids, err)
 		}
@@ -434,8 +438,13 @@ func (h *ControllerHandle) WaitForServosToStop(ctx context.Context, servoIDs []i
 func (h *ControllerHandle) Ping(ctx context.Context) error {
 	return h.withSessionRead(func(sess *busSession) error {
 		for id, servo := range sess.servos {
-			if _, err := servo.Ping(ctx); err != nil {
+			_, err := servo.Ping(ctx)
+			flags, err := tolerateCondition(err)
+			if err != nil {
 				return fmt.Errorf("ping failed for servo %d: %w", id, err)
+			}
+			if flags != 0 {
+				h.logger.Warnf("servo %d answered ping with %v", id, flags)
 			}
 		}
 		return nil
@@ -454,7 +463,7 @@ func (h *ControllerHandle) LoadForServos(ctx context.Context, servoIDs []int) (o
 				return fmt.Errorf("servo %d not available", id)
 			}
 			load, err := servo.Load(ctx)
-			if err != nil {
+			if _, err = tolerateCondition(err); err != nil {
 				return fmt.Errorf("failed to read load for servo %d: %w", id, err)
 			}
 			loads[id] = load
@@ -612,7 +621,7 @@ func GetCurrentCalibrationForPort(portPath string) SO101FullCalibration {
 func (h *ControllerHandle) SyncReadPositions(ctx context.Context, ids []int) (out map[int]int, err error) {
 	err = h.withSessionRead(func(sess *busSession) error {
 		data, err := sess.bus.SyncRead(ctx, feetech.RegPresentPosition.Address, 2, ids)
-		if err != nil {
+		if _, err = tolerateCondition(err); err != nil {
 			return err
 		}
 		proto := sess.bus.Protocol()
@@ -653,7 +662,7 @@ func (h *ControllerHandle) GetJointPositionsAndMovingForServos(
 ) (out []float64, moving bool, err error) {
 	err = h.withSessionRead(func(sess *busSession) error {
 		data, err := sess.bus.SyncRead(ctx, feetech.RegPresentPosition.Address, stateReadWidth, servoIDs)
-		if err != nil {
+		if _, err = tolerateCondition(err); err != nil {
 			return err
 		}
 		proto := sess.bus.Protocol()
@@ -676,12 +685,16 @@ func (h *ControllerHandle) GetJointPositionsAndMovingForServos(
 	return out, moving, err
 }
 
-// AnyServoMoving reports whether any of the given servos is still executing a move,
-// in one SyncRead of the Moving register rather than a read per servo.
-func (h *ControllerHandle) AnyServoMoving(ctx context.Context, ids []int) (moving bool, err error) {
+// AnyServoMoving reports whether any of the given servos is still executing a move, in one
+// SyncRead of the Moving register rather than a read per servo. condition is the OR of any
+// condition flags those servos set; it does not make the answer invalid.
+func (h *ControllerHandle) AnyServoMoving(
+	ctx context.Context, ids []int,
+) (moving bool, condition feetech.StatusError, err error) {
 	err = h.withSessionRead(func(sess *busSession) error {
 		data, err := sess.bus.SyncRead(ctx, feetech.RegMoving.Address, int(feetech.RegMoving.Size), ids)
-		if err != nil {
+		// `=`, not `:=`: condition is the outer named return, err the closure-local.
+		if condition, err = tolerateCondition(err); err != nil {
 			return err
 		}
 		for _, id := range ids {
@@ -692,7 +705,7 @@ func (h *ControllerHandle) AnyServoMoving(ctx context.Context, ids []int) (movin
 		}
 		return nil
 	})
-	return moving, err
+	return moving, condition, err
 }
 
 // PingServo pings one servo and returns its model number.
@@ -703,7 +716,7 @@ func (h *ControllerHandle) PingServo(ctx context.Context, id int) (model int, er
 			return fmt.Errorf("servo %d not available", id)
 		}
 		m, err := cs.Ping(ctx)
-		if err != nil {
+		if _, err = tolerateCondition(err); err != nil {
 			return err
 		}
 		model = m

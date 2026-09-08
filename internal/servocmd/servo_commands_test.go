@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/hipsterbrown/feetech-servo/feetech"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -212,4 +213,64 @@ func TestIsServoCommand(t *testing.T) {
 	assert.True(t, IsServoCommand(CmdServoCapabilities))
 	assert.False(t, IsServoCommand("set_torque"))
 	assert.False(t, IsServoCommand(""))
+}
+
+func TestServoPositionCarriesConditionAsText(t *testing.T) {
+	ops := &testfake.FakeServoOps{Percent: 42.5, Raw: 1834, Condition: feetech.ErrOverload}
+	res, err := HandleServoCommand(context.Background(),
+		map[string]any{"command": CmdServoPosition, "servo_id": 6}, ops, armServos)
+	require.NoError(t, err, "a condition is data, not a failure")
+	assert.Equal(t, 42.5, res["percent"])
+	assert.Equal(t, 1834, res["raw"])
+
+	cond, ok := ConditionArg(res)
+	require.True(t, ok)
+	assert.Equal(t, feetech.ErrOverload.Error(), cond)
+	assert.IsType(t, "", res[ConditionKey], "text, not a bitfield: structpb mangles numbers")
+}
+
+func TestServoMovingCarriesConditionAsText(t *testing.T) {
+	ops := &testfake.FakeServoOps{Moving: true, Condition: feetech.ErrOverheat}
+	res, err := HandleServoCommand(context.Background(),
+		map[string]any{"command": CmdServoMoving, "servo_id": 6}, ops, armServos)
+	require.NoError(t, err)
+	assert.Equal(t, true, res["moving"])
+
+	cond, ok := ConditionArg(res)
+	require.True(t, ok)
+	assert.Equal(t, feetech.ErrOverheat.Error(), cond)
+}
+
+// Consumers that predate the key must see no change when nothing is flagged.
+func TestConditionKeyIsAbsentWithoutACondition(t *testing.T) {
+	for _, command := range []string{CmdServoPosition, CmdServoMoving} {
+		ops := &testfake.FakeServoOps{Percent: 1, Moving: true}
+		res, err := HandleServoCommand(context.Background(),
+			map[string]any{"command": command, "servo_id": 6}, ops, armServos)
+		require.NoError(t, err)
+		_, present := res[ConditionKey]
+		assert.False(t, present, "%s must not carry an empty condition", command)
+		_, ok := ConditionArg(res)
+		assert.False(t, ok)
+	}
+}
+
+func TestConditionArgReadsOnlyNonEmptyText(t *testing.T) {
+	cases := map[string]struct {
+		res  map[string]any
+		want string
+		ok   bool
+	}{
+		"text":   {map[string]any{ConditionKey: "servo status error: [overload]"}, "servo status error: [overload]", true},
+		"empty":  {map[string]any{ConditionKey: ""}, "", false},
+		"absent": {map[string]any{}, "", false},
+		"number": {map[string]any{ConditionKey: float64(32)}, "", false},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			got, ok := ConditionArg(tc.res)
+			assert.Equal(t, tc.ok, ok)
+			assert.Equal(t, tc.want, got)
+		})
+	}
 }

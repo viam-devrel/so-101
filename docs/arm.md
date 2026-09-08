@@ -289,6 +289,18 @@ Response:
 }
 ```
 
+If the servo answered with a condition flag set (overload, overheat, voltage, angle limit),
+the reading is still valid and the response also carries the flag as text under `condition`.
+The key is absent when no flag is set:
+
+```json
+{
+  "percent": 42.5,
+  "raw": 1834,
+  "condition": "servo status error: [overload]"
+}
+```
+
 ### Stop Servo
 
 Halt a single servo, leaving every other servo on the bus untouched:
@@ -318,6 +330,8 @@ Response:
   "moving": false
 }
 ```
+
+Carries the same optional `condition` key as `servo_position`.
 
 ### Wait For Servo To Stop
 
