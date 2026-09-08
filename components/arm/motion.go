@@ -57,43 +57,39 @@ func (s *so101) readArmState(ctx context.Context) ([]float64, bool, error) {
 	return s.controller.GetJointPositionsAndMovingForServos(ctx, s.armServoIDs)
 }
 
-// calculateJointLimits dynamically calculates joint limits from calibration data
+// calculateJointLimits derives each arm joint's radian limits from its recorded range.
 func (s *so101) calculateJointLimits() [][2]float64 {
-	limits := make([][2]float64, len(s.armServoIDs))
-
 	calibration := s.controller.GetCalibration()
-
-	// Map servo IDs to calibration data
-	jointCals := []*servo.MotorCalibration{
+	return jointLimitsFromCalibration([]*servo.MotorCalibration{
 		calibration.ShoulderPan,
 		calibration.ShoulderLift,
 		calibration.ElbowFlex,
 		calibration.WristFlex,
 		calibration.WristRoll,
-	}
+	})
+}
 
-	for i, cal := range jointCals {
+// jointLimitsFromCalibration runs RangeMin/RangeMax through the same Normalize the joint
+// positions use, so the limits share their zero (the homing tick) and drive-mode sign. A
+// missing or unusable calibration falls back to a full turn.
+func jointLimitsFromCalibration(cals []*servo.MotorCalibration) [][2]float64 {
+	limits := make([][2]float64, len(cals))
+	for i, cal := range cals {
+		limits[i] = [2]float64{-math.Pi, math.Pi}
 		if cal == nil {
-			// Use default limits if calibration is missing
-			limits[i] = [2]float64{-math.Pi, math.Pi}
 			continue
 		}
-
-		// Convert calibration range to radians using the same logic as before
-		center := float64(cal.RangeMin+cal.RangeMax) / 2
-		halfRange := float64(cal.RangeMax-cal.RangeMin) / 2
-
-		// Calculate min limit (RangeMin -> radians)
-		minNormalized := (float64(cal.RangeMin) - center) / halfRange
-		minRadians := minNormalized * math.Pi
-
-		// Calculate max limit (RangeMax -> radians)
-		maxNormalized := (float64(cal.RangeMax) - center) / halfRange
-		maxRadians := maxNormalized * math.Pi
-
-		limits[i] = [2]float64{minRadians, maxRadians}
+		lo, errLo := cal.Normalize(cal.RangeMin)
+		hi, errHi := cal.Normalize(cal.RangeMax)
+		if errLo != nil || errHi != nil {
+			continue
+		}
+		lo, hi = lo*math.Pi/180, hi*math.Pi/180
+		if lo > hi {
+			lo, hi = hi, lo
+		}
+		limits[i] = [2]float64{lo, hi}
 	}
-
 	return limits
 }
 
