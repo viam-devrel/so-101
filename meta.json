@@ -71,7 +71,8 @@
     "arch": [
       "darwin/arm64",
       "linux/amd64",
-      "linux/arm64"
+      "linux/arm64",
+      "windows/amd64"
     ],
     "darwin_deps": [
       "nlopt-static",

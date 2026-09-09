@@ -25,7 +25,7 @@ _If you have already calibrated the servos on this arm, use the `devrel:so101:di
 
 | Name               | Type     | Required     | Description                                                                                                                     |
 | ------------------ | -------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------- |
-| `port`             | string   | **Required** | Serial port for servo communication (see [Communication](#communication))                                                           |
+| `port`             | string   | **Required** | Serial port for servo communication (see [Communication](#communication)). On Windows this is a COM name, e.g. `COM3`.              |
 | `calibration_file` | string   | Optional     | Path where calibration will be saved. If relative path, uses `$VIAM_MODULE_DATA` directory. Default: `"so101_calibration.json"` |
 | `baudrate`         | int      | Optional     | Serial communication speed. Default: `1000000`                                                                                  |
 | `timeout`          | duration | Optional     | Communication timeout. Default: `"5s"`                                                                                          |
