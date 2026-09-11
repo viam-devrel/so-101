@@ -20,6 +20,7 @@ import (
 	"github.com/golang/geo/r3"
 	"go.viam.com/rdk/components/arm"
 	"go.viam.com/rdk/logging"
+	"go.viam.com/rdk/referenceframe"
 	"go.viam.com/rdk/robot/client"
 	"go.viam.com/rdk/services/mlmodel"
 	"go.viam.com/rdk/services/motion"
@@ -36,6 +37,43 @@ type goal struct {
 }
 
 type goalList []goal
+
+// obstacleList collects -obstacle boxes, all in the <arm>_origin frame.
+type obstacleList []spatialmath.Geometry
+
+func (o *obstacleList) String() string { return fmt.Sprintf("%d obstacles", len(*o)) }
+
+func (o *obstacleList) Set(s string) error {
+	box, err := parseObstacle(s, len(*o))
+	if err != nil {
+		return err
+	}
+	*o = append(*o, box)
+	return nil
+}
+
+// parseObstacle reads "x,y,z,dx,dy,dz": an axis-aligned box centred at x,y,z with those
+// side lengths, all mm.
+func parseObstacle(s string, i int) (spatialmath.Geometry, error) {
+	fields := strings.Split(s, ",")
+	if len(fields) != 6 {
+		return nil, fmt.Errorf("obstacle %q: want x,y,z,dx,dy,dz", s)
+	}
+	v := make([]float64, 6)
+	for j, f := range fields {
+		x, err := strconv.ParseFloat(strings.TrimSpace(f), 64)
+		if err != nil {
+			return nil, fmt.Errorf("obstacle %q: %w", s, err)
+		}
+		v[j] = x
+	}
+	if v[3] <= 0 || v[4] <= 0 || v[5] <= 0 {
+		return nil, fmt.Errorf("obstacle %q: side lengths must be positive", s)
+	}
+	return spatialmath.NewBox(
+		spatialmath.NewPoseFromPoint(r3.Vector{X: v[0], Y: v[1], Z: v[2]}),
+		r3.Vector{X: v[3], Y: v[4], Z: v[5]}, fmt.Sprintf("obstacle%d", i+1))
+}
 
 func (g *goalList) String() string { return fmt.Sprintf("%d goals", len(*g)) }
 
@@ -78,8 +116,9 @@ type deps struct {
 	trajex              mlmodel.Service
 	armName, motionName string
 	cloud               planning.GoalCloudConfig
-	vel, acc, pathTol   float64 // degrees
-	armVel, armAcc      float64 // the arm's configured speed/acceleration, restored after a paced run
+	world               *referenceframe.WorldState // nil when no -obstacle
+	vel, acc, pathTol   float64                    // degrees
+	armVel, armAcc      float64                    // the arm's configured speed/acceleration, restored after a paced run
 	hz, sampleHz        float64
 	batch               int
 }
@@ -93,6 +132,8 @@ func main() {
 	trajexName := flag.String("trajex", "trajex", "trajex ML model service name")
 	var goals goalList
 	flag.Var(&goals, "goal", "x,y,z[,ox,oy,oz] in mm in the <arm>_origin frame; repeatable")
+	var obstacles obstacleList
+	flag.Var(&obstacles, "obstacle", "x,y,z,dx,dy,dz box (centre, side lengths) in mm in the <arm>_origin frame; repeatable")
 	velDeg := flag.Float64("vel-deg", 0, "per-joint velocity limit, deg/s (default: the arm's get_motion_params speed)")
 	accDeg := flag.Float64("acc-deg", 0, "per-joint acceleration limit, deg/s^2 (default: the arm's get_motion_params acceleration)")
 	hz := flag.Float64("hz", 100, "trajex sampling frequency")
@@ -124,6 +165,13 @@ func main() {
 		armName: *armName, motionName: *motionName,
 		cloud: planning.ResolveGoalCloudConfig(*orientTol, *posTol, logger),
 		vel:   *velDeg, acc: *accDeg, pathTol: *pathTolDeg, hz: *hz, sampleHz: *sampleHz, batch: *batch,
+	}
+	if len(obstacles) > 0 {
+		d.world, err = referenceframe.NewWorldState(
+			[]*referenceframe.GeometriesInFrame{referenceframe.NewGeometriesInFrame(*armName+"_origin", obstacles)}, nil)
+		if err != nil {
+			log.Fatalf("world state: %v", err)
+		}
 	}
 	if d.arm, err = arm.FromProvider(machine, *armName); err != nil {
 		log.Fatalf("arm %q: %v", *armName, err)
@@ -182,7 +230,7 @@ func runGoal(ctx context.Context, d *deps, i int, g goal) error {
 	// motion's `plan` DoCommand takes a protojson MoveRequest string and returns the
 	// Trajectory as generic JSON. Keys are literals: their constants live in
 	// services/motion/builtin, which a tool must not import.
-	req, err := motion.MoveReq{ComponentName: d.armName, Destination: dest, Extra: extra}.ToProto(d.motionName)
+	req, err := motion.MoveReq{ComponentName: d.armName, Destination: dest, WorldState: d.world, Extra: extra}.ToProto(d.motionName)
 	if err != nil {
 		return fmt.Errorf("plan request: %w", err)
 	}

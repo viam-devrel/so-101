@@ -26,3 +26,15 @@ func TestParseGoal(t *testing.T) {
 	_, err = parseGoal("200,0,150,0,0,0")
 	assert.ErrorContains(t, err, "normal of 0")
 }
+
+func TestParseObstacle(t *testing.T) {
+	box, err := parseObstacle("250,0,100,50,50,200", 0)
+	require.NoError(t, err)
+	assert.Equal(t, "obstacle1", box.Label())
+	assert.Equal(t, r3.Vector{X: 250, Y: 0, Z: 100}, box.Pose().Point())
+
+	_, err = parseObstacle("250,0,100", 0)
+	assert.ErrorContains(t, err, "want x,y,z,dx,dy,dz")
+	_, err = parseObstacle("250,0,100,0,50,200", 0)
+	assert.Error(t, err, "a zero side length is not a box")
+}

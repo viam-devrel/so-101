@@ -506,7 +506,7 @@ VIAM_API_KEY=... VIAM_API_KEY_ID=... \
   go run ./tools/plan_stream -address <machine>.viam.cloud -arm follower-arm -goal 200,0,150
 ```
 
-`-goal x,y,z[,ox,oy,oz]` is millimetres in the `<arm>_origin` frame (repeatable; three values keep the current orientation). `-vel-deg` / `-acc-deg` default to the arm's `get_motion_params` and, when set, are also applied to the arm (`set_speed` / `set_acceleration`) for the paced run and restored afterwards, so both lines run at the same limits; `-hz` (100) is trajex's sampling rate, `-path-tol-deg` (0.5) its corner-blending tolerance — the streamed trace deviates from the polyline by up to that much *by design*, while the paced run drives through the corners. Output, one header and two lines per goal:
+`-goal x,y,z[,ox,oy,oz]` is millimetres in the `<arm>_origin` frame (repeatable; three values keep the current orientation). `-obstacle x,y,z,dx,dy,dz` (repeatable) adds an axis-aligned box in the same frame to the plan's world state; without one the planner returns a straight joint-space line (two waypoints), so an obstacle is what gives the trajectory corners to compare on. `-vel-deg` / `-acc-deg` default to the arm's `get_motion_params` and, when set, are also applied to the arm (`set_speed` / `set_acceleration`) for the paced run and restored afterwards, so both lines run at the same limits; `-hz` (100) is trajex's sampling rate, `-path-tol-deg` (0.5) its corner-blending tolerance — the streamed trace deviates from the polyline by up to that much *by design*, while the paced run drives through the corners. Output, one header and two lines per goal:
 
 ```
 goal 1 (200,0,150): 9 waypoints -> 412 samples @100 Hz, trajex 4.12s, path tol 0.5 deg
