@@ -488,6 +488,14 @@ Enforcing acceleration costs some speed, because the servos now ramp instead of 
 
 The simulated arm re-targets its interpolator at each point's time. One log line per stream reports gate, late points, settle and wall time.
 
+#### Replaying a recording
+
+`tools/stream_trajectory` streams an [arm-recorder](https://github.com/HipsterBrown/arm-recorder) session (`frequency_hz` + `frames` in radians), linearly densified to `-hz` (default 100), in batches of `-batch` points, and prints point count, acks, trajectory duration and wall time:
+
+```sh
+go run ./tools/stream_trajectory -address <machine>.viam.cloud -arm follower-arm -session nod.json
+```
+
 #### Planned motion through trajex
 
 `tools/plan_stream` is the intended production shape of the streamed RPC, measured against the path the motion service takes today. For each `-goal` it plans a move with the machine's motion service (rdk `armplanning`, with the same approach-axis goal cone as [`MoveToPosition`](#approach-axis-orientation-planning)), time-parameterises the planned waypoints with [trajex](https://app.viam.com/module/viam/trajex) running on the machine as an ML model service, streams the sampled trajectory through `MoveThroughJointPositionsStreamed`, returns to the start, then executes the **same** plan through the motion service's paced `execute` (the `MoveThroughJointPositions` path). Both runs are sampled at `-sample-hz` and scored against the planned joint-space polyline, so the difference between the two lines is execution only.
