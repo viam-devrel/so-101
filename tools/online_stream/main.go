@@ -13,6 +13,7 @@ package main
 import (
 	"cmp"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -64,6 +65,21 @@ func (o *obstacleList) Set(s string) error {
 	return nil
 }
 
+// eventList collects -obstacle-after events. Labels are re-numbered after flag.Parse, once
+// the count of initial -obstacle boxes is known, so no two geometries share a name.
+type eventList struct{ events []streamx.Event }
+
+func (e *eventList) String() string { return fmt.Sprintf("%d obstacle events", len(e.events)) }
+
+func (e *eventList) Set(s string) error {
+	ev, err := streamx.ParseObstacleAfter(s, len(e.events))
+	if err != nil {
+		return err
+	}
+	e.events = append(e.events, ev)
+	return nil
+}
+
 type deps struct {
 	arm                             arm.Arm
 	trajex                          mlmodel.Service
@@ -100,7 +116,8 @@ func main() {
 	var obstacles obstacleList
 	flag.Var(&obstacles, "obstacle", "x,y,z,dx,dy,dz box (centre, side lengths) in mm in the <arm>_origin frame, present from the start; repeatable")
 	switchAfter := flag.Float64("switch-after", -1, "seconds into the stream at which the target becomes goal B (needs two -goal)")
-	obstacleAfter := flag.String("obstacle-after", "", "seconds,x,y,z,dx,dy,dz: the box appears then and the current goal is replanned around it")
+	var obstacleAfter eventList
+	flag.Var(&obstacleAfter, "obstacle-after", "seconds,x,y,z,dx,dy,dz: the box appears then and the current goal is replanned around it; repeatable")
 	runwayMs := flag.Int("runway-ms", 300, "how far ahead of the clock points are sent")
 	sendMs := flag.Int("send-ms", 20, "send tick")
 	planMarginMs := flag.Int("plan-margin-ms", 300, "time budgeted for planning + trajex; the stitch lands runway+margin after the event")
@@ -132,12 +149,9 @@ func main() {
 		}
 		sc.events = append(sc.events, streamx.Event{At: time.Duration(*switchAfter * float64(time.Second)), SwitchGoal: true})
 	}
-	if *obstacleAfter != "" {
-		e, err := streamx.ParseObstacleAfter(*obstacleAfter, len(obstacles))
-		if err != nil {
-			log.Fatal(err)
-		}
-		sc.events = append(sc.events, e)
+	for i, ev := range obstacleAfter.events {
+		ev.Obstacle.SetLabel(fmt.Sprintf("obstacle%d", len(obstacles)+i+1))
+		sc.events = append(sc.events, ev)
 	}
 	if len(sc.events) == 0 {
 		log.Fatal("at least one of -switch-after / -obstacle-after is required")
@@ -281,7 +295,7 @@ func streamedSegments(planA [][]float64, cur []arm.TrajectoryPoint, splices []sp
 	for _, s := range splices {
 		segs = append(segs, segment{
 			label: label, start: start, end: s.tStitch, path: streamx.ExecutedPrefix(path, s.qs),
-			event: fmt.Sprintf("event @%s: %s; stitch @%.2fs; plan %dms (%d waypoints, %.2fs); stitch late %dms",
+			event: fmt.Sprintf("event @%s: %s; stitch @%.2fs; plan %dms (%d waypoints, %.2fs); stitch late %dms (client clock; leads the arm by the RPC + gate offset)",
 				eventTimes(s.events), describeEvents(s.events), s.tStitch.Seconds(), s.planLatency.Milliseconds(),
 				len(s.waypoints), s.newPts[len(s.newPts)-1].Time.Seconds(), s.stitchLate.Milliseconds()),
 		})
@@ -384,7 +398,7 @@ func runBaseline(ctx context.Context, d *deps, sc *scenario, planA [][]float64) 
 			}
 			segs = append(segs, segment{
 				label: label, start: segStart, end: segEnd, path: streamx.ExecutedPrefix(path, q),
-				event: fmt.Sprintf("event @%s: %s; Stop -> replan %dms -> move; stop-to-move gap %.2fs",
+				event: fmt.Sprintf("event @%s: %s; Stop -> replan %dms -> move; event-to-move gap %.2fs",
 					eventTimes(due), describeEvents(due), latency.Milliseconds(), time.Since(stopAt).Seconds()),
 			})
 			label, path, segStart = labelAfter(label, due), newPath, segEnd
@@ -488,7 +502,7 @@ func (d *deps) trajexPoints(ctx context.Context, wps [][]float64) ([]arm.Traject
 		return nil, err
 	}
 	if len(pts) == 0 {
-		return nil, fmt.Errorf("trajex returned no samples")
+		return nil, errors.New("trajex returned no samples")
 	}
 	return pts, nil
 }
