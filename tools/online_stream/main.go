@@ -390,18 +390,21 @@ func runLoop(ctx context.Context, d *deps, sc *scenario, planA [][]float64, late
 		st = <-stats
 		return runErr
 	})
-	// Ctrl-C is the expected end; run wraps it as "stream: context canceled".
-	if err != nil && !errors.Is(err, context.Canceled) {
-		return err
-	}
+	// Print what was measured before judging the error: a mid-run failure should not
+	// discard forty legs of stats.
 	if st.legs == 0 {
 		fmt.Printf("loop: no leg completed in %.1fs\n", wall.Seconds())
-		return nil
+	} else {
+		fmt.Printf("loop: %d legs in %.1fs; plan latency mean %dms max %dms; late stitches %d (worst %dms);\n"+
+			"      dev mean over legs %.1f deg (worst leg %.1f); module late count: see the arm log's per-stream summary\n",
+			st.legs, wall.Seconds(), (st.planTotal / time.Duration(st.legs)).Milliseconds(), st.planMax.Milliseconds(),
+			st.late, st.lateWorst.Milliseconds(), st.devTotal/float64(st.legs), st.devWorst)
 	}
-	fmt.Printf("loop: %d legs in %.1fs; plan latency mean %dms max %dms; late stitches %d (worst %dms);\n"+
-		"      dev mean over legs %.1f deg (worst leg %.1f); module late count: see the arm log's per-stream summary\n",
-		st.legs, wall.Seconds(), (st.planTotal / time.Duration(st.legs)).Milliseconds(), st.planMax.Milliseconds(),
-		st.late, st.lateWorst.Milliseconds(), st.devTotal/float64(st.legs), st.devWorst)
+	// Ctrl-C is the expected end. Test the context, not the error: over gRPC the arm client
+	// reports a cancel as a codes.Canceled status, which errors.Is(context.Canceled) misses.
+	if err != nil && ctx.Err() == nil {
+		return err
+	}
 	return nil
 }
 
