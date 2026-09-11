@@ -6,13 +6,14 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.viam.com/rdk/utils"
 )
 
 // rad builds a radian joint vector from degrees, so the tests read in the metric's output unit.
 func rad(deg ...float64) []float64 {
 	out := make([]float64, len(deg))
 	for i, d := range deg {
-		out[i] = deg2rad(d)
+		out[i] = utils.DegToRad(d)
 	}
 	return out
 }

@@ -1,6 +1,10 @@
 package main
 
-import "fmt"
+import (
+	"fmt"
+	"maps"
+	"slices"
+)
 
 // armWaypoints pulls armName's rows (radians) out of a motion `plan` DoCommand response,
 // which arrives as []any of map[string]any (frame) of []any of float64. A step whose arm
@@ -18,7 +22,7 @@ func armWaypoints(planResp any, armName string) ([][]float64, error) {
 		}
 		raw, ok := frames[armName]
 		if !ok {
-			return nil, fmt.Errorf("plan[%d]: no frame %q (have %v)", i, armName, keys(frames))
+			return nil, fmt.Errorf("plan[%d]: no frame %q (have %v)", i, armName, slices.Sorted(maps.Keys(frames)))
 		}
 		list, ok := raw.([]any)
 		if !ok {
@@ -41,12 +45,4 @@ func armWaypoints(planResp any, armName string) ([][]float64, error) {
 		return nil, fmt.Errorf("plan has no waypoints for arm %q", armName)
 	}
 	return out, nil
-}
-
-func keys(m map[string]any) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	return out
 }

@@ -8,6 +8,7 @@ import (
 	"go.viam.com/rdk/components/arm"
 	"go.viam.com/rdk/ml"
 	"go.viam.com/rdk/referenceframe"
+	"go.viam.com/rdk/utils"
 	"gorgonia.org/tensor"
 )
 
@@ -22,8 +23,6 @@ const (
 	outConfigs  = "configurations_rads"
 )
 
-func deg2rad(d float64) float64 { return d * math.Pi / 180 }
-
 // trajexInputs builds the float64 tensors trajex's mlmodel requires. waypoints are radians
 // (from armWaypoints); velDeg/accDeg/pathTolDeg are degrees and are converted here.
 func trajexInputs(waypoints [][]float64, velDeg, accDeg, pathTolDeg, hz float64) ml.Tensors {
@@ -35,14 +34,14 @@ func trajexInputs(waypoints [][]float64, velDeg, accDeg, pathTolDeg, hz float64)
 	vel := make([]float64, dof)
 	acc := make([]float64, dof)
 	for i := range vel {
-		vel[i] = deg2rad(velDeg)
-		acc[i] = deg2rad(accDeg)
+		vel[i] = utils.DegToRad(velDeg)
+		acc[i] = utils.DegToRad(accDeg)
 	}
 	return ml.Tensors{
 		inWaypoints: tensor.New(tensor.WithShape(n, dof), tensor.WithBacking(flat)),
 		inVel:       tensor.New(tensor.WithShape(dof), tensor.WithBacking(vel)),
 		inAcc:       tensor.New(tensor.WithShape(dof), tensor.WithBacking(acc)),
-		inPathTol:   tensor.New(tensor.WithShape(1), tensor.WithBacking([]float64{deg2rad(pathTolDeg)})),
+		inPathTol:   tensor.New(tensor.WithShape(1), tensor.WithBacking([]float64{utils.DegToRad(pathTolDeg)})),
 		inHz:        tensor.New(tensor.WithShape(1), tensor.WithBacking([]float64{hz})),
 	}
 }
@@ -66,7 +65,7 @@ func trajexPoints(out ml.Tensors) ([]arm.TrajectoryPoint, error) {
 	for i, t := range times {
 		row := make([]referenceframe.Input, dof)
 		copy(row, flat[i*dof:(i+1)*dof])
-		points[i] = arm.TrajectoryPoint{Time: time.Duration(t * float64(time.Second)), Positions: row}
+		points[i] = arm.TrajectoryPoint{Time: time.Duration(math.Round(t * float64(time.Second))), Positions: row}
 	}
 	return points, nil
 }

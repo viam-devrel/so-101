@@ -4,6 +4,8 @@ import (
 	"math"
 	"sort"
 	"time"
+
+	"go.viam.com/rdk/utils"
 )
 
 // sample is one JointPositions read: t since the run started, q in radians.
@@ -81,7 +83,7 @@ func distToSegment(p, a, b []float64) float64 {
 func toDeg(rad []float64) []float64 {
 	out := make([]float64, len(rad))
 	for i, r := range rad {
-		out[i] = r * 180 / math.Pi
+		out[i] = utils.RadToDeg(r)
 	}
 	return out
 }
