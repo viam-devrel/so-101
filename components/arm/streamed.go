@@ -47,9 +47,9 @@ func (s *so101) MoveThroughJointPositionsStreamed(
 	accel := float64(s.defaultAcc)
 	s.mu.RUnlock()
 
-	var start time.Time
-	var prev time.Duration
-	idx := 0
+	var start, wall time.Time
+	var prev, gate, maxLate time.Duration
+	idx, late := 0, 0
 	for {
 		// Not `range batches`: Stop cancels ctx but cannot close the channel, and
 		// CancelRunning blocks until this returns.
@@ -67,17 +67,24 @@ func (s *so101) MoveThroughJointPositionsStreamed(
 			if err := servo.CheckTrajectoryTime(idx, prev, p.Time); err != nil {
 				return err
 			}
-			clamped, err := s.clampPositions(p.Positions)
+			clamped, _, err := s.clampPositions(p.Positions, true)
 			if err != nil {
 				return err
 			}
 			if idx == 0 {
+				wall = s.clock.Time()
 				if err := s.closeStreamStartGap(ctx, clamped, speed, accel); err != nil {
 					return err
 				}
 				start = s.clock.Time()
+				gate = start.Sub(wall)
 			}
-			if err := s.clock.WaitUntil(ctx, start.Add(p.Time)); err != nil {
+			due := start.Add(p.Time)
+			if behind := s.clock.Time().Sub(due); behind > 0 {
+				late++
+				maxLate = max(maxLate, behind)
+			}
+			if err := s.clock.WaitUntil(ctx, due); err != nil {
 				return err
 			}
 			if err := s.moveJointsUniform(ctx, clamped, speed, accel, true, false); err != nil {
@@ -97,7 +104,14 @@ func (s *so101) MoveThroughJointPositionsStreamed(
 	if idx == 0 {
 		return nil
 	}
-	return s.controller.WaitForServosToStop(ctx, s.armServoIDs, servo.MaxMoveTimeoutMs)
+	settleFrom := s.clock.Time()
+	err := s.controller.WaitForServosToStop(ctx, s.armServoIDs, servo.MaxMoveTimeoutMs)
+	now := s.clock.Time()
+	// One line per stream so a hardware run decomposes its wall time without a debugger.
+	s.logger.Infof("streamed %d points over %v: gate %v, late %d (max %v), settle %v, wall %v",
+		idx, prev, gate.Round(time.Millisecond), late, maxLate.Round(time.Millisecond),
+		now.Sub(settleFrom).Round(time.Millisecond), now.Sub(wall).Round(time.Millisecond))
+	return err
 }
 
 // closeStreamStartGap runs one blocking profiled move to `target` when any joint is more than

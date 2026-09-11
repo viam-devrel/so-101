@@ -13,6 +13,8 @@ import (
 	"go.viam.com/rdk/components/arm"
 	"go.viam.com/rdk/referenceframe"
 
+	"go.viam.com/rdk/logging"
+
 	"so_arm/internal/servo"
 	"so_arm/internal/testfake"
 )
@@ -235,4 +237,32 @@ func TestStreamedStopEndsAStreamParkedOnItsProducer(t *testing.T) {
 		t.Fatal("Stop did not end the parked stream")
 	}
 	assertGoalWrites(t, ft, s, 0)
+}
+
+// The per-stream summary counts points whose deadline had already passed when they were
+// reached, so a hardware run can tell schedule slip from gate and settle time.
+func TestStreamedSummaryCountsLatePoints(t *testing.T) {
+	ft := testfake.NewFakeTransport()
+	s, _ := streamTestArm(t, ft, zeros)
+	logger, logs := logging.NewObservedTestLogger(t)
+	s.logger = logger
+	// The clock reads streamEpoch through point 0's check, then jumps 25 ms ahead: point 0 is on
+	// time, point 1 (due +10 ms) is 15 ms late, point 2 (due +20 ms) is 5 ms late.
+	calls := 0
+	s.clock.Now = func() time.Time {
+		calls++
+		if calls <= 3 {
+			return streamEpoch
+		}
+		return streamEpoch.Add(25 * time.Millisecond)
+	}
+
+	_, err := runStream(context.Background(), s,
+		[]arm.TrajectoryPoint{pt(0, 0.01), pt(10*time.Millisecond, 0.02), pt(20*time.Millisecond, 0.03)})
+	require.NoError(t, err)
+
+	entries := logs.FilterMessageSnippet("streamed 3 points").All()
+	require.Len(t, entries, 1)
+	assert.Contains(t, entries[0].Message, "late 2 (max 15ms)")
+	assert.Contains(t, entries[0].Message, "gate 0s")
 }
