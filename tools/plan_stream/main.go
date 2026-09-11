@@ -79,6 +79,7 @@ type deps struct {
 	armName, motionName string
 	cloud               planning.GoalCloudConfig
 	vel, acc, pathTol   float64 // degrees
+	armVel, armAcc      float64 // the arm's configured speed/acceleration, restored after a paced run
 	hz, sampleHz        float64
 	batch               int
 }
@@ -133,22 +134,20 @@ func main() {
 	if d.trajex, err = mlmodel.FromProvider(machine, *trajexName); err != nil {
 		log.Fatalf("trajex %q: %v", *trajexName, err)
 	}
+	resp, err := d.arm.DoCommand(ctx, map[string]any{"get_motion_params": true})
+	if err != nil {
+		log.Fatalf("get_motion_params: %v", err)
+	}
+	d.armVel, _ = resp["current_speed_degs_per_sec"].(float64)
+	d.armAcc, _ = resp["current_acceleration_degs_per_sec_per_sec"].(float64)
+	if d.vel <= 0 {
+		d.vel = d.armVel
+	}
+	if d.acc <= 0 {
+		d.acc = d.armAcc
+	}
 	if d.vel <= 0 || d.acc <= 0 {
-		resp, err := d.arm.DoCommand(ctx, map[string]any{"get_motion_params": true})
-		if err != nil {
-			log.Fatalf("get_motion_params: %v", err)
-		}
-		speed, _ := resp["current_speed_degs_per_sec"].(float64)
-		accel, _ := resp["current_acceleration_degs_per_sec_per_sec"].(float64)
-		if d.vel <= 0 {
-			d.vel = speed
-		}
-		if d.acc <= 0 {
-			d.acc = accel
-		}
-		if d.vel <= 0 || d.acc <= 0 {
-			log.Fatalf("get_motion_params returned %v; pass -vel-deg and -acc-deg", resp)
-		}
+		log.Fatalf("get_motion_params returned %v; pass -vel-deg and -acc-deg", resp)
 	}
 	log.Printf("limits: %.1f deg/s, %.1f deg/s^2; trajex %g Hz, path tol %g deg", d.vel, d.acc, d.hz, d.pathTol)
 
@@ -231,6 +230,18 @@ func runGoal(ctx context.Context, d *deps, i int, g goal) error {
 		return fmt.Errorf("return to start: %w", err)
 	}
 
+	// The paced path runs at the arm's configured speed, not trajex's limits, so match them
+	// for the run and restore afterwards; otherwise the two lines compare different speeds.
+	if d.vel != d.armVel || d.acc != d.armAcc {
+		if err := d.setArmLimits(ctx, d.vel, d.acc); err != nil {
+			return err
+		}
+		defer func() {
+			if err := d.setArmLimits(context.Background(), d.armVel, d.armAcc); err != nil {
+				log.Printf("restore arm limits: %v", err)
+			}
+		}()
+	}
 	// executeCheckStart is an L-inf epsilon in RADIANS; <= 0 selects rdk's 0.01 rad, which
 	// servo droop trips every run. 0.1 rad = 5.7 deg sits above the droop and matches the
 	// module's stream-start gate.
@@ -242,6 +253,16 @@ func runGoal(ctx context.Context, d *deps, i int, g goal) error {
 		return fmt.Errorf("paced execute: %w", err)
 	}
 	report("paced:   ", wall, pathDeviation(trace, waypoints))
+	return nil
+}
+
+// setArmLimits is the arm's set_speed / set_acceleration DoCommand (deg/s, deg/s^2; the arm
+// clamps to 3-180 and 50-500).
+func (d *deps) setArmLimits(ctx context.Context, velDeg, accDeg float64) error {
+	_, err := d.arm.DoCommand(ctx, map[string]any{"set_speed": velDeg, "set_acceleration": accDeg})
+	if err != nil {
+		return fmt.Errorf("set arm limits to %.1f deg/s, %.1f deg/s^2: %w", velDeg, accDeg, err)
+	}
 	return nil
 }
 
