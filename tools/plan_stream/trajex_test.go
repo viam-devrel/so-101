@@ -15,15 +15,18 @@ func TestTrajexInputsShapesDtypeAndRadians(t *testing.T) {
 	wp := [][]float64{{0, 0, 0, 0, 0}, {0.1, 0.2, 0.3, 0.4, 0.5}, {0.2, 0.4, 0.6, 0.8, 1.0}}
 	in := trajexInputs(wp, 90, 180, 0.5, 100)
 
-	require.Len(t, in, 5)
-	for _, k := range []string{inWaypoints, inVel, inAcc, inPathTol, inHz} {
+	require.Len(t, in, 7)
+	for _, k := range []string{inWaypoints, inVel, inAcc, inPathTol, inColinear, inDedup} {
 		require.Contains(t, in, k)
 		assert.Equal(t, tensor.Float64, in[k].Dtype(), k)
 	}
+	assert.Equal(t, tensor.Int64, in[inHz].Dtype(), "the C++ service wants an int64 sampling rate")
 	assert.Equal(t, tensor.Shape{3, 5}, in[inWaypoints].Shape())
 	assert.Equal(t, tensor.Shape{5}, in[inVel].Shape())
 	assert.Equal(t, tensor.Shape{5}, in[inAcc].Shape())
 	assert.Equal(t, tensor.Shape{1}, in[inPathTol].Shape())
+	assert.Equal(t, tensor.Shape{1}, in[inColinear].Shape())
+	assert.Equal(t, tensor.Shape{1}, in[inDedup].Shape())
 	assert.Equal(t, tensor.Shape{1}, in[inHz].Shape())
 
 	// Waypoints pass through untouched (already radians); limits/tolerance are deg -> rad.
@@ -34,7 +37,9 @@ func TestTrajexInputsShapesDtypeAndRadians(t *testing.T) {
 	assert.InDeltaSlice(t, []float64{math.Pi, math.Pi, math.Pi, math.Pi, math.Pi},
 		in[inAcc].Data().([]float64), 1e-12)
 	assert.InDelta(t, 0.5*math.Pi/180, in[inPathTol].Data().([]float64)[0], 1e-12)
-	assert.Equal(t, []float64{100}, in[inHz].Data().([]float64))
+	assert.Equal(t, []float64{0}, in[inColinear].Data().([]float64), "0 = colinearization off")
+	assert.Equal(t, []float64{dedupToleranceRads}, in[inDedup].Data().([]float64))
+	assert.Equal(t, []int64{100}, in[inHz].Data().([]int64))
 }
 
 func TestTrajexPointsPairsTimesWithConfigurationRows(t *testing.T) {

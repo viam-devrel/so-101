@@ -18,13 +18,19 @@ const (
 	inVel       = "velocity_limits_rads_per_sec"
 	inAcc       = "acceleration_limits_rads_per_sec2"
 	inPathTol   = "path_tolerance_delta_rads"
+	inColinear  = "path_colinearization_ratio"
+	inDedup     = "waypoint_deduplication_tolerance_rads"
 	inHz        = "trajectory_sampling_freq_hz"
 	outTimes    = "sample_times_sec"
 	outConfigs  = "configurations_rads"
+
+	// dedupToleranceRads matches rdk's sim arm; colinearization 0 means "off" to the service.
+	dedupToleranceRads = 1e-5
 )
 
-// trajexInputs builds the float64 tensors trajex's mlmodel requires. waypoints are radians
-// (from armWaypoints); velDeg/accDeg/pathTolDeg are degrees and are converted here.
+// trajexInputs builds every tensor the registry trajex service requires (the C++ service, unlike
+// the Go adapter, rejects a missing optional and wants the sampling frequency as int64).
+// waypoints are radians (from armWaypoints); velDeg/accDeg/pathTolDeg are degrees.
 func trajexInputs(waypoints [][]float64, velDeg, accDeg, pathTolDeg, hz float64) ml.Tensors {
 	n, dof := len(waypoints), len(waypoints[0])
 	flat := make([]float64, 0, n*dof)
@@ -42,7 +48,9 @@ func trajexInputs(waypoints [][]float64, velDeg, accDeg, pathTolDeg, hz float64)
 		inVel:       tensor.New(tensor.WithShape(dof), tensor.WithBacking(vel)),
 		inAcc:       tensor.New(tensor.WithShape(dof), tensor.WithBacking(acc)),
 		inPathTol:   tensor.New(tensor.WithShape(1), tensor.WithBacking([]float64{utils.DegToRad(pathTolDeg)})),
-		inHz:        tensor.New(tensor.WithShape(1), tensor.WithBacking([]float64{hz})),
+		inColinear:  tensor.New(tensor.WithShape(1), tensor.WithBacking([]float64{0})),
+		inDedup:     tensor.New(tensor.WithShape(1), tensor.WithBacking([]float64{dedupToleranceRads})),
+		inHz:        tensor.New(tensor.WithShape(1), tensor.WithBacking([]int64{int64(math.Round(hz))})),
 	}
 }
 
