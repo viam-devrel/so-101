@@ -105,6 +105,10 @@ func main() {
 		flag.Usage()
 		os.Exit(2)
 	}
+	// A nonsense cloud is worse than none: the solver can never land inside it.
+	if err := planning.ValidateGoalCloudTolerances(*orientTol, *posTol); err != nil {
+		log.Fatal(err)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
