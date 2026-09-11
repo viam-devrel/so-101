@@ -1,4 +1,4 @@
-package main
+package streamx
 
 import (
 	"math"
@@ -8,23 +8,23 @@ import (
 	"go.viam.com/rdk/utils"
 )
 
-// sample is one JointPositions read: t since the run started, q in radians.
-type sample struct {
-	t time.Duration
-	q []float64
+// Sample is one JointPositions read: T since the run started, Q in radians.
+type Sample struct {
+	T time.Duration
+	Q []float64
 }
 
-// deviation is a trace's joint-space distance from the planned polyline, in degrees.
-type deviation struct {
-	mean, p95, max float64
-	finalErr       []float64 // per joint, |last sample - last waypoint|
+// Deviation is a trace's joint-space distance from the planned polyline, in degrees.
+type Deviation struct {
+	Mean, P95, Max float64
+	FinalErr       []float64 // per joint, |last sample - last waypoint|
 }
 
-// pathDeviation scores trace against pathRad (both radians; output degrees): each sample's
-// L2 distance over all joints to the nearest point on any polyline segment. Both runs are
-// scored against the same polyline, so the numbers are comparable.
-func pathDeviation(trace []sample, pathRad [][]float64) deviation {
-	var d deviation
+// PathDeviation scores trace against pathRad (both radians; output degrees): each sample's
+// L2 distance over all joints to the nearest point on any polyline segment. Runs scored
+// against the same polyline are comparable.
+func PathDeviation(trace []Sample, pathRad [][]float64) Deviation {
+	var d Deviation
 	if len(trace) == 0 || len(pathRad) == 0 {
 		return d
 	}
@@ -34,17 +34,17 @@ func pathDeviation(trace []sample, pathRad [][]float64) deviation {
 	}
 	dists := make([]float64, len(trace))
 	for i, s := range trace {
-		dists[i] = distToPolyline(toDeg(s.q), path)
-		d.mean += dists[i]
-		d.max = math.Max(d.max, dists[i])
+		dists[i] = distToPolyline(toDeg(s.Q), path)
+		d.Mean += dists[i]
+		d.Max = math.Max(d.Max, dists[i])
 	}
-	d.mean /= float64(len(dists))
+	d.Mean /= float64(len(dists))
 	sort.Float64s(dists)
-	d.p95 = dists[int(math.Ceil(0.95*float64(len(dists))))-1] // nearest rank
-	last, goal := toDeg(trace[len(trace)-1].q), path[len(path)-1]
-	d.finalErr = make([]float64, len(goal))
+	d.P95 = dists[int(math.Ceil(0.95*float64(len(dists))))-1] // nearest rank
+	last, goal := toDeg(trace[len(trace)-1].Q), path[len(path)-1]
+	d.FinalErr = make([]float64, len(goal))
 	for j := range goal {
-		d.finalErr[j] = math.Abs(last[j] - goal[j])
+		d.FinalErr[j] = math.Abs(last[j] - goal[j])
 	}
 	return d
 }

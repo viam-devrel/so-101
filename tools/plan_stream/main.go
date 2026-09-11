@@ -17,7 +17,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/golang/geo/r3"
 	"go.viam.com/rdk/components/arm"
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/referenceframe"
@@ -29,14 +28,10 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 
 	"so_arm/internal/planning"
+	"so_arm/tools/internal/streamx"
 )
 
-type goal struct {
-	pos    r3.Vector
-	orient *spatialmath.OrientationVector // nil keeps the arm's current orientation
-}
-
-type goalList []goal
+type goalList []streamx.Goal
 
 // obstacleList collects -obstacle boxes, all in the <arm>_origin frame.
 type obstacleList []spatialmath.Geometry
@@ -44,7 +39,7 @@ type obstacleList []spatialmath.Geometry
 func (o *obstacleList) String() string { return fmt.Sprintf("%d obstacles", len(*o)) }
 
 func (o *obstacleList) Set(s string) error {
-	box, err := parseObstacle(s, len(*o))
+	box, err := streamx.ParseObstacle(s, len(*o))
 	if err != nil {
 		return err
 	}
@@ -52,62 +47,15 @@ func (o *obstacleList) Set(s string) error {
 	return nil
 }
 
-// parseObstacle reads "x,y,z,dx,dy,dz": an axis-aligned box centred at x,y,z with those
-// side lengths, all mm.
-func parseObstacle(s string, i int) (spatialmath.Geometry, error) {
-	fields := strings.Split(s, ",")
-	if len(fields) != 6 {
-		return nil, fmt.Errorf("obstacle %q: want x,y,z,dx,dy,dz", s)
-	}
-	v := make([]float64, 6)
-	for j, f := range fields {
-		x, err := strconv.ParseFloat(strings.TrimSpace(f), 64)
-		if err != nil {
-			return nil, fmt.Errorf("obstacle %q: %w", s, err)
-		}
-		v[j] = x
-	}
-	if v[3] <= 0 || v[4] <= 0 || v[5] <= 0 {
-		return nil, fmt.Errorf("obstacle %q: side lengths must be positive", s)
-	}
-	return spatialmath.NewBox(
-		spatialmath.NewPoseFromPoint(r3.Vector{X: v[0], Y: v[1], Z: v[2]}),
-		r3.Vector{X: v[3], Y: v[4], Z: v[5]}, fmt.Sprintf("obstacle%d", i+1))
-}
-
 func (g *goalList) String() string { return fmt.Sprintf("%d goals", len(*g)) }
 
 func (g *goalList) Set(s string) error {
-	parsed, err := parseGoal(s)
+	parsed, err := streamx.ParseGoal(s)
 	if err != nil {
 		return err
 	}
 	*g = append(*g, parsed)
 	return nil
-}
-
-// parseGoal reads "x,y,z" or "x,y,z,ox,oy,oz" (mm; orientation vector with theta 0).
-func parseGoal(s string) (goal, error) {
-	fields := strings.Split(s, ",")
-	if len(fields) != 3 && len(fields) != 6 {
-		return goal{}, fmt.Errorf("goal %q: want x,y,z or x,y,z,ox,oy,oz", s)
-	}
-	v := make([]float64, len(fields))
-	for i, f := range fields {
-		x, err := strconv.ParseFloat(strings.TrimSpace(f), 64)
-		if err != nil {
-			return goal{}, fmt.Errorf("goal %q: %w", s, err)
-		}
-		v[i] = x
-	}
-	g := goal{pos: r3.Vector{X: v[0], Y: v[1], Z: v[2]}}
-	if len(v) == 6 {
-		g.orient = &spatialmath.OrientationVector{OX: v[3], OY: v[4], OZ: v[5]}
-		if err := g.orient.IsValid(); err != nil {
-			return goal{}, fmt.Errorf("goal %q: %w", s, err)
-		}
-	}
-	return g, nil
 }
 
 type deps struct {
@@ -207,7 +155,7 @@ func main() {
 }
 
 // runGoal is the spec's per-goal flow: plan, trajex, streamed run, return, paced run.
-func runGoal(ctx context.Context, d *deps, i int, g goal) error {
+func runGoal(ctx context.Context, d *deps, i int, g streamx.Goal) error {
 	start, err := d.arm.JointPositions(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("joint positions: %w", err)
@@ -216,13 +164,9 @@ func runGoal(ctx context.Context, d *deps, i int, g goal) error {
 	if err != nil {
 		return fmt.Errorf("end position: %w", err)
 	}
-	orient := pose.Orientation()
-	if g.orient != nil {
-		orient = g.orient
-	}
 	// Same cone the module's own MoveToPosition sends; extra=nil is the plain cone path.
 	dest, extra, _, err := planning.BuildMoveDestination(
-		fmt.Sprintf("%v_origin", d.armName), spatialmath.NewPose(g.pos, orient), d.cloud, nil)
+		fmt.Sprintf("%v_origin", d.armName), g.Pose(pose.Orientation()), d.cloud, nil)
 	if err != nil {
 		return err
 	}
@@ -251,11 +195,11 @@ func runGoal(ctx context.Context, d *deps, i int, g goal) error {
 		return err
 	}
 
-	out, err := d.trajex.Infer(ctx, trajexInputs(waypoints, d.vel, d.acc, d.pathTol, d.hz))
+	out, err := d.trajex.Infer(ctx, streamx.Inputs(waypoints, d.vel, d.acc, d.pathTol, d.hz))
 	if err != nil {
 		return fmt.Errorf("trajex: %w", err)
 	}
-	points, err := trajexPoints(out)
+	points, err := streamx.Points(out)
 	if err != nil {
 		return err
 	}
@@ -263,7 +207,7 @@ func runGoal(ctx context.Context, d *deps, i int, g goal) error {
 		return fmt.Errorf("trajex returned no samples")
 	}
 	fmt.Printf("goal %d (%g,%g,%g): %d waypoints -> %d samples @%g Hz, trajex %.2fs, path tol %g deg\n",
-		i+1, g.pos.X, g.pos.Y, g.pos.Z, len(waypoints), len(points), d.hz,
+		i+1, g.Pos.X, g.Pos.Y, g.Pos.Z, len(waypoints), len(points), d.hz,
 		points[len(points)-1].Time.Seconds(), d.pathTol)
 
 	// The arm is already at start (the planner seeds from current inputs), so the module's
@@ -272,7 +216,7 @@ func runGoal(ctx context.Context, d *deps, i int, g goal) error {
 	if err != nil {
 		return fmt.Errorf("streamed: %w", err)
 	}
-	report("streamed:", wall, pathDeviation(trace, waypoints))
+	report("streamed:", wall, streamx.PathDeviation(trace, waypoints))
 
 	if err := d.arm.MoveToJointPositions(ctx, start, nil); err != nil {
 		return fmt.Errorf("return to start: %w", err)
@@ -300,7 +244,7 @@ func runGoal(ctx context.Context, d *deps, i int, g goal) error {
 	if err != nil {
 		return fmt.Errorf("paced execute: %w", err)
 	}
-	report("paced:   ", wall, pathDeviation(trace, waypoints))
+	report("paced:   ", wall, streamx.PathDeviation(trace, waypoints))
 	return nil
 }
 
@@ -344,10 +288,10 @@ func (d *deps) stream(ctx context.Context, points []arm.TrajectoryPoint) error {
 
 // sampled runs fn while polling JointPositions at sampleHz. A failed read is logged and
 // skipped; the trace and wall time are returned alongside fn's error.
-func (d *deps) sampled(ctx context.Context, fn func(context.Context) error) ([]sample, time.Duration, error) {
+func (d *deps) sampled(ctx context.Context, fn func(context.Context) error) ([]streamx.Sample, time.Duration, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	var trace []sample
+	var trace []streamx.Sample
 	done := make(chan struct{})
 	started := time.Now()
 	go func() {
@@ -367,7 +311,7 @@ func (d *deps) sampled(ctx context.Context, fn func(context.Context) error) ([]s
 				}
 				continue
 			}
-			trace = append(trace, sample{t: time.Since(started), q: q})
+			trace = append(trace, streamx.Sample{T: time.Since(started), Q: q})
 		}
 	}()
 	err := fn(ctx)
@@ -377,9 +321,9 @@ func (d *deps) sampled(ctx context.Context, fn func(context.Context) error) ([]s
 	return trace, wall, err
 }
 
-func report(label string, wall time.Duration, dev deviation) {
+func report(label string, wall time.Duration, dev streamx.Deviation) {
 	fmt.Printf("  %s wall %.2fs  dev mean %.2f p95 %.2f max %.1f deg  final %s deg\n",
-		label, wall.Seconds(), dev.mean, dev.p95, dev.max, fmtDeg(dev.finalErr))
+		label, wall.Seconds(), dev.Mean, dev.P95, dev.Max, fmtDeg(dev.FinalErr))
 }
 
 func fmtDeg(v []float64) string {
