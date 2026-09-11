@@ -488,6 +488,34 @@ Enforcing acceleration costs some speed, because the servos now ramp instead of 
 
 The simulated arm re-targets its interpolator at each point's time. One log line per stream reports gate, late points, settle and wall time.
 
+#### Planned motion through trajex
+
+`tools/plan_stream` is the intended production shape of the streamed RPC, measured against the path the motion service takes today. For each `-goal` it plans a move with the machine's motion service (rdk `armplanning`, with the same approach-axis goal cone as [`MoveToPosition`](#approach-axis-orientation-planning)), time-parameterises the planned waypoints with [trajex](https://app.viam.com/module/viam/trajex) running on the machine as an ML model service, streams the sampled trajectory through `MoveThroughJointPositionsStreamed`, returns to the start, then executes the **same** plan through the motion service's paced `execute` (the `MoveThroughJointPositions` path). Both runs are sampled at `-sample-hz` and scored against the planned joint-space polyline, so the difference between the two lines is execution only.
+
+The machine needs the arm to have a `frame`, the builtin motion service, viam-server ≥ 1.1.0, and the trajex module with one ML model service:
+
+```json
+{
+  "modules": [{"type": "registry", "name": "viam_trajex", "module_id": "viam:trajex", "version": "latest"}],
+  "services": [{"name": "trajex", "api": "rdk:service:mlmodel", "model": "viam:trajex:mlmodel"}]
+}
+```
+
+```sh
+VIAM_API_KEY=... VIAM_API_KEY_ID=... \
+  go run ./tools/plan_stream -address <machine>.viam.cloud -arm follower-arm -goal 200,0,150
+```
+
+`-goal x,y,z[,ox,oy,oz]` is millimetres in the `<arm>_origin` frame (repeatable; three values keep the current orientation). `-vel-deg` / `-acc-deg` default to the arm's `get_motion_params`, `-hz` (100) is trajex's sampling rate, `-path-tol-deg` (0.5) its corner-blending tolerance — the streamed trace deviates from the polyline by up to that much *by design*, while the paced run drives through the corners. Output, one header and two lines per goal:
+
+```
+goal 1 (200,0,150): 9 waypoints -> 412 samples @100 Hz, trajex 4.12s, path tol 0.5 deg
+  streamed: wall 4.31s  dev mean 0.84 p95 2.10 max 3.9 deg  final [0.3 0.5 0.2 0.4 0.1] deg
+  paced:    wall 6.02s  dev mean 1.12 p95 3.40 max 5.1 deg  final [0.2 0.6 0.3 0.4 0.2] deg
+```
+
+`dev` is each sample's joint-space L2 distance (degrees, over the five joints) to the nearest point on the planned polyline; `final` is the per-joint error at the last sample. The paced run uses `executeCheckStart: 0.1` rad (5.7°): rdk's default 0.01 rad start check is below a Feetech servo's steady-state droop and fails every run.
+
 ## Approach-axis orientation planning
 
 The SO-101 is a 5-DOF arm, so most six-DOF pose targets are unreachable exactly. Rather than discard orientation wholesale, `MoveToPosition` attaches a `referenceframe.PoseCloud` to the goal: a cone that constrains where the tool points (the approach axis), while **roll about that axis is free**. `orientation_tolerance_deg` sets the cone's half-angle; `position_tolerance_mm` sets the per-axis positional leeway, applied as a **box along the goal frame's axes, not a radius** — worst-case corner deviation is `sqrt(3)` times the value (~`1.73mm` at the default `1.0`).
