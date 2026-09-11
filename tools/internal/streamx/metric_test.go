@@ -66,3 +66,33 @@ func TestPathDeviationEmptyTraceIsZeroValue(t *testing.T) {
 	require.NotPanics(t, func() { d = PathDeviation(nil, polyline) })
 	assert.Equal(t, Deviation{}, d)
 }
+
+func TestExecutedPrefixTruncatesAtTheNearestProjection(t *testing.T) {
+	// polyline (0,0) -> (10,0) -> (10,10); q_s beside the second segment.
+	got := ExecutedPrefix(polyline, rad(10.5, 3))
+	require.Len(t, got, 3)
+	assert.Equal(t, polyline[0], got[0])
+	assert.Equal(t, polyline[1], got[1])
+	assert.Equal(t, rad(10.5, 3), got[2], "q_s itself is the new endpoint")
+
+	got = ExecutedPrefix(polyline, rad(4, 1))
+	require.Len(t, got, 2, "on the first segment only the first waypoint is kept")
+	assert.Equal(t, polyline[0], got[0])
+	assert.Equal(t, rad(4, 1), got[1])
+}
+
+func TestExecutedPrefixDoesNotMutateTheInput(t *testing.T) {
+	in := [][]float64{rad(0, 0), rad(10, 0), rad(10, 10)}
+	_ = ExecutedPrefix(in, rad(4, 1))
+	assert.Equal(t, polyline, in)
+}
+
+func TestExecutedPrefixDegenerateInputs(t *testing.T) {
+	assert.Equal(t, [][]float64{rad(1, 1), rad(2, 2)}, ExecutedPrefix([][]float64{rad(1, 1)}, rad(2, 2)), "a single waypoint")
+	assert.Nil(t, ExecutedPrefix(nil, rad(2, 2)))
+	// A tie at a shared vertex picks the earlier segment; qs IS that vertex, so nothing
+	// driven is lost and no zero-length segment is added.
+	got := ExecutedPrefix(polyline, rad(10, 0))
+	require.Len(t, got, 2)
+	assert.Equal(t, polyline[1], got[1])
+}
