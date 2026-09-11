@@ -24,7 +24,9 @@ internal/planning/     approach-axis goal clouds
 internal/servocmd/     the servo_* DoCommand wire protocol
 internal/testfake/     test doubles shared across package boundaries
 assets/urdf/           runtime-loaded URDF + collision meshes + SO-ARM100 license
-tools/                 mesh/URDF generator scripts + stream_trajectory, plan_stream (Go, not in the binary)
+tools/                 mesh/URDF generator scripts + stream_trajectory, plan_stream,
+                       online_stream (needs -tags nlopt); tools/internal/streamx is their
+                       shared pure helper package (Go, not in the binary)
 docs/                  one file per model; README.md is an index
 ```
 
@@ -142,8 +144,8 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
 - Tests that need `VIAM_MODULE_ROOT` must use `testfake.RepoRoot()`, never `"."` — tests run
   from their own package directory, not the repo root.
 - `go build ./...` drops stray binaries named `module`, `stream_trajectory` and `plan_stream` at
-  the repo root (Go names them after `cmd/module`'s and `tools/*`'s directories). All three are
-  gitignored.
+  the repo root (Go names them after `cmd/module`'s and `tools/*`'s directories), and
+  `go build -tags nlopt ./...` adds `online_stream`. All four are gitignored.
 
 ## Gotchas
 
@@ -618,3 +620,13 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
   behaviour and is now lossy: `EndPosition` for a joint drooped past its limit reports the pose
   AT the limit where an unclamped `Transform` would be correct. `oob_test.go` now pins only that
   clamp; removing it is a deliberate small follow-up, not an accident to guard against.
+- **`tools/online_stream` is build-tagged `nlopt`** because armplanning's IK needs the system
+  nlopt library via cgo; `./...` skips it, so CI never links nlopt — do not remove the tag
+  (build/vet/test it with `-tags nlopt`; `go mod tidy` keeps `github.com/go-nlopt/nlopt` as an
+  indirect requirement for it). `RobotClient.CurrentInputs` fails against this module (the
+  gripper's `CurrentInputs` is `ErrUnsupported`); build start inputs with
+  `referenceframe.NewZeroInputs(fs)` + the arm's `JointPositions`. `PlanRequest` has no
+  `WorldState`: obstacles go in `ObstaclesInWorldFrame`, flattened with
+  `WorldState.ObstaclesInWorldFrame`. A `Stop`-cancelled move reaches a gRPC client as
+  `codes.Canceled` (grpc-go's `status.FromContextError`), not as `context.Canceled` —
+  check `status.Code(err)`.

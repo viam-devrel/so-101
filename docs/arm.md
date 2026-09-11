@@ -516,6 +516,38 @@ goal 1 (200,0,150): 9 waypoints -> 412 samples @100 Hz, trajex 4.12s, path tol 0
 
 `dev` is each sample's joint-space L2 distance (degrees, over the five joints) to the nearest point on the planned polyline; `final` is the per-joint error at the last sample. The paced run uses `executeCheckStart: 0.1` rad (5.7°): rdk's default 0.01 rad start check is below a Feetech servo's steady-state droop and fails every run.
 
+#### Online replanning through trajex
+
+`tools/online_stream` is the "new input arrives mid-motion" demo on top of the same pipeline. The arm is streaming a trajex-timed plan toward goal A when an event fires — the target switches to goal B (`-switch-after` seconds), an obstacle appears (`-obstacle-after seconds,x,y,z,dx,dy,dz`), or both — and the tool replans **in-process** (rdk `armplanning`, from where the arm *will* be at a stitch time `runway + plan margin` after the event), time-parameterises the new plan with trajex, and splices it into the live stream without stopping. A baseline (`-baseline`, default on; `-baseline=false` to skip) runs the same scenario the way today's stack can: paced `MoveThroughJointPositions`, `Stop` at the event, replan from the actual pose, paced move again.
+
+Planning in-process pulls in `motionplan/ik`, whose solver links the system **nlopt** library through cgo, so the tool is build-tagged and needs the library installed where it runs (`brew install nlopt` on macOS, `apt install libnlopt-dev` on Debian/Ubuntu). A plain `go run ./tools/online_stream` fails with `build constraints exclude all Go files`; the tag is required:
+
+```sh
+VIAM_API_KEY=... VIAM_API_KEY_ID=... \
+  go run -tags nlopt ./tools/online_stream -address <machine>.viam.cloud -arm follower-arm \
+    -goal 200,0,150 -goal 200,120,150 -switch-after 0.6 -obstacle-after 0.5,300,0,205,60,60,120
+```
+
+The machine prerequisites are those of `plan_stream` above (an arm `frame`, the trajex ML model service), minus the motion service — planning happens in the tool. `-goal` takes goal A then goal B; `-obstacle` boxes are present from the start. `-runway-ms` (300) is how far ahead of the clock points are sent, `-send-ms` (20) the send tick, `-plan-margin-ms` (300) the budget for planning + trajex — the stitch lands `runway + margin` after the event, and if planning returns later than that the arm rests at the stitch pose until the new points arrive (reported as `stitch late`). `-vel-deg` / `-acc-deg` / `-hz` / `-path-tol-deg` / `-sample-hz` are as for `plan_stream`; the baseline gets the same limits via `set_speed` / `set_acceleration`.
+
+**Every stitch is rest-to-rest.** trajex's `Infer` has no initial-velocity input, so each spliced trajectory decelerates to rest at the stitch and re-accelerates; the deviation and wall-time numbers include that, on purpose. Output, one block per mode, one line per segment plus the event that ended it:
+
+```
+plan A: 9 waypoints -> 412 samples @100 Hz, 4.12s; obstacles 1; plan 180ms
+streamed:
+  seg 1 (goal A, 0.00-0.90s):  dev mean 1.1 p95 2.0 max 2.4 deg
+  event @0.60s: switch -> goal B; stitch @0.90s; plan 212ms (7 waypoints, 3.05s); stitch late 0ms
+  seg 2 (goal B, 0.90-3.95s):  dev mean 1.3 p95 2.6 max 3.1 deg  final [0.2 0.4 0.1 0.3 0.1] deg
+  wall 4.02s
+baseline:
+  seg 1 (goal A, 0.00-0.61s):  dev mean 2.9 p95 6.1 max 7.0 deg
+  event @0.60s: switch -> goal B; Stop -> replan 240ms -> move; stop-to-move gap 0.31s
+  seg 2 (goal B, 0.61-5.10s):  dev mean 3.4 p95 7.8 max 8.2 deg  final [...] deg
+  wall 5.10s
+```
+
+A segment that a splice (or a `Stop`) ended is scored against the *executed* part of its plan — the planned polyline truncated at the stitch pose — so a sample cannot project onto a segment the arm never drove; the last segment is scored against its whole plan. In the streamed mode two events due on one send tick are applied as one replan, and an event that comes due while a replan is in flight is held for the next tick after it lands; in the baseline an event that comes due while the replan is running is folded into that replan (the arm is stopped, so its start pose still holds). Either way the number of segments is the number of splices (or Stops) plus one. The headline comparison between the modes is wall time and the stitch behaviour, not the deviation magnitude.
+
 ## Approach-axis orientation planning
 
 The SO-101 is a 5-DOF arm, so most six-DOF pose targets are unreachable exactly. Rather than discard orientation wholesale, `MoveToPosition` attaches a `referenceframe.PoseCloud` to the goal: a cone that constrains where the tool points (the approach axis), while **roll about that axis is free**. `orientation_tolerance_deg` sets the cone's half-angle; `position_tolerance_mm` sets the per-axis positional leeway, applied as a **box along the goal frame's axes, not a radius** — worst-case corner deviation is `sqrt(3)` times the value (~`1.73mm` at the default `1.0`).
