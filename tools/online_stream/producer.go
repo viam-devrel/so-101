@@ -38,6 +38,9 @@ type producer struct {
 	events                        []streamx.Event
 	replan                        replanFunc
 	runway, sendEvery, planMargin time.Duration
+	// next, when set, returns the event to enqueue after each applied splice: the loop
+	// driver's "plan the next leg". Called under mu; it must not call back in.
+	next func(cur []arm.TrajectoryPoint) (streamx.Event, bool)
 
 	mu      sync.Mutex
 	t0      time.Time // first send; zero until then
@@ -65,6 +68,9 @@ func (p *producer) run(ctx context.Context) error {
 	if len(p.cur) == 0 {
 		return fmt.Errorf("producer: empty initial trajectory")
 	}
+	p.mu.Lock()
+	p.enqueueNext()
+	p.mu.Unlock()
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	batches := make(chan []arm.TrajectoryPoint)
@@ -156,6 +162,19 @@ func (p *producer) feed(ctx context.Context, batches chan<- []arm.TrajectoryPoin
 	}
 }
 
+// enqueueNext appends the hook's event, keeping fired the same length as events. mu must
+// be held, and for a splice it must be the section that cleared pending: between the two,
+// done (nothing pending, nothing unfired) would be momentarily true.
+func (p *producer) enqueueNext() {
+	if p.next == nil {
+		return
+	}
+	if e, ok := p.next(p.cur); ok {
+		p.events = append(p.events, e)
+		p.fired = append(p.fired, false)
+	}
+}
+
 // hasUnfired reports whether an event is still to come. mu must be held.
 func (p *producer) hasUnfired() bool {
 	for _, f := range p.fired {
@@ -197,10 +216,13 @@ func (p *producer) startReplan(ctx context.Context, due []int, elapsed time.Dura
 			events: events, tStitch: tStitch, qs: qs, planLatency: latency,
 			stitchLate: max(0, p.elapsed()-tStitch), waypoints: wps, newPts: pts,
 		})
+		p.enqueueNext() // schedules off the spliced cur, before mu is released
 	}()
 }
 
-// result is the final trajectory and the splices applied, for the report. Call after run.
+// result is the trajectory so far and the splices applied, for the report. Safe while run
+// is live: mu covers both, Splice returns a new slice so a published cur is never mutated,
+// and splices only grows past the returned length.
 func (p *producer) result() ([]arm.TrajectoryPoint, []splice) {
 	p.mu.Lock()
 	defer p.mu.Unlock()

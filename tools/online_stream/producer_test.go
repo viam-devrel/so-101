@@ -109,20 +109,30 @@ func (r *fakeReplan) fn(ctx context.Context, _ []float64, due []streamx.Event) (
 	return [][]float64{{0}, {0.49}}, pts, r.delay, nil
 }
 
-// assertStreamed checks the arm saw exactly the final trajectory, in order, well-formed.
-func assertStreamed(t *testing.T, f *fakeStreamArm, cur []arm.TrajectoryPoint) {
+// assertStreamedPrefix checks the arm saw an in-order, well-formed prefix of cur: after a
+// cancel, cur extends past what was sent by up to a leg.
+func assertStreamedPrefix(t *testing.T, f *fakeStreamArm, cur []arm.TrajectoryPoint) {
 	t.Helper()
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	require.Equal(t, len(cur), len(f.sent), "every point of the final trajectory was sent")
-	for i := range cur {
+	require.NotEmpty(t, f.sent)
+	require.LessOrEqual(t, len(f.sent), len(cur))
+	for i := range f.sent {
 		assert.Equal(t, cur[i], f.sent[i], "point %d", i)
 	}
-	require.NotEmpty(t, f.sent)
 	assert.Equal(t, time.Duration(0), f.sent[0].Time)
 	for i := 1; i < len(f.sent); i++ {
 		assert.Less(t, f.sent[i-1].Time, f.sent[i].Time, "strictly increasing at %d", i)
 	}
+}
+
+// assertStreamed is the prefix check plus "nothing was left unsent".
+func assertStreamed(t *testing.T, f *fakeStreamArm, cur []arm.TrajectoryPoint) {
+	t.Helper()
+	assertStreamedPrefix(t, f, cur)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	assert.Len(t, f.sent, len(cur), "every point of the final trajectory was sent")
 }
 
 func TestProducerAppliesTwoEventsDueOnOneTickAsOneSplice(t *testing.T) {
@@ -222,4 +232,48 @@ func TestProducerSurfacesAnRPCError(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("run did not return within 5s")
 	}
+}
+
+// TestProducerLoopsWithTheNextHook pins the loop contract: the hook keeps enqueuing, so
+// done is never true and run returns only on cancel, and each stitch lands at the end of
+// the leg it was scheduled from.
+func TestProducerLoopsWithTheNextHook(t *testing.T) {
+	const (
+		loopRunway = 50 * time.Millisecond
+		loopMargin = 50 * time.Millisecond
+		legEnd     = 190 * time.Millisecond // synth(20)'s last Time
+	)
+	f := &fakeStreamArm{}
+	r := &fakeReplan{delay: 10 * time.Millisecond, retPts: synth(20)}
+	p := newProducer(f, synth(20), nil, r.fn, loopRunway, testSend, loopMargin)
+	p.next = func(cur []arm.TrajectoryPoint) (streamx.Event, bool) {
+		return streamx.Event{At: max(0, cur[len(cur)-1].Time-loopRunway-loopMargin)}, true
+	}
+
+	// Cancel, not a deadline: run must surface context.Canceled through its "stream: " wrap.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	time.AfterFunc(800*time.Millisecond, cancel)
+	// result() is safe to call while run is live; -race is the assertion.
+	poll := make(chan struct{})
+	go func() {
+		defer close(poll)
+		for ctx.Err() == nil {
+			p.result()
+			time.Sleep(5 * time.Millisecond)
+		}
+	}()
+	err := p.run(ctx)
+	<-poll
+	require.ErrorIs(t, err, context.Canceled, "cancel, wrapped as stream: ...")
+
+	cur, splices := p.result()
+	require.GreaterOrEqual(t, len(splices), 3, "at least three legs")
+	end := legEnd
+	for k, s := range splices {
+		assert.GreaterOrEqual(t, s.tStitch, end, "splice %d stitches at or after leg %d's end", k, k)
+		assert.Less(t, s.tStitch, end+4*testSend, "splice %d stitches within a few ticks of it", k)
+		end = s.tStitch + legEnd
+	}
+	assertStreamedPrefix(t, f, cur)
 }
