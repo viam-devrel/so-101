@@ -95,3 +95,9 @@ func TestSpliceRejectsBadInput(t *testing.T) {
 	_, err = Splice(pts(3), late, time.Second)
 	assert.ErrorContains(t, err, "Time 0")
 }
+
+func TestWindowClampsAStaleSent(t *testing.T) {
+	require.NotPanics(t, func() {
+		assert.Empty(t, Window(pts(3), 5, time.Hour))
+	})
+}

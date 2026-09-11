@@ -2,6 +2,7 @@ package streamx
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -34,7 +35,7 @@ func ParseObstacleAfter(s string, i int) (Event, error) {
 	if err != nil {
 		return Event{}, fmt.Errorf("obstacle-after %q: %w", s, err)
 	}
-	return Event{At: time.Duration(v[0] * float64(time.Second)), Obstacle: b}, nil
+	return Event{At: time.Duration(math.Round(v[0] * float64(time.Second))), Obstacle: b}, nil
 }
 
 // Due returns the indices of the not-yet-fired events with At <= elapsed, in index order,

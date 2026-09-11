@@ -33,16 +33,23 @@ func At(points []arm.TrajectoryPoint, t time.Duration) []float64 {
 	return out
 }
 
-// Window is points[sent:k], k the first index with Time >= upTo: the not-yet-sent points
-// strictly before upTo. Strict, to match Splice's prefix predicate, so a point sent under a
-// clamped window is never one Splice drops. k is clamped to sent so a shrinking upTo cannot
-// produce a negative slice.
-func Window(points []arm.TrajectoryPoint, sent int, upTo time.Duration) []arm.TrajectoryPoint {
-	k := sent
-	for k < len(points) && points[k].Time < upTo {
+// firstAtOrAfter is the first index >= from whose Time is >= t. Window and Splice share it
+// so their predicates cannot drift apart: a point sent under a clamped window is never one
+// Splice drops.
+func firstAtOrAfter(points []arm.TrajectoryPoint, from int, t time.Duration) int {
+	k := from
+	for k < len(points) && points[k].Time < t {
 		k++
 	}
-	return points[sent:k]
+	return k
+}
+
+// Window is points[sent:k], k the first index with Time >= upTo: the not-yet-sent points
+// strictly before upTo. sent is clamped to len(points) and k to sent, so neither a stale
+// sent nor a shrinking upTo can produce a bad slice.
+func Window(points []arm.TrajectoryPoint, sent int, upTo time.Duration) []arm.TrajectoryPoint {
+	sent = min(sent, len(points))
+	return points[sent:firstAtOrAfter(points, sent, upTo)]
 }
 
 // Splice keeps cur's points with Time < tStitch and appends newPts shifted by tStitch.
@@ -55,10 +62,7 @@ func Splice(cur, newPts []arm.TrajectoryPoint, tStitch time.Duration) ([]arm.Tra
 	if newPts[0].Time != 0 {
 		return nil, fmt.Errorf("splice: new points must start at Time 0, got %v", newPts[0].Time)
 	}
-	k := 0
-	for k < len(cur) && cur[k].Time < tStitch {
-		k++
-	}
+	k := firstAtOrAfter(cur, 0, tStitch)
 	out := make([]arm.TrajectoryPoint, 0, k+len(newPts))
 	out = append(out, cur[:k]...)
 	for _, p := range newPts {
