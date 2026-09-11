@@ -12,20 +12,19 @@ import (
 func TestCheckTrajectoryTime(t *testing.T) {
 	cases := []struct {
 		name    string
-		i       int
 		prev, t time.Duration
 		wantErr bool
 	}{
-		{"first at zero", 0, 0, 0, false},
-		{"first non-zero", 0, 0, 10 * time.Millisecond, true},
-		{"first negative", 0, 0, -time.Millisecond, true},
-		{"increasing", 1, 10 * time.Millisecond, 20 * time.Millisecond, false},
-		{"equal", 2, 20 * time.Millisecond, 20 * time.Millisecond, true},
-		{"decreasing", 2, 20 * time.Millisecond, 5 * time.Millisecond, true},
+		{"first at zero", -1, 0, false},
+		{"first non-zero", -1, 10 * time.Millisecond, true},
+		{"first negative", -1, -time.Millisecond, true},
+		{"increasing", 10 * time.Millisecond, 20 * time.Millisecond, false},
+		{"equal", 20 * time.Millisecond, 20 * time.Millisecond, true},
+		{"decreasing", 20 * time.Millisecond, 5 * time.Millisecond, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := CheckTrajectoryTime(tc.i, tc.prev, tc.t)
+			err := CheckTrajectoryTime(tc.prev, tc.t)
 			if tc.wantErr {
 				assert.Error(t, err)
 			} else {

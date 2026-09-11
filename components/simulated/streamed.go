@@ -2,7 +2,6 @@ package simulated
 
 import (
 	"context"
-	"errors"
 	"time"
 
 	"go.viam.com/rdk/components/arm"
@@ -21,7 +20,7 @@ func (s *simulatedSO101) MoveThroughJointPositionsStreamed(
 	_ map[string]interface{},
 ) error {
 	var start time.Time
-	var prev time.Duration
+	prev := time.Duration(-1) // no previous point yet
 	idx := 0
 	for {
 		var batch []arm.TrajectoryPoint
@@ -35,7 +34,7 @@ func (s *simulatedSO101) MoveThroughJointPositionsStreamed(
 			break
 		}
 		for _, p := range batch {
-			if err := servo.CheckTrajectoryTime(idx, prev, p.Time); err != nil {
+			if err := servo.CheckTrajectoryTime(prev, p.Time); err != nil {
 				return err
 			}
 			if idx == 0 {
@@ -44,15 +43,8 @@ func (s *simulatedSO101) MoveThroughJointPositionsStreamed(
 			if err := s.clock.WaitUntil(ctx, start.Add(p.Time)); err != nil {
 				return err
 			}
-			if idx > 0 {
-				s.mu.Lock()
-				stopped := s.operation.stopped
-				s.mu.Unlock()
-				if stopped {
-					return errors.New("stopped before reaching target")
-				}
-			}
-			if err := s.startMove(ctx, p.Positions); err != nil {
+			// A re-target must not erase a Stop that landed between points.
+			if err := s.startMove(ctx, p.Positions, idx > 0); err != nil {
 				return err
 			}
 			prev, idx = p.Time, idx+1

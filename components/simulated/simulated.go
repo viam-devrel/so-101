@@ -368,14 +368,15 @@ func (s *simulatedSO101) MoveToPosition(ctx context.Context, pose spatialmath.Po
 func (s *simulatedSO101) MoveToJointPositions(
 	ctx context.Context, positions []referenceframe.Input, extra map[string]interface{},
 ) error {
-	if err := s.startMove(ctx, positions); err != nil {
+	if err := s.startMove(ctx, positions, false); err != nil {
 		return err
 	}
 	return s.awaitOperation(ctx)
 }
 
-// startMove validates positions and replaces the in-flight operation without waiting.
-func (s *simulatedSO101) startMove(ctx context.Context, positions []referenceframe.Input) error {
+// startMove validates positions and replaces the in-flight operation without waiting. With
+// keepStop, an operation already stopped is not replaced: the caller reports the stop.
+func (s *simulatedSO101) startMove(ctx context.Context, positions []referenceframe.Input, keepStop bool) error {
 	if len(positions) != len(s.model.DoF()) {
 		return fmt.Errorf("expected %d joint positions for the SO-101 arm, got %d",
 			len(s.model.DoF()), len(positions))
@@ -388,8 +389,11 @@ func (s *simulatedSO101) startMove(ctx context.Context, positions []referencefra
 	copy(target, positions)
 
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	if keepStop && s.operation.stopped {
+		return errors.New("stopped before reaching target")
+	}
 	s.operation = simOperation{targetInputs: target}
-	s.mu.Unlock()
 	return nil
 }
 

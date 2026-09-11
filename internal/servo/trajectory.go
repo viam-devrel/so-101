@@ -6,17 +6,14 @@ import (
 	"time"
 )
 
-// CheckTrajectoryTime validates point i's Time against the previous point's: the first
-// point must be at 0 and every later one strictly after its predecessor.
-func CheckTrajectoryTime(i int, prev, t time.Duration) error {
-	if i == 0 {
-		if t != 0 {
-			return fmt.Errorf("first trajectory point must have Time 0, got %v", t)
-		}
-		return nil
-	}
-	if t <= prev {
-		return fmt.Errorf("trajectory point %d Time %v must exceed the previous point's %v", i, t, prev)
+// CheckTrajectoryTime validates a point's Time against the previous point's: the first
+// (prev < 0, i.e. none) must be at 0 and every later one strictly after its predecessor.
+func CheckTrajectoryTime(prev, t time.Duration) error {
+	switch {
+	case prev < 0 && t != 0:
+		return fmt.Errorf("first trajectory point must have Time 0, got %v", t)
+	case prev >= 0 && t <= prev:
+		return fmt.Errorf("trajectory point Time %v must exceed the previous point's %v", t, prev)
 	}
 	return nil
 }

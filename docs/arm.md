@@ -477,26 +477,16 @@ Enforcing acceleration costs some speed, because the servos now ramp instead of 
 
 ### Streaming trajectories (experimental)
 
-`MoveThroughJointPositionsStreamed` (rdk ≥ v1.1.0 and a viam-server ≥ 1.1.0 to route the RPC; this module builds against v1.6.0) takes a stream of time-stamped `TrajectoryPoint`s and follows the **producer's** timing instead of pacing each waypoint by position. It exists to measure whether time-scheduled streaming tracks a dense trajectory (a TOTG sampled at 100 Hz, or an arm-recorder replay) better than [waypoint streams](#waypoint-streams); it is not yet a replacement for them.
+`MoveThroughJointPositionsStreamed` (rdk and viam-server ≥ 1.1.0) follows the **producer's** timing: each `TrajectoryPoint` is written as an unbounded goal (`Speed 0 / Acc 0`, one `SetGoals` packet) at `start + Time`, with no position read in the loop. It exists to measure time-scheduled streaming against [waypoint streams](#waypoint-streams); it is not a replacement for them.
 
-- **Each point is an unbounded goal write at `start + Time`** -- the same `Speed 0 / Acc 0` path as [`streamed`](#streamed-setpoints-wait-and-streamed), one `SetGoals` packet per point, no position read in the loop. `Time` must be `0` for the first point and strictly increasing after it; a violation fails the call, with every earlier point already on the bus.
-- **5° start gate.** Before the first point is written, the arm reads its position once; if any joint is more than 5° from that point it makes one blocking *profiled* move there first. The clock starts after the gate. Only the first point is gated: a large jump between later points, or a schedule slip that lets the goal race ahead of the arm, reaches the servos unbounded. No policy for either has been measured yet.
-- **Remote callers are limit-checked twice, against different limits.** rdk's arm client validates every point against the kinematic model's static joint limits (so101.json / URDF) before it goes on the wire and fails the whole call on a violation; the module then clamps whatever arrives to the *calibrated* limits. A recording that sits inside the calibrated range but outside the model's can therefore fail client-side with no trace in the module's logs.
-- **Late points are written, not dropped.** A point whose time has already passed is written immediately; the next goal supersedes it in about a millisecond. Dropping stale points is a policy nothing has measured yet.
-- **`Constraints` (velocities/accelerations) and `extra` are ignored.** The producer shapes the trajectory; any servo-side profile between setpoints is lag.
-- **One ack per non-empty batch**, sent after the batch's last point is written. After the final point the arm dwells on it (as a paced waypoint would) and then waits for the servos to report stopped, so the call does not return on the pre-write `Moving` zero while the arm is still travelling.
-- **The move lock is held for the whole stream**, including while waiting for the next batch, so a stalled producer blocks every other move on this arm until the stream ends, is cancelled, or `Stop()` is called. `Stop()` ends a stream even while it is waiting on its producer.
+- `Time` must be `0` for the first point and strictly increasing; a violation fails the call.
+- **5° start gate**: if any joint is more than 5° from the first point, one profiled move gets it there first, then the clock starts. Only the first point is gated; a large jump between later points reaches the servos unbounded.
+- Late points are written, not dropped. `Constraints` and `extra` are ignored. One ack per non-empty batch.
+- After the last point the arm dwells, then waits for the servos to stop, so the call returns once the arm has arrived.
+- The move lock is held for the whole stream; `Stop()` ends it, even while waiting on the producer.
+- rdk's arm client validates each point against the model's *static* joint limits before sending; the module clamps to the *calibrated* limits. A point inside the second but outside the first fails client-side.
 
-The simulated arm implements the same contract by re-targeting its interpolator at each point's time; `Stop()` ends its stream between points.
-
-To try it on hardware, `tools/stream_trajectory` replays an [arm-recorder](https://github.com/HipsterBrown/arm-recorder) session (`frequency_hz` + `frames` in radians), linearly densified to `-hz` (default 100) and sent in batches of `-batch` points:
-
-```sh
-VIAM_API_KEY=... VIAM_API_KEY_ID=... \
-  go run ./tools/stream_trajectory -address <machine>.viam.cloud -arm follower-arm -session nod.json
-```
-
-It prints the point count, ack count, trajectory duration and wall time. The tool is not part of the module binary.
+The simulated arm re-targets its interpolator at each point's time. One log line per stream reports gate, late points, settle and wall time.
 
 ## Approach-axis orientation planning
 

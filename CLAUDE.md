@@ -24,7 +24,7 @@ internal/planning/     approach-axis goal clouds
 internal/servocmd/     the servo_* DoCommand wire protocol
 internal/testfake/     test doubles shared across package boundaries
 assets/urdf/           runtime-loaded URDF + collision meshes + SO-ARM100 license
-tools/                 mesh/URDF generator scripts + stream_trajectory (Go, not in the binary)
+tools/                 mesh/URDF generator scripts
 docs/                  one file per model; README.md is an index
 ```
 
@@ -141,9 +141,8 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
 - Lint/format with `gofmt -s -w .` (the Makefile `lint` target); also run `go vet`.
 - Tests that need `VIAM_MODULE_ROOT` must use `testfake.RepoRoot()`, never `"."` — tests run
   from their own package directory, not the repo root.
-- `go build ./...` drops stray binaries named `module` and `stream_trajectory` at the repo root
-  (Go names them after `cmd/module`'s and `tools/stream_trajectory`'s directories). Both are
-  gitignored.
+- `go build ./...` drops a stray binary named `module` at the repo root (Go names it after
+  `cmd/module`'s directory). It is gitignored.
 
 ## Gotchas
 

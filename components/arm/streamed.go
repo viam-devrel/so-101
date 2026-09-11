@@ -53,8 +53,9 @@ func (s *so101) MoveThroughJointPositionsStreamed(
 	s.mu.RUnlock()
 
 	var start, wall time.Time
-	var prev, gate, maxLate time.Duration
+	var gate, maxLate time.Duration
 	var last []float64
+	prev := time.Duration(-1) // no previous point yet
 	idx, late := 0, 0
 	for {
 		// Not `range batches`: Stop cancels ctx but cannot close the channel, and
@@ -70,7 +71,7 @@ func (s *so101) MoveThroughJointPositionsStreamed(
 			break
 		}
 		for _, p := range batch {
-			if err := servo.CheckTrajectoryTime(idx, prev, p.Time); err != nil {
+			if err := servo.CheckTrajectoryTime(prev, p.Time); err != nil {
 				return err
 			}
 			clamped, _, err := s.clampPositions(p.Positions, true)
