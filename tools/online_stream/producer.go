@@ -59,11 +59,12 @@ func newProducer(a arm.Arm, initial []arm.TrajectoryPoint, events []streamx.Even
 	}
 }
 
-// run owns both channels (the rdk contract): it closes batches to end the stream and
-// closes responses only after the RPC has returned. On a feed error it cancels the ctx
-// instead, because the module parks on <-batches holding its move lock and only the ctx
-// releases it.
+// run owns both channels per the streamed-RPC contract. A feed error cancels ctx rather
+// than closing batches, since the module parks on <-batches holding its move lock.
 func (p *producer) run(ctx context.Context) error {
+	if len(p.cur) == 0 {
+		return fmt.Errorf("producer: empty initial trajectory")
+	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	batches := make(chan []arm.TrajectoryPoint)
@@ -71,7 +72,7 @@ func (p *producer) run(ctx context.Context) error {
 	rpcDone := make(chan error, 1)
 	go func() {
 		err := p.arm.MoveThroughJointPositionsStreamed(ctx, batches, responses, nil)
-		cancel() // a feed blocked on a send nobody reads any more must return
+		cancel() // releases a feed blocked mid-send
 		rpcDone <- err
 	}()
 	drained := make(chan struct{})
@@ -104,8 +105,7 @@ func (p *producer) elapsed() time.Duration {
 	return time.Since(p.t0)
 }
 
-// feed runs the send tick. It returns nil once every point of the final trajectory is out
-// and nothing is pending or left to fire.
+// feed sends p.cur on a tick until it's fully sent and nothing is pending or unfired.
 func (p *producer) feed(ctx context.Context, batches chan<- []arm.TrajectoryPoint) error {
 	tick := time.NewTicker(p.sendEvery)
 	defer tick.Stop()
@@ -117,8 +117,7 @@ func (p *producer) feed(ctx context.Context, batches chan<- []arm.TrajectoryPoin
 			return err
 		}
 		elapsed := p.elapsed()
-		// At most one splice in flight: an event that comes due while one is pending is
-		// held and lands on the first tick after, with its t_s computed against the new cur.
+		// At most one splice in flight; an event due while one is pending is held for the next tick.
 		if !p.pending {
 			if due := streamx.Due(p.events, p.fired, elapsed); len(due) > 0 {
 				p.startReplan(ctx, due, elapsed)
@@ -133,8 +132,7 @@ func (p *producer) feed(ctx context.Context, batches chan<- []arm.TrajectoryPoin
 		}
 		w := streamx.Window(p.cur, p.sent, upTo)
 		p.sent += len(w)
-		first := p.t0.IsZero() && len(w) > 0
-		if first {
+		if p.t0.IsZero() && len(w) > 0 {
 			p.t0 = time.Now()
 		}
 		done := p.sent == len(p.cur) && !p.pending && !p.hasUnfired()
@@ -158,9 +156,7 @@ func (p *producer) feed(ctx context.Context, batches chan<- []arm.TrajectoryPoin
 	}
 }
 
-// hasUnfired reports whether an event is still to come. mu must be held. An event whose
-// t_e lies past the end of the (spliced) trajectory still fires once elapsed reaches it:
-// the arm rests at the end, the splice lands past it, and At clamps to the last sample.
+// hasUnfired reports whether an event is still to come. mu must be held.
 func (p *producer) hasUnfired() bool {
 	for _, f := range p.fired {
 		if !f {

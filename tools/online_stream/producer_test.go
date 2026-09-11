@@ -9,25 +9,32 @@ import (
 	"testing"
 	"time"
 
+	"github.com/golang/geo/r3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.viam.com/rdk/components/arm"
+	"go.viam.com/rdk/spatialmath"
 
 	"so_arm/tools/internal/streamx"
 )
 
 // fakeStreamArm records every point the producer sends. Embedding arm.Arm leaves every
-// other method nil; only the streamed RPC is implemented.
+// other method nil; only the streamed RPC is implemented. errAfter > 0 makes it return
+// rpcErr once it has received that many non-empty batches, to simulate the module aborting
+// the RPC (e.g. servo.CheckTrajectoryTime).
 type fakeStreamArm struct {
 	arm.Arm
 	mu        sync.Mutex
 	sent      []arm.TrajectoryPoint
 	cancelled bool
+	errAfter  int
+	rpcErr    error
 }
 
 func (f *fakeStreamArm) MoveThroughJointPositionsStreamed(ctx context.Context, batches <-chan []arm.TrajectoryPoint,
 	responses chan<- arm.Response, _ map[string]interface{},
 ) error {
+	n := 0
 	for {
 		select {
 		case <-ctx.Done():
@@ -42,12 +49,17 @@ func (f *fakeStreamArm) MoveThroughJointPositionsStreamed(ctx context.Context, b
 			f.mu.Lock()
 			f.sent = append(f.sent, b...)
 			f.mu.Unlock()
-			if len(b) > 0 {
-				select {
-				case responses <- arm.Response{}:
-				case <-ctx.Done():
-					return ctx.Err()
-				}
+			if len(b) == 0 {
+				continue
+			}
+			n++
+			if f.errAfter > 0 && n >= f.errAfter {
+				return f.rpcErr
+			}
+			select {
+			case responses <- arm.Response{}:
+			case <-ctx.Done():
+				return ctx.Err()
 			}
 		}
 	}
@@ -68,12 +80,14 @@ const (
 	testMargin = 300 * time.Millisecond
 )
 
-// fakeReplan answers every replan with 50 points (0.5 s) after delay, recording the calls.
+// fakeReplan answers every replan with retPts (default synth(50), 0.5s) after delay,
+// recording the calls.
 type fakeReplan struct {
-	delay time.Duration
-	err   error
-	mu    sync.Mutex
-	calls [][]streamx.Event
+	delay  time.Duration
+	err    error
+	retPts []arm.TrajectoryPoint
+	mu     sync.Mutex
+	calls  [][]streamx.Event
 }
 
 func (r *fakeReplan) fn(ctx context.Context, _ []float64, due []streamx.Event) ([][]float64, []arm.TrajectoryPoint, time.Duration, error) {
@@ -88,7 +102,11 @@ func (r *fakeReplan) fn(ctx context.Context, _ []float64, due []streamx.Event) (
 	if r.err != nil {
 		return nil, nil, 0, r.err
 	}
-	return [][]float64{{0}, {0.49}}, synth(50), r.delay, nil
+	pts := r.retPts
+	if pts == nil {
+		pts = synth(50)
+	}
+	return [][]float64{{0}, {0.49}}, pts, r.delay, nil
 }
 
 // assertStreamed checks the arm saw exactly the final trajectory, in order, well-formed.
@@ -127,14 +145,16 @@ func TestProducerAppliesTwoEventsDueOnOneTickAsOneSplice(t *testing.T) {
 func TestProducerHoldsAnEventThatArrivesWhileASpliceIsPending(t *testing.T) {
 	f := &fakeStreamArm{}
 	r := &fakeReplan{delay: 300 * time.Millisecond} // the 200 ms event lands mid-flight
-	events := []streamx.Event{{At: 100 * time.Millisecond, SwitchGoal: true}, {At: 200 * time.Millisecond}}
+	obstacle, err := spatialmath.NewBox(spatialmath.NewPoseFromPoint(r3.Vector{X: 100}), r3.Vector{X: 10, Y: 10, Z: 10}, "held")
+	require.NoError(t, err)
+	events := []streamx.Event{{At: 100 * time.Millisecond, SwitchGoal: true}, {At: 200 * time.Millisecond, Obstacle: obstacle}}
 	p := newProducer(f, synth(200), events, r.fn, testRunway, testSend, testMargin)
 	require.NoError(t, p.run(context.Background()))
 
 	cur, splices := p.result()
 	require.Len(t, splices, 2, "held, then applied as its own splice")
 	assert.True(t, splices[0].events[0].SwitchGoal)
-	assert.Nil(t, splices[1].events[0].Obstacle)
+	assert.NotNil(t, splices[1].events[0].Obstacle, "pins which event was held")
 	assert.False(t, splices[1].events[0].SwitchGoal)
 	assert.Greater(t, splices[1].tStitch, splices[0].tStitch)
 	assertStreamed(t, f, cur)
@@ -165,4 +185,41 @@ func TestProducerReplanErrorCancelsTheStream(t *testing.T) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	assert.True(t, f.cancelled, "the RPC was released by ctx, not by a closed channel")
+}
+
+// TestProducerFiresAnEventPastTheTrajectoryEnd pins hasUnfired's claim: the arm rests at
+// the end of a short trajectory while batches stays open, and a later event still lands
+// its splice past the end.
+func TestProducerFiresAnEventPastTheTrajectoryEnd(t *testing.T) {
+	f := &fakeStreamArm{}
+	r := &fakeReplan{delay: 50 * time.Millisecond, retPts: synth(30)}
+	events := []streamx.Event{{At: 400 * time.Millisecond}}
+	p := newProducer(f, synth(20), events, r.fn, testRunway, testSend, testMargin) // synth(20) ends at 190ms
+	require.NoError(t, p.run(context.Background()))
+
+	cur, splices := p.result()
+	require.Len(t, splices, 1)
+	assert.Greater(t, splices[0].tStitch, 200*time.Millisecond)
+	assertStreamed(t, f, cur)
+}
+
+// TestProducerSurfacesAnRPCError pins the servo.CheckTrajectoryTime-violation path: the
+// module aborts MoveThroughJointPositionsStreamed mid-stream and run surfaces that error,
+// wrapped with "stream: " per the precedence branch in producer.go's run.
+func TestProducerSurfacesAnRPCError(t *testing.T) {
+	rpcErr := errors.New("module rejected trajectory")
+	f := &fakeStreamArm{errAfter: 3, rpcErr: rpcErr}
+	r := &fakeReplan{delay: 10 * time.Millisecond}
+	p := newProducer(f, synth(200), nil, r.fn, testRunway, testSend, testMargin)
+
+	done := make(chan error, 1)
+	go func() { done <- p.run(context.Background()) }()
+	select {
+	case err := <-done:
+		require.Error(t, err)
+		assert.ErrorIs(t, err, rpcErr)
+		assert.ErrorContains(t, err, "module rejected trajectory")
+	case <-time.After(5 * time.Second):
+		t.Fatal("run did not return within 5s")
+	}
 }
