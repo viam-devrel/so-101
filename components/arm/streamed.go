@@ -80,7 +80,8 @@ func (s *so101) MoveThroughJointPositionsStreamed(
 				gate = start.Sub(wall)
 			}
 			due := start.Add(p.Time)
-			if behind := s.clock.Time().Sub(due); behind > 0 {
+			// >= 1ms, not > 0: point 0 is due at start and the clock is read again after it.
+			if behind := s.clock.Time().Sub(due); behind >= time.Millisecond {
 				late++
 				maxLate = max(maxLate, behind)
 			}
