@@ -488,6 +488,92 @@ Enforcing acceleration costs some speed, because the servos now ramp instead of 
 
 The simulated arm re-targets its interpolator at each point's time. One log line per stream reports gate, late points, settle and wall time.
 
+#### Replaying a recording
+
+`tools/stream_trajectory` streams an [arm-recorder](https://github.com/HipsterBrown/arm-recorder) session (`frequency_hz` + `frames` in radians), linearly densified to `-hz` (default 100), in batches of `-batch` points, and prints point count, acks, trajectory duration and wall time:
+
+```sh
+go run ./tools/stream_trajectory -address <machine>.viam.cloud -arm follower-arm -session nod.json
+```
+
+#### Planned motion through trajex
+
+`tools/plan_stream` is the intended production shape of the streamed RPC, measured against the path the motion service takes today. For each `-goal` it plans a move with the machine's motion service (rdk `armplanning`, with the same approach-axis goal cone as [`MoveToPosition`](#approach-axis-orientation-planning)), time-parameterises the planned waypoints with [trajex](https://app.viam.com/module/viam/trajex) running on the machine as an ML model service, streams the sampled trajectory through `MoveThroughJointPositionsStreamed`, returns to the start, then executes the **same** plan through the motion service's paced `execute` (the `MoveThroughJointPositions` path). Both runs are sampled at `-sample-hz` and scored against the planned joint-space polyline, so the difference between the two lines is execution only.
+
+The machine needs the arm to have a `frame`, the builtin motion service, viam-server ≥ 1.1.0, and the trajex module with one ML model service:
+
+```json
+{
+  "modules": [{"type": "registry", "name": "viam_trajex", "module_id": "viam:trajex", "version": "latest"}],
+  "services": [{"name": "trajex", "api": "rdk:service:mlmodel", "model": "viam:trajex:mlmodel"}]
+}
+```
+
+```sh
+VIAM_API_KEY=... VIAM_API_KEY_ID=... \
+  go run ./tools/plan_stream -address <machine>.viam.cloud -arm follower-arm -goal 200,0,150
+```
+
+`-goal x,y,z[,ox,oy,oz]` is millimetres in the `<arm>_origin` frame (repeatable; three values keep the current orientation). `-obstacle x,y,z,dx,dy,dz` (repeatable) adds an axis-aligned box in the same frame to the plan's world state; without one the planner returns a straight joint-space line (two waypoints), so an obstacle is what gives the trajectory corners to compare on. `-vel-deg` / `-acc-deg` default to the arm's `get_motion_params` and, when set, are also applied to the arm (`set_speed` / `set_acceleration`) for the paced run and restored afterwards, so both lines run at the same limits; `-hz` (100) is trajex's sampling rate, `-path-tol-deg` (0.5) its corner-blending tolerance — the streamed trace deviates from the polyline by up to that much *by design*, while the paced run drives through the corners. Output, one header and two lines per goal:
+
+```
+goal 1 (200,0,150): 9 waypoints -> 412 samples @100 Hz, trajex 4.12s, path tol 0.5 deg
+  streamed: wall 4.31s  dev mean 0.84 p95 2.10 max 3.9 deg  final [0.3 0.5 0.2 0.4 0.1] deg
+  paced:    wall 6.02s  dev mean 1.12 p95 3.40 max 5.1 deg  final [0.2 0.6 0.3 0.4 0.2] deg
+```
+
+`dev` is each sample's joint-space L2 distance (degrees, over the five joints) to the nearest point on the planned polyline; `final` is the per-joint error at the last sample. The paced run uses `executeCheckStart: 0.1` rad (5.7°): rdk's default 0.01 rad start check is below a Feetech servo's steady-state droop and fails every run.
+
+#### Online replanning through trajex
+
+`tools/online_stream` is the "new input arrives mid-motion" demo on top of the same pipeline. The arm is streaming a trajex-timed plan toward goal A when an event fires — the target switches to goal B (`-switch-after` seconds), an obstacle appears (`-obstacle-after seconds,x,y,z,dx,dy,dz`), or both — and the tool replans **in-process** (rdk `armplanning`, from where the arm *will* be at a stitch time `runway + plan margin` after the event), time-parameterises the new plan with trajex, and splices it into the live stream without stopping. A baseline (`-baseline`, default on; `-baseline=false` to skip) runs the same scenario the way today's stack can: paced `MoveThroughJointPositions`, `Stop` at the event, replan from the actual pose, paced move again.
+
+Planning in-process pulls in `motionplan/ik`, whose solver links the system **nlopt** library through cgo, so the tool is build-tagged and needs the library installed where it runs (`brew install nlopt` on macOS, `apt install libnlopt-dev` on Debian/Ubuntu). A plain `go run ./tools/online_stream` fails with `build constraints exclude all Go files`; the tag is required:
+
+```sh
+VIAM_API_KEY=... VIAM_API_KEY_ID=... \
+  go run -tags nlopt ./tools/online_stream -address <machine>.viam.cloud -arm follower-arm \
+    -goal 200,0,150 -goal 200,120,150 -switch-after 0.6 -obstacle-after 0.5,300,0,205,60,60,120
+```
+
+The machine prerequisites are those of `plan_stream` above (an arm `frame`, the trajex ML model service), minus the motion service — planning happens in the tool. `-goal` takes goal A then goal B; `-obstacle` boxes are present from the start. `-runway-ms` (300) is how far ahead of the clock points are sent, `-send-ms` (20) the send tick, `-plan-margin-ms` (300) the budget for planning + trajex — the stitch lands `runway + margin` after the event, and if planning returns later than that the arm rests at the stitch pose until the new points arrive (reported as `stitch late`). `-vel-deg` / `-acc-deg` / `-hz` / `-path-tol-deg` / `-sample-hz` are as for `plan_stream`; the baseline gets the same limits via `set_speed` / `set_acceleration`.
+
+**Every stitch is rest-to-rest.** trajex's `Infer` has no initial-velocity input, so each spliced trajectory decelerates to rest at the stitch and re-accelerates; the deviation and wall-time numbers include that, on purpose. Output, one block per mode, one line per segment plus the event that ended it:
+
+```
+plan A: 9 waypoints -> 412 samples @100 Hz, 4.12s; obstacles 1; plan 180ms
+streamed:
+  seg 1 (goal A, 0.00-0.90s):  dev mean 1.1 p95 2.0 max 2.4 deg
+  event @0.60s: switch -> goal B; stitch @0.90s; plan 212ms (7 waypoints, 3.05s); stitch late 0ms
+  seg 2 (goal B, 0.90-3.95s):  dev mean 1.3 p95 2.6 max 3.1 deg  final [0.2 0.4 0.1 0.3 0.1] deg
+  wall 4.02s
+baseline:
+  seg 1 (goal A, 0.00-0.61s):  dev mean 2.9 p95 6.1 max 7.0 deg
+  event @0.60s: switch -> goal B; Stop -> replan 240ms -> move; stop-to-move gap 0.31s
+  seg 2 (goal B, 0.61-5.10s):  dev mean 3.4 p95 7.8 max 8.2 deg  final [...] deg
+  wall 5.10s
+```
+
+A segment that a splice (or a `Stop`) ended is scored against the *executed* part of its plan — the planned polyline truncated at the stitch pose — so a sample cannot project onto a segment the arm never drove; the last segment is scored against its whole plan. In the streamed mode two events due on one send tick are applied as one replan, and an event that comes due while a replan is in flight is held for the next tick after it lands; in the baseline an event that comes due while the replan is running is folded into that replan (the arm is stopped, so its start pose still holds). Either way the number of segments is the number of splices (or Stops) plus one. The headline comparison between the modes is wall time and the stitch behaviour, not the deviation magnitude.
+
+**Continuous loop.** `-loop` cycles through 2–4 `-goal` poses until Ctrl-C instead of running the event scenario: each leg is planned while the previous one executes and spliced in where it rests, so the only stop is the rest-to-rest one trajex's output imposes anyway. `-switch-after` / `-obstacle-after` are rejected with it (`-baseline` is simply ignored); `-obstacle` boxes are present for every leg. Give each goal an explicit orientation (`x,y,z,ox,oy,oz`) for a cycle — a 3-value goal keeps the orientation read once at t=0.
+
+```sh
+VIAM_API_KEY=... VIAM_API_KEY_ID=... \
+  go run -tags nlopt ./tools/online_stream -address <machine>.viam.cloud -arm follower-arm \
+    -loop -goal 200,0,150 -goal 200,120,150 -goal 250,0,220
+```
+
+One line per finished leg, then a summary on Ctrl-C:
+
+```
+leg 12 -> goal B: plan 14ms, 2 wp, 1.20s; stitch late 0ms; dev mean 1.3 p95 2.0 max 2.4 deg; final [...] deg
+loop: 47 legs in 61.2s; plan latency mean 18ms max 91ms; late stitches 0 (worst 0ms);
+      dev mean over legs 1.4 deg (worst leg 2.9); module late count: see the arm log's per-stream summary
+```
+
+Leg `k` targets goal `k mod n` and is scored over `[previous stitch, its own stitch)` against the whole plan it executed. A leg shorter than `runway + plan margin` (0.6s at the defaults) cannot hide its planning latency: the arm rests at the goal for the difference, reported as `stitch late`. Ctrl-C cancels the stream, so the arm finishes the point it was last commanded — on-path, within one runway of where it was, **not** returned to the start — and the leg in flight is not scored.
+
 ## Approach-axis orientation planning
 
 The SO-101 is a 5-DOF arm, so most six-DOF pose targets are unreachable exactly. Rather than discard orientation wholesale, `MoveToPosition` attaches a `referenceframe.PoseCloud` to the goal: a cone that constrains where the tool points (the approach axis), while **roll about that axis is free**. `orientation_tolerance_deg` sets the cone's half-angle; `position_tolerance_mm` sets the per-axis positional leeway, applied as a **box along the goal frame's axes, not a radius** — worst-case corner deviation is `sqrt(3)` times the value (~`1.73mm` at the default `1.0`).
