@@ -15,6 +15,11 @@ import (
 // maxStreamStartGapDeg; not imported because components must not depend on services.
 const streamStartGapDeg = 5.0
 
+// streamSettleDwellMs bounds the dwell on a stream's last point. It exists only to get past
+// the ~2ms it takes Moving to rise after a goal write, so WaitForServosToStop does not read
+// the pre-write zero and return while the arm is still travelling.
+const streamSettleDwellMs = 250
+
 // MoveThroughJointPositionsStreamed writes each point as an unbounded goal at start + Time.
 // The producer owns the timing: a late point is written immediately, never dropped, and
 // Constraints are ignored.
@@ -49,6 +54,7 @@ func (s *so101) MoveThroughJointPositionsStreamed(
 
 	var start, wall time.Time
 	var prev, gate, maxLate time.Duration
+	var last []float64
 	idx, late := 0, 0
 	for {
 		// Not `range batches`: Stop cancels ctx but cannot close the channel, and
@@ -91,7 +97,7 @@ func (s *so101) MoveThroughJointPositionsStreamed(
 			if err := s.moveJointsUniform(ctx, clamped, speed, accel, true, false); err != nil {
 				return err
 			}
-			prev, idx = p.Time, idx+1
+			prev, idx, last = p.Time, idx+1, clamped
 		}
 		if len(batch) == 0 {
 			continue
@@ -106,7 +112,16 @@ func (s *so101) MoveThroughJointPositionsStreamed(
 		return nil
 	}
 	settleFrom := s.clock.Time()
-	err := s.controller.WaitForServosToStop(ctx, s.armServoIDs, servo.MaxMoveTimeoutMs)
+	// Dwell first: it consults Moving only from its second poll, which is what the paced path
+	// does to avoid ending a move on the pre-write zero.
+	lookahead := s.lookaheadDeg
+	if lookahead == 0 {
+		lookahead = servo.LookaheadDegFor(speed, accel)
+	}
+	_, err := s.dwellUntilNear(ctx, last, lookahead, speed, streamSettleDwellMs)
+	if err == nil {
+		err = s.controller.WaitForServosToStop(ctx, s.armServoIDs, servo.MaxMoveTimeoutMs)
+	}
 	now := s.clock.Time()
 	// One line per stream so a hardware run decomposes its wall time without a debugger.
 	s.logger.Infof("streamed %d points over %v: gate %v, late %d (max %v), settle %v, wall %v",

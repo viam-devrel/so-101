@@ -118,8 +118,9 @@ func TestStreamedWritesOneUnboundedGoalPerPoint(t *testing.T) {
 	assert.Equal(t, 1, acks)
 	assertGoalWrites(t, ft, s, 3)
 	assertUnboundedRegisters(t, s)
-	// The gate read is the pinned seam, so the only non-goal packet is the final stop poll.
-	assert.Equal(t, 3+1, moved, "three goal writes plus WaitForServosToStop's one Moving poll")
+	// The gate read is the pinned seam. After the last point: one dwell poll (the seam reads
+	// the arm within the lookahead, so it exits at once) and one WaitForServosToStop poll.
+	assert.Equal(t, 3+2, moved, "three goal writes, the final dwell's Moving poll, the stop poll")
 	assert.Equal(t, []time.Time{
 		streamEpoch, streamEpoch.Add(10 * time.Millisecond), streamEpoch.Add(20 * time.Millisecond),
 	}, deadlines())
@@ -138,7 +139,9 @@ func TestStreamedGateProfilesALargeStartGap(t *testing.T) {
 	assert.Equal(t, 1, acks)
 	assertGoalWrites(t, ft, s, 2)
 	assertUnboundedRegisters(t, s) // the streamed write lands last
-	assert.Equal(t, 2+2, moved, "profiled write + its stop poll, streamed write + final stop poll")
+	// The seam keeps reading the arm at zero, 17 deg from the last point, so the final dwell
+	// takes its stall-escape exit on the second poll: two Moving polls before the stop poll.
+	assert.Equal(t, 2+4, moved, "profiled write + its stop poll, streamed write + dwell (2) + stop poll")
 	assert.Equal(t, []time.Time{streamEpoch}, deadlines(), "the clock starts after the gate")
 }
 
@@ -153,7 +156,9 @@ func TestStreamedDoesNotGateAMidStreamJump(t *testing.T) {
 		[]arm.TrajectoryPoint{pt(0, 0.01), pt(10*time.Millisecond, 1.0)}) // ~57 deg jump
 	require.NoError(t, err)
 	assertGoalWrites(t, ft, s, 2)
-	assert.Equal(t, 2+1, ft.PacketCount()-before, "two goal writes and the final stop poll; no gate read")
+	// Both writes go out back to back with no read between them; the three reads are the
+	// final dwell's two stall-escape polls (the seam reads 57 deg away) and the stop poll.
+	assert.Equal(t, 2+3, ft.PacketCount()-before, "two goal writes, then dwell (2) + stop poll; no gate read")
 }
 
 func TestStreamedEmptyBatchesGetNoAckAndDoNotSkipTheGate(t *testing.T) {
