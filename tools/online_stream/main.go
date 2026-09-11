@@ -4,7 +4,8 @@
 // mid-stream (a goal switch, an obstacle, or both), replans in-process from where the arm
 // WILL be at a stitch time and splices the new trajectory into the live stream without
 // stopping. A baseline runs the same scenario as today's stack: paced move, Stop, replan
-// from the actual pose, paced move. One line per segment per mode.
+// from the actual pose, paced move. One line per segment per mode. -loop instead cycles
+// through 2-4 goals until Ctrl-C, planning each leg while the previous one executes.
 //
 //	go run -tags nlopt ./tools/online_stream -address <machine> -arm follower-arm \
 //	  -goal 200,0,150 -goal 200,120,150 -switch-after 0.6 -obstacle-after 0.5,300,0,205,60,60,120
@@ -23,6 +24,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"go.viam.com/rdk/components/arm"
@@ -129,13 +131,26 @@ func main() {
 	sampleHz := flag.Float64("sample-hz", 50, "JointPositions sampling rate during each run")
 	orientTol := flag.Float64("orient-tol-deg", 0, "goal cone half-angle, deg (0 = module default)")
 	posTol := flag.Float64("pos-tol-mm", 0, "goal position tolerance, mm (0 = module default)")
+	loop := flag.Bool("loop", false, "cycle through the -goal poses (2-4) until Ctrl-C; streamed only, -baseline ignored")
 	baseline := flag.Bool("baseline", true, "also run the Stop/replan/move baseline (-baseline=false to skip)")
 	flag.Parse()
 
-	if *address == "" || len(goals) == 0 || len(goals) > 2 || *hz <= 0 || *sampleHz <= 0 ||
+	maxGoals := 2
+	if *loop {
+		maxGoals = 4
+	}
+	if *address == "" || len(goals) == 0 || len(goals) > maxGoals || *hz <= 0 || *sampleHz <= 0 ||
 		*runwayMs <= 0 || *sendMs <= 0 || *planMarginMs <= 0 || *planTimeout <= 0 {
 		flag.Usage()
 		os.Exit(2)
+	}
+	if *loop {
+		if len(goals) < 2 {
+			log.Fatal("-loop needs 2 to 4 -goal poses to cycle through")
+		}
+		if *switchAfter >= 0 || len(obstacleAfter.events) > 0 {
+			log.Fatal("-switch-after / -obstacle-after are incompatible with -loop")
+		}
 	}
 	sc := &scenario{
 		obstacles:  obstacles,
@@ -153,7 +168,7 @@ func main() {
 		ev.Obstacle.SetLabel(fmt.Sprintf("obstacle%d", len(obstacles)+i+1))
 		sc.events = append(sc.events, ev)
 	}
-	if len(sc.events) == 0 {
+	if !*loop && len(sc.events) == 0 {
 		log.Fatal("at least one of -switch-after / -obstacle-after is required")
 	}
 	slices.SortFunc(sc.events, func(a, b streamx.Event) int { return cmp.Compare(a.At, b.At) })
@@ -231,6 +246,12 @@ func main() {
 	fmt.Printf("plan A: %d waypoints -> %d samples @%g Hz, %.2fs; obstacles %d; plan %dms\n",
 		len(planA), len(ptsA), d.hz, endA.Seconds(), len(sc.obstacles), latencyA.Milliseconds())
 
+	if *loop {
+		if err := runLoop(ctx, d, sc, planA, latencyA, ptsA); err != nil {
+			log.Fatalf("loop: %v", err)
+		}
+		return
+	}
 	if err := runStreamed(ctx, d, sc, planA, ptsA); err != nil {
 		log.Fatalf("streamed: %v", err)
 	}
@@ -261,13 +282,13 @@ func runStreamed(ctx context.Context, d *deps, sc *scenario, planA [][]float64, 
 		return wps, pts, time.Since(started), err
 	}
 	p := newProducer(d.arm, ptsA, sc.events, replan, sc.runway, sc.sendEvery, sc.planMargin)
-	trace, wall, err := d.sampled(ctx, p.run)
+	s, wall, err := d.sampled(ctx, func(ctx context.Context, _ *sampler) error { return p.run(ctx) })
 	if err != nil {
 		return err
 	}
 	cur, splices := p.result()
 	fmt.Println("streamed:")
-	printSegments(streamedSegments(planA, cur, splices), trace)
+	printSegments(streamedSegments(planA, cur, splices), s.all())
 	fmt.Printf("  wall %.2fs\n", wall.Seconds())
 	return nil
 }
@@ -308,6 +329,126 @@ func streamedSegments(planA [][]float64, cur []arm.TrajectoryPoint, splices []sp
 	return append(segs, segment{label: label, start: start, end: end, path: path})
 }
 
+// legPlan is the plan one leg executes: plan A for leg 0, the previous splice's for the rest.
+type legPlan struct {
+	start, dur, latency, stitchLate time.Duration
+	path                            [][]float64
+}
+
+// loopStats accumulates the printed legs for the Ctrl-C summary.
+type loopStats struct {
+	legs               int
+	planTotal, planMax time.Duration
+	late               int
+	lateWorst          time.Duration
+	devTotal, devWorst float64
+}
+
+func (st *loopStats) add(lp legPlan, dev streamx.Deviation) {
+	st.legs++
+	st.planTotal += lp.latency
+	st.planMax = max(st.planMax, lp.latency)
+	if lp.stitchLate > 0 {
+		st.late++
+	}
+	st.lateWorst = max(st.lateWorst, lp.stitchLate)
+	st.devTotal += dev.Mean
+	st.devWorst = max(st.devWorst, dev.Mean)
+}
+
+// runLoop cycles through the goals until Ctrl-C: the producer's next hook schedules each
+// leg runway+margin before the current trajectory ends, so the replan is spliced in where
+// the previous leg rests. The leg counter lives in the replan closure alone - replan runs
+// without the producer's mutex and next under it, so they must not share state.
+func runLoop(ctx context.Context, d *deps, sc *scenario, planA [][]float64, latencyA time.Duration,
+	ptsA []arm.TrajectoryPoint,
+) error {
+	leg := 0
+	replan := func(ctx context.Context, from []float64, _ []streamx.Event) ([][]float64, []arm.TrajectoryPoint, time.Duration, error) {
+		started := time.Now()
+		leg++
+		wps, _, err := d.planner.plan(ctx, from, sc.poses[leg%len(sc.poses)], sc.obstacles)
+		if err != nil {
+			return nil, nil, 0, err
+		}
+		pts, err := d.trajexPoints(ctx, wps)
+		return wps, pts, time.Since(started), err
+	}
+	p := newProducer(d.arm, ptsA, nil, replan, sc.runway, sc.sendEvery, sc.planMargin)
+	p.next = func(cur []arm.TrajectoryPoint) (streamx.Event, bool) {
+		return streamx.Event{At: max(0, cur[len(cur)-1].Time-sc.runway-sc.planMargin)}, true
+	}
+
+	first := legPlan{dur: ptsA[len(ptsA)-1].Time, latency: latencyA, path: planA}
+	var st loopStats
+	fmt.Printf("loop: %d goals, obstacles %d; Ctrl-C to stop\n", len(sc.poses), len(sc.obstacles))
+	_, wall, err := d.sampled(ctx, func(ctx context.Context, s *sampler) error {
+		stats, stop := make(chan loopStats, 1), make(chan struct{})
+		go func() { stats <- printLegs(p, s, first, len(sc.poses), stop) }()
+		runErr := p.run(ctx)
+		close(stop)
+		st = <-stats
+		return runErr
+	})
+	// Ctrl-C is the expected end; run wraps it as "stream: context canceled".
+	if err != nil && !errors.Is(err, context.Canceled) {
+		return err
+	}
+	if st.legs == 0 {
+		fmt.Printf("loop: no leg completed in %.1fs\n", wall.Seconds())
+		return nil
+	}
+	fmt.Printf("loop: %d legs in %.1fs; plan latency mean %dms max %dms; late stitches %d (worst %dms);\n"+
+		"      dev mean over legs %.1f deg (worst leg %.1f); module late count: see the arm log's per-stream summary\n",
+		st.legs, wall.Seconds(), (st.planTotal / time.Duration(st.legs)).Milliseconds(), st.planMax.Milliseconds(),
+		st.late, st.lateWorst.Milliseconds(), st.devTotal/float64(st.legs), st.devWorst)
+	return nil
+}
+
+// printLegs prints each finished leg exactly once, polling result() every 250ms. Leg k
+// spans [tStitch_{k-1}, tStitch_k) and runs the plan splice k-1 brought in (plan A for leg
+// 0), so it is printable once splice k has landed AND its stitch time is past - the cursor
+// only advances, so a splice that lands late prints on the next poll, never twice. The leg
+// in flight at Ctrl-C is not scored.
+func printLegs(p *producer, s *sampler, first legPlan, goals int, stop <-chan struct{}) loopStats {
+	var st loopStats
+	printed := 0
+	flush := func() {
+		_, splices := p.result()
+		for ; printed < len(splices); printed++ {
+			if s.elapsed() < splices[printed].tStitch {
+				return
+			}
+			lp := first
+			if printed > 0 {
+				prev := splices[printed-1]
+				lp = legPlan{
+					start: prev.tStitch, dur: prev.newPts[len(prev.newPts)-1].Time,
+					latency: prev.planLatency, stitchLate: prev.stitchLate, path: prev.waypoints,
+				}
+			}
+			dev := streamx.PathDeviation(s.window(lp.start, splices[printed].tStitch), lp.path)
+			fmt.Printf("leg %d -> goal %s: plan %dms, %d wp, %.2fs; stitch late %dms; dev mean %.1f p95 %.1f max %.1f deg; final %s deg\n",
+				printed, goalLabel(printed%goals), lp.latency.Milliseconds(), len(lp.path), lp.dur.Seconds(),
+				lp.stitchLate.Milliseconds(), dev.Mean, dev.P95, dev.Max, fmtDeg(dev.FinalErr))
+			st.add(lp, dev)
+		}
+	}
+	tick := time.NewTicker(250 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		select {
+		case <-tick.C:
+			flush()
+		case <-stop:
+			flush()
+			return st
+		}
+	}
+}
+
+func goalLabel(i int) string { return string(rune('A' + i)) }
+
 // runBaselineAtLimits runs the baseline at trajex's limits (the paced path uses the arm's
 // configured ones) and restores them afterwards.
 func runBaselineAtLimits(ctx context.Context, d *deps, sc *scenario, planA [][]float64) error {
@@ -333,7 +474,7 @@ func runBaseline(ctx context.Context, d *deps, sc *scenario, planA [][]float64) 
 	target, obstacles := sc.poses[0], slices.Clone(sc.obstacles)
 	label, path := "goal A", planA
 	var segs []segment
-	trace, wall, err := d.sampled(ctx, func(ctx context.Context) error {
+	s, wall, err := d.sampled(ctx, func(ctx context.Context, _ *sampler) error {
 		started := time.Now()
 		var segStart time.Duration
 		for {
@@ -408,7 +549,7 @@ func runBaseline(ctx context.Context, d *deps, sc *scenario, planA [][]float64) 
 		return err
 	}
 	fmt.Println("baseline:")
-	printSegments(segs, trace)
+	printSegments(segs, s.all())
 	fmt.Printf("  wall %.2fs\n", wall.Seconds())
 	return nil
 }
@@ -517,14 +658,46 @@ func (d *deps) setArmLimits(ctx context.Context, velDeg, accDeg float64) error {
 	return nil
 }
 
+// sampler collects JointPositions reads. The mutex makes the trace readable WHILE the run
+// is live (the loop scores each leg as it lands); the other modes just take all() at the end.
+// One sampler for every mode: a second one would double the JointPositions load on the very
+// stream being measured.
+type sampler struct {
+	started time.Time
+	mu      sync.Mutex
+	trace   []streamx.Sample
+}
+
+func (s *sampler) elapsed() time.Duration { return time.Since(s.started) }
+
+func (s *sampler) add(smp streamx.Sample) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.trace = append(s.trace, smp)
+}
+
+// window copies the samples with lo <= T < hi.
+func (s *sampler) window(lo, hi time.Duration) []streamx.Sample {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []streamx.Sample
+	for _, smp := range s.trace {
+		if smp.T >= lo && smp.T < hi {
+			out = append(out, smp)
+		}
+	}
+	return out
+}
+
+func (s *sampler) all() []streamx.Sample { return s.window(0, math.MaxInt64) }
+
 // sampled runs fn while polling JointPositions at sampleHz. A failed read is logged and
-// skipped; the trace and wall time are returned alongside fn's error.
-func (d *deps) sampled(ctx context.Context, fn func(context.Context) error) ([]streamx.Sample, time.Duration, error) {
+// skipped; the sampler and wall time are returned alongside fn's error.
+func (d *deps) sampled(ctx context.Context, fn func(context.Context, *sampler) error) (*sampler, time.Duration, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	var trace []streamx.Sample
+	s := &sampler{started: time.Now()}
 	done := make(chan struct{})
-	started := time.Now()
 	go func() {
 		defer close(done)
 		tick := time.NewTicker(time.Duration(float64(time.Second) / d.sampleHz))
@@ -542,14 +715,14 @@ func (d *deps) sampled(ctx context.Context, fn func(context.Context) error) ([]s
 				}
 				continue
 			}
-			trace = append(trace, streamx.Sample{T: time.Since(started), Q: q})
+			s.add(streamx.Sample{T: s.elapsed(), Q: q})
 		}
 	}()
-	err := fn(ctx)
-	wall := time.Since(started)
+	err := fn(ctx, s)
+	wall := s.elapsed()
 	cancel()
 	<-done
-	return trace, wall, err
+	return s, wall, err
 }
 
 func fmtDeg(v []float64) string {
