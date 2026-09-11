@@ -60,6 +60,18 @@ func TestTrajexPointsPairsTimesWithConfigurationRows(t *testing.T) {
 	assert.Equal(t, []float64{3, 4}, []float64(pts[2].Positions))
 }
 
+func TestTrajexPointsRebasesAFirstSampleThatIsNotAtZero(t *testing.T) {
+	out := ml.Tensors{
+		outTimes:   tensor.New(tensor.WithShape(3), tensor.WithBacking([]float64{0.00996, 0.01996, 0.02996})),
+		outConfigs: tensor.New(tensor.WithShape(3, 1), tensor.WithBacking([]float64{0, 1, 2})),
+	}
+	pts, err := trajexPoints(out)
+	require.NoError(t, err)
+	assert.Equal(t, time.Duration(0), pts[0].Time, "the arm requires the stream to start at 0")
+	assert.Equal(t, 10*time.Millisecond, pts[1].Time)
+	assert.Equal(t, 20*time.Millisecond, pts[2].Time)
+}
+
 func TestTrajexPointsErrors(t *testing.T) {
 	_, err := trajexPoints(ml.Tensors{
 		outTimes: tensor.New(tensor.WithShape(2), tensor.WithBacking([]float64{0, 0.01})),

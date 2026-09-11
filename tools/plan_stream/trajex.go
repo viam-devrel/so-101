@@ -54,7 +54,9 @@ func trajexInputs(waypoints [][]float64, velDeg, accDeg, pathTolDeg, hz float64)
 	}
 }
 
-// trajexPoints turns sample_times_sec [n] + configurations_rads [n,dof] into arm points.
+// trajexPoints turns sample_times_sec [n] + configurations_rads [n,dof] into arm points. The
+// times are rebased so the first is 0: on multi-waypoint paths trajex has returned a first
+// sample near one period in, and the arm requires the stream to start at Time 0.
 func trajexPoints(out ml.Tensors) ([]arm.TrajectoryPoint, error) {
 	times, err := float64s(out, outTimes)
 	if err != nil {
@@ -73,7 +75,7 @@ func trajexPoints(out ml.Tensors) ([]arm.TrajectoryPoint, error) {
 	for i, t := range times {
 		row := make([]referenceframe.Input, dof)
 		copy(row, flat[i*dof:(i+1)*dof])
-		points[i] = arm.TrajectoryPoint{Time: time.Duration(math.Round(t * float64(time.Second))), Positions: row}
+		points[i] = arm.TrajectoryPoint{Time: time.Duration(math.Round((t - times[0]) * float64(time.Second))), Positions: row}
 	}
 	return points, nil
 }
