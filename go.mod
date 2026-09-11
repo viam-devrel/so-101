@@ -13,6 +13,7 @@ require (
 	go.viam.com/test v1.2.4
 	go.viam.com/utils v0.10.1
 	google.golang.org/protobuf v1.36.11
+	gorgonia.org/tensor v0.9.24
 )
 
 require (
@@ -216,7 +217,6 @@ require (
 	google.golang.org/grpc v1.82.1 // indirect
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
-	gorgonia.org/tensor v0.9.24 // indirect
 	gorgonia.org/vecf32 v0.9.0 // indirect
 	gorgonia.org/vecf64 v0.9.0 // indirect
 	nhooyr.io/websocket v1.8.7 // indirect
