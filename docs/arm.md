@@ -548,6 +548,24 @@ baseline:
 
 A segment that a splice (or a `Stop`) ended is scored against the *executed* part of its plan — the planned polyline truncated at the stitch pose — so a sample cannot project onto a segment the arm never drove; the last segment is scored against its whole plan. In the streamed mode two events due on one send tick are applied as one replan, and an event that comes due while a replan is in flight is held for the next tick after it lands; in the baseline an event that comes due while the replan is running is folded into that replan (the arm is stopped, so its start pose still holds). Either way the number of segments is the number of splices (or Stops) plus one. The headline comparison between the modes is wall time and the stitch behaviour, not the deviation magnitude.
 
+**Continuous loop.** `-loop` cycles through 2–4 `-goal` poses until Ctrl-C instead of running the event scenario: each leg is planned while the previous one executes and spliced in where it rests, so the only stop is the rest-to-rest one trajex's output imposes anyway. `-switch-after` / `-obstacle-after` are rejected with it (`-baseline` is simply ignored); `-obstacle` boxes are present for every leg. Give each goal an explicit orientation (`x,y,z,ox,oy,oz`) for a cycle — a 3-value goal keeps the orientation read once at t=0.
+
+```sh
+VIAM_API_KEY=... VIAM_API_KEY_ID=... \
+  go run -tags nlopt ./tools/online_stream -address <machine>.viam.cloud -arm follower-arm \
+    -loop -goal 200,0,150 -goal 200,120,150 -goal 250,0,220
+```
+
+One line per finished leg, then a summary on Ctrl-C:
+
+```
+leg 12 -> goal B: plan 14ms, 2 wp, 1.20s; stitch late 0ms; dev mean 1.3 p95 2.0 max 2.4 deg; final [...] deg
+loop: 47 legs in 61.2s; plan latency mean 18ms max 91ms; late stitches 0 (worst 0ms);
+      dev mean over legs 1.4 deg (worst leg 2.9); module late count: see the arm log's per-stream summary
+```
+
+Leg `k` targets goal `k mod n` and is scored over `[previous stitch, its own stitch)` against the whole plan it executed. A leg shorter than `runway + plan margin` (0.6s at the defaults) cannot hide its planning latency: the arm rests at the goal for the difference, reported as `stitch late`. Ctrl-C cancels the stream, so the arm finishes the point it was last commanded — on-path, within one runway of where it was, **not** returned to the start — and the leg in flight is not scored.
+
 ## Approach-axis orientation planning
 
 The SO-101 is a 5-DOF arm, so most six-DOF pose targets are unreachable exactly. Rather than discard orientation wholesale, `MoveToPosition` attaches a `referenceframe.PoseCloud` to the goal: a cone that constrains where the tool points (the approach axis), while **roll about that axis is free**. `orientation_tolerance_deg` sets the cone's half-angle; `position_tolerance_mm` sets the per-axis positional leeway, applied as a **box along the goal frame's axes, not a radius** — worst-case corner deviation is `sqrt(3)` times the value (~`1.73mm` at the default `1.0`).
