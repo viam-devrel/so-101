@@ -248,16 +248,9 @@ func (h *ControllerHandle) ServoPositionPercent(
 	return percent, rawOut, condition, err
 }
 
-// StopServo halts a single servo. Unlike Stop, it leaves every other servo on the bus
-// untouched, so stopping a gripper cannot kill an in-flight arm move.
+// StopServo halts one servo, so a gripper stop cannot touch an in-flight arm move.
 func (h *ControllerHandle) StopServo(ctx context.Context, id int) error {
-	return h.withSession(func(sess *busSession) error {
-		cs, ok := sess.servos[id]
-		if !ok {
-			return fmt.Errorf("servo %d not available", id)
-		}
-		return cs.SetVelocity(ctx, 0)
-	})
+	return h.Stop(ctx, []int{id})
 }
 
 // percentToNormalized converts a 0-100 percentage into whatever normalized unit the servo's
@@ -378,14 +371,29 @@ func (h *ControllerHandle) SetTorqueEnable(ctx context.Context, enable bool) err
 	})
 }
 
-func (h *ControllerHandle) Stop(ctx context.Context) error {
+// Stop writes each servo's present position back as its goal: one SyncRead, one SyncWrite,
+// Goal_Position only. Goal_Velocity 0 (the old write) is the MAX-SPEED sentinel. Scoped to
+// ids because the session always holds 1-6 and SyncRead waits on every ID it is given.
+func (h *ControllerHandle) Stop(ctx context.Context, ids []int) error {
 	return h.withSession(func(sess *busSession) error {
-		for id, servo := range sess.servos {
-			if err := servo.SetVelocity(ctx, 0); err != nil {
-				h.logger.Warnf("Failed to stop servo %d: %v", id, err)
+		for _, id := range ids {
+			if _, ok := sess.servos[id]; !ok {
+				return fmt.Errorf("servo %d not available", id)
 			}
 		}
-		return nil
+		data, err := sess.bus.SyncRead(ctx, feetech.RegPresentPosition.Address, 2, ids)
+		if _, err = tolerateCondition(err); err != nil {
+			return fmt.Errorf("failed to read positions to hold: %w", err)
+		}
+		goals := make(map[int][]byte, len(ids))
+		for _, id := range ids {
+			d, ok := data[id]
+			if !ok {
+				return fmt.Errorf("servo %d did not answer a position read", id)
+			}
+			goals[id] = d
+		}
+		return sess.bus.SyncWrite(ctx, feetech.RegGoalPosition.Address, 2, goals)
 	})
 }
 

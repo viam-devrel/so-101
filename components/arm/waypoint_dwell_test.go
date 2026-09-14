@@ -158,8 +158,8 @@ func TestDwellTimeoutFloorIsFarBelowTheMoveTimeoutFloor(t *testing.T) {
 		servo.DwellTimeoutMs(90, 50, servo.DefaultAccelDegsPerSecSq))
 }
 
-// A paced stream runs for seconds, so Stop has to cancel it. Zeroing velocity alone is
-// overwritten by the loop's next goal write.
+// A paced stream runs for seconds, so Stop has to cancel it. A hold alone is overwritten
+// by the loop's next goal write.
 func TestStopCancelsARunningWaypointStream(t *testing.T) {
 	// Far from every waypoint, so each dwell polls until something stops it.
 	s, calls := dwellTestArm(t, [][]float64{{-1.0, 0, 0, 0, 0}})

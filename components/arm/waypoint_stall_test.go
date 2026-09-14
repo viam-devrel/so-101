@@ -86,7 +86,7 @@ func TestWaypointDwellFailsWhenTheStateReadFails(t *testing.T) {
 	assert.ErrorContains(t, err, "bus transient")
 }
 
-// Stop's zeroed velocity is exactly the condition the stall escape fires on, so a cancelled
+// A stopped arm (servos holding, Moving 0) is exactly the condition the stall escape fires on, so a cancelled
 // stream takes the escape rather than the select's ctx.Done() and reaches one more moveJoints
 // write before ctx.Err() unwinds it. That write is harmless because opMgr.CancelRunning
 // blocks until the stream returns. This pins termination; TestStopCancelsARunningWaypointStream

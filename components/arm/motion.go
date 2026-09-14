@@ -550,8 +550,8 @@ func (s *so101) JointPositions(ctx context.Context, extra map[string]interface{}
 }
 
 func (s *so101) Stop(ctx context.Context, extra map[string]interface{}) error {
-	// Cancel before zeroing velocity, and block until the move returns: a running waypoint
-	// stream would otherwise write its next goal after the zero and the arm would resume.
+	// Cancel before holding position, and block until the move returns: a running waypoint
+	// stream would otherwise write its next goal after the hold and the arm would resume.
 	s.opMgr.CancelRunning(ctx)
 
 	s.mu.Lock()
@@ -559,7 +559,7 @@ func (s *so101) Stop(ctx context.Context, extra map[string]interface{}) error {
 	s.mu.Unlock()
 
 	s.isMoving.Store(false)
-	return s.controller.Stop(ctx)
+	return s.controller.Stop(ctx, s.armServoIDs)
 }
 
 func (s *so101) CurrentInputs(ctx context.Context) ([]referenceframe.Input, error) {
