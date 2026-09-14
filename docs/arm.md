@@ -475,6 +475,19 @@ Each query costs a serial transaction (~1.3ms measured); polling it in a tight l
 
 Enforcing acceleration costs some speed, because the servos now ramp instead of jumping straight to full velocity. At the default of 500 °/s² a 20° move takes about 25% longer than before. Lowering the value costs more: at 100 °/s² the same move takes roughly twice as long again.
 
+### Streaming trajectories (experimental)
+
+`MoveThroughJointPositionsStreamed` (rdk and viam-server ≥ 1.1.0) follows the **producer's** timing: each `TrajectoryPoint` is written as an unbounded goal (`Speed 0 / Acc 0`, one `SetGoals` packet) at `start + Time`, with no position read in the loop. It exists to measure time-scheduled streaming against [waypoint streams](#waypoint-streams); it is not a replacement for them.
+
+- `Time` must be `0` for the first point and strictly increasing; a violation fails the call.
+- **5° start gate**: if any joint is more than 5° from the first point, one profiled move gets it there first, then the clock starts. Only the first point is gated; a large jump between later points reaches the servos unbounded.
+- Late points are written, not dropped. `Constraints` and `extra` are ignored. One ack per non-empty batch.
+- After the last point the arm dwells, then waits for the servos to stop, so the call returns once the arm has arrived.
+- The move lock is held for the whole stream; `Stop()` ends it, even while waiting on the producer.
+- rdk's arm client validates each point against the model's *static* joint limits before sending; the module clamps to the *calibrated* limits. A point inside the second but outside the first fails client-side.
+
+The simulated arm re-targets its interpolator at each point's time. One log line per stream reports gate, late points, settle and wall time.
+
 ## Approach-axis orientation planning
 
 The SO-101 is a 5-DOF arm, so most six-DOF pose targets are unreachable exactly. Rather than discard orientation wholesale, `MoveToPosition` attaches a `referenceframe.PoseCloud` to the goal: a cone that constrains where the tool points (the approach axis), while **roll about that axis is free**. `orientation_tolerance_deg` sets the cone's half-angle; `position_tolerance_mm` sets the per-axis positional leeway, applied as a **box along the goal frame's axes, not a radius** — worst-case corner deviation is `sqrt(3)` times the value (~`1.73mm` at the default `1.0`).

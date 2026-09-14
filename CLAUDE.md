@@ -591,3 +591,29 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
   through `tolerateCondition`; a new read path must too. Since feetech-servo v0.7.1 *writes*
   also return nil on condition-only flags, nothing on main can infer "overloaded" from a
   write failure.
+- **`MoveThroughJointPositionsStreamed` is time-scheduled and UNBOUNDED; the 5° gate is what
+  makes that safe.** Each point goes out on the `streamed` path (`Speed 0 / Acc 0`, one
+  `SetGoals` packet) at `start + p.Time`, via `servo.Clock` so tests never sleep. Before the
+  first point, `closeStreamStartGap` (`components/arm/streamed.go`) reads once and runs one
+  profiled `moveJoints` if any joint is > `streamStartGapDeg` away -- the same 5 as teleop's
+  `maxStreamStartGapDeg`, duplicated because components must not import services. ONLY the
+  first point is gated; a mid-stream jump or a schedule slip reaches the servos unbounded, and
+  `TestStreamedDoesNotGateAMidStreamJump` pins that so a later policy is a visible change. Late
+  points are WRITTEN, not dropped (no policy has been measured). `Constraints` are ignored. Both
+  arms receive batches with a `select` on `ctx.Done()` rather than `range batches`, because
+  `Stop`'s `opMgr.CancelRunning` blocks until the op returns and cancelling our ctx does not
+  close the channel (the server's recv goroutine watches the stream ctx). Requires rdk ≥ v1.1.0
+  (the method is on `arm.Arm`); `FakeTransport.WriteCount` counts `SYNC_WRITE`s by start
+  address so tests can count goal writes -- `SetGoals` is a sync write at `RegAcceleration`.
+  A REMOTE caller is also validated by rdk's arm client against the model's static `DoF()`
+  limits (so101.json / URDF), point by point, and the stream is torn down client-side on a
+  violation -- before any point reaches the module's `clampPositions`, which clamps to the
+  CALIBRATED limits. Two different limit sets; in-process tests only ever see the second.
+- **rdk ≥ v1.6.0's `Frame.Transform` does NOT bounds-check joints** (`OOBErrString` is dead
+  upstream). On the WRITE path that makes `so101.clampPositions` the only joint-limit
+  enforcement in this module -- do not "simplify it away" on the assumption that rdk rejects an
+  out-of-limit input; it composes the full chain and returns a pose with no error. On the READ
+  path `geometry.ComputeOOBPosition`'s clamp was a workaround for the OLD truncate-and-error
+  behaviour and is now lossy: `EndPosition` for a joint drooped past its limit reports the pose
+  AT the limit where an unclamped `Transform` would be correct. `oob_test.go` now pins only that
+  clamp; removing it is a deliberate small follow-up, not an accident to guard against.
