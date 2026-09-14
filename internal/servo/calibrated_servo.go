@@ -296,13 +296,6 @@ func (cs *CalibratedServo) SetBaudRate(ctx context.Context, baudRate int) error 
 	return cs.servo.SetBaudRate(ctx, baudRate)
 }
 
-// SetVelocity sets the servo velocity
-func (cs *CalibratedServo) SetVelocity(ctx context.Context, vel int) error {
-	cs.mu.Lock()
-	defer cs.mu.Unlock()
-	return cs.servo.SetVelocity(ctx, vel)
-}
-
 // GetRawServo returns the underlying feetech.Servo (for ServoGroup creation)
 func (cs *CalibratedServo) GetRawServo() *feetech.Servo {
 	return cs.servo

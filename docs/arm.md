@@ -424,7 +424,7 @@ A plain point-to-point move should keep all three; do not set `streamed` there.
 
 **Why the pacing exists.** Each goal write supersedes the previous one, and an unpaced stream lands on the bus in a few tens of milliseconds, so the servos never act on anything but the last waypoint. A recorded trajectory replayed as a straight line from its first pose to its last (on a nodding motion recorded at 10 Hz, about 3% of the recorded path), and a planned path skipped the obstacle avoidance it was planned for.
 
-**`Stop` ends a stream.** A paced stream runs for seconds, so `Stop` cancels the move before zeroing velocity and returns once the stream has stopped. Zeroing velocity alone would be overwritten by the next waypoint.
+**`Stop` ends a stream.** A paced stream runs for seconds, so `Stop` cancels the move before holding position and returns once the stream has stopped. Holding alone would be overwritten by the next waypoint.
 
 **The lookahead is derived per move, and it has two independent lower bounds.**
 
@@ -471,7 +471,7 @@ Each waypoint's hold is bounded by that segment's own expected ramp duration, so
 
 Each query costs a serial transaction (~1.3ms measured); polling it in a tight loop competes with position reads and writes on the same bus.
 
-`Stop()` does not currently interrupt an in-progress joint move: a move blocks until the servos settle (or the internal safety timeout elapses), so a `Stop()` issued mid-move takes effect only once that move returns. Interrupting in-flight motion is a planned follow-up.
+`Stop()` ends a running waypoint or streamed trajectory and then writes every servo's present position back as its goal, so a mid-move servo brakes and holds where it is. A blocking single `MoveToJointPositions` still returns only once its servos settle or its safety timeout elapses; `Stop()` issued during one holds the arm but the call itself completes on its own timing.
 
 Enforcing acceleration costs some speed, because the servos now ramp instead of jumping straight to full velocity. At the default of 500 °/s² a 20° move takes about 25% longer than before. Lowering the value costs more: at 100 °/s² the same move takes roughly twice as long again.
 

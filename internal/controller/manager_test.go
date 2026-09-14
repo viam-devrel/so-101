@@ -319,3 +319,84 @@ func TestPingStillFailsOnARejectionFlag(t *testing.T) {
 	_, err := h.PingServo(ctx, 6)
 	require.Error(t, err)
 }
+
+// Goal_Velocity 0 is the MAX-SPEED sentinel, so the old Stop sped a mid-move servo up. A
+// stop writes each servo's present position back as its goal, and nothing else.
+func TestStopHoldsEveryServoAtItsPresentPosition(t *testing.T) {
+	ft := testfake.NewFakeTransport()
+	present := map[int]int{1: 1000, 2: 2000, 3: 3000, 4: 1500, 5: 2500, 6: 2200}
+	for id, pos := range present {
+		ft.SetRegister(id, feetech.RegPresentPosition.Address, testfake.EncodeWordLE(pos))
+		ft.SetRegister(id, feetech.RegGoalPosition.Address, testfake.EncodeWordLE(4000))
+		ft.SetRegister(id, feetech.RegGoalVelocity.Address, testfake.EncodeWordLE(1234))
+		ft.SetRegister(id, feetech.RegAcceleration.Address, []byte{0x7F})
+	}
+	h := testHandle(t, ft)
+	ctx := context.Background()
+
+	before := ft.PacketCount()
+	require.NoError(t, h.Stop(ctx, []int{1, 2, 3, 4, 5, 6}))
+	assert.Equal(t, 2, ft.PacketCount()-before, "one SyncRead + one SyncWrite, not one write per servo")
+
+	for id, pos := range present {
+		goal, err := h.ReadServoRegister(ctx, id, "goal_position")
+		require.NoError(t, err)
+		assert.Equal(t, testfake.EncodeWordLE(pos), goal, "servo %d goal must be its present position", id)
+		vel, err := h.ReadServoRegister(ctx, id, "goal_velocity")
+		require.NoError(t, err)
+		assert.Equal(t, testfake.EncodeWordLE(1234), vel, "servo %d speed profile must be untouched", id)
+		acc, err := h.ReadServoRegister(ctx, id, "acceleration")
+		require.NoError(t, err)
+		assert.Equal(t, []byte{0x7F}, acc, "servo %d acceleration profile must be untouched", id)
+	}
+}
+
+// StopServo is the gripper's stop; it goes through the same hold and touches only its servo.
+func TestStopServoHoldsOnlyThatServo(t *testing.T) {
+	ft := testfake.NewFakeTransport()
+	for id := 1; id <= 6; id++ {
+		ft.SetRegister(id, feetech.RegPresentPosition.Address, testfake.EncodeWordLE(1000+id))
+		ft.SetRegister(id, feetech.RegGoalPosition.Address, testfake.EncodeWordLE(4000))
+	}
+	h := testHandle(t, ft)
+	ctx := context.Background()
+
+	require.NoError(t, h.StopServo(ctx, 6))
+
+	goal, err := h.ReadServoRegister(ctx, 6, "goal_position")
+	require.NoError(t, err)
+	assert.Equal(t, testfake.EncodeWordLE(1006), goal)
+	for id := 1; id <= 5; id++ {
+		assert.Zero(t, ft.WriteCount(id, feetech.RegGoalPosition.Address), "servo %d must not be written", id)
+	}
+	assert.Zero(t, ft.WriteCount(6, feetech.RegGoalVelocity.Address), "velocity 0 is the max-speed sentinel")
+}
+
+// An arm-only bus has no servo 6; a Stop scoped to the arm's IDs must not wait on it.
+func TestStopHoldsOnlyTheRequestedServos(t *testing.T) {
+	ft := testfake.NewFakeTransport()
+	for id := 1; id <= 6; id++ {
+		ft.SetRegister(id, feetech.RegPresentPosition.Address, testfake.EncodeWordLE(1000+id))
+	}
+	h := testHandle(t, ft)
+
+	require.NoError(t, h.Stop(context.Background(), []int{1, 2, 3, 4, 5}))
+	for id := 1; id <= 5; id++ {
+		assert.Equal(t, 1, ft.WriteCount(id, feetech.RegGoalPosition.Address), "servo %d", id)
+	}
+	assert.Zero(t, ft.WriteCount(6, feetech.RegGoalPosition.Address), "servo 6 was not asked for")
+}
+
+// With no position to hold, writing velocity 0 would only speed the servo up. Fail instead.
+func TestStopFailsRatherThanWriteAVelocityWhenTheReadFails(t *testing.T) {
+	ft := testfake.NewFakeTransport()
+	h := testHandle(t, ft)
+	ft.SetStatus(3, feetech.ErrChecksum) // a rejection flag, not a tolerated condition
+
+	err := h.Stop(context.Background(), []int{1, 2, 3, 4, 5})
+	require.Error(t, err)
+	for id := 1; id <= 6; id++ {
+		assert.Zero(t, ft.WriteCount(id, feetech.RegGoalPosition.Address))
+		assert.Zero(t, ft.WriteCount(id, feetech.RegGoalVelocity.Address))
+	}
+}

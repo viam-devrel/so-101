@@ -250,14 +250,19 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
   sub-waypoints, but the lead is still bounded in absolute degrees by the lookahead, which is
   the property that matters. Densifying is a legitimate smoothness lever for a caller that
   knows its own tempo.
-- **`Stop` must cancel the move, not just zero velocity.** A paced waypoint stream runs for
+- **`Stop` must cancel the move, not just hold position.** A paced waypoint stream runs for
   seconds, so `arm.Stop` calls `opMgr.CancelRunning` *before* `controller.Stop`; the reverse
-  order lets the dwell loop write its next goal after the zero and the arm resumes.
+  order lets the dwell loop write its next goal after the hold and the arm resumes.
   `MoveToJointPositions` / `MoveThroughJointPositions` register via `opMgr.New`.
   `MoveToPosition` deliberately does **not**: it delegates to the motion service, which calls
   back into `MoveThroughJointPositions` over gRPC, and the op marker is a `context.Value` that
   cannot cross that boundary — the outer op would be cancelled by its own callback.
-  `TestStopCancelsARunningWaypointStream` pins this.
+  `TestStopCancelsARunningWaypointStream` pins this. `controller.Stop` holds by writing
+  `Present_Position` back to `Goal_Position` (one SyncRead + one SyncWrite); it used to write
+  `Goal_Velocity = 0`, which is the MAX-SPEED sentinel and sped a mid-move servo up. `Stop`
+  takes the caller's servo IDs because the session always holds 1-6 and `SyncRead` waits on
+  every ID, so an arm-only bus would otherwise never stop. The gripper's `servo_stop`
+  (`StopServo`) delegates to the same `Stop`.
 - **The arm and the calibration sensor still share the bus without excluding each other.**
   One mutex serializes individual operations, so their transactions cannot interleave, but
   nothing stops an arm move during a calibration workflow. `Discover` holds that mutex for
