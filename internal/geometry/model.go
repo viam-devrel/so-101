@@ -8,7 +8,6 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
-	"math"
 	"os"
 	"path/filepath"
 
@@ -23,34 +22,6 @@ import (
 //
 //go:embed so101.json
 var modelJSON []byte
-
-// ComputeOOBPosition takes a frame and a slice of Inputs and returns the cartesian position of
-// the frame after transforming it by the given inputs even if the inputs given would violate the
-// Limits of the frame. This is performed statelessly without changing any data.
-//
-// This replaces referenceframe.ComputeOOBPosition, which was removed upstream. Callers rely on
-// being able to compute a pose for out-of-bounds joint positions (e.g. reporting EndPosition
-// while a joint is slightly past its calibrated limit). rdk v0.123's Frame.Transform early-returns
-// at the first out-of-bounds joint, yielding a pose truncated at that joint (and everything
-// downstream), so inputs are clamped into the joint limits first to always compose the full chain.
-func ComputeOOBPosition(frame referenceframe.Frame, inputs []referenceframe.Input) (spatialmath.Pose, error) {
-	if inputs == nil {
-		return nil, errors.New("cannot compute position for nil joints")
-	}
-	if frame == nil {
-		return nil, errors.New("cannot compute position for nil frame")
-	}
-
-	limits := frame.DoF()
-	safe := make([]referenceframe.Input, len(inputs))
-	for i, v := range inputs {
-		if i < len(limits) {
-			v = math.Max(limits[i].Min, math.Min(limits[i].Max, v))
-		}
-		safe[i] = v
-	}
-	return frame.Transform(safe)
-}
 
 // ArmModelJSON builds the SO-101 kinematic model from the embedded so101.json.
 func ArmModelJSON(resourceName string) (referenceframe.Model, error) {

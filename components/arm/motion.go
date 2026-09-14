@@ -13,7 +13,6 @@ import (
 	"go.viam.com/rdk/spatialmath"
 
 	"so_arm/internal/controller"
-	"so_arm/internal/geometry"
 	"so_arm/internal/planning"
 	"so_arm/internal/servo"
 	"so_arm/internal/servocmd"
@@ -90,7 +89,7 @@ func (s *so101) EndPosition(ctx context.Context, extra map[string]interface{}) (
 		return nil, err
 	}
 
-	pose, err := geometry.ComputeOOBPosition(s.model, inputs)
+	pose, err := s.model.Transform(inputs)
 	if err != nil {
 		return nil, fmt.Errorf("failed to compute end position: %w", err)
 	}
