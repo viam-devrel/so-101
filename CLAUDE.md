@@ -613,7 +613,8 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
   upstream). On the WRITE path that makes `so101.clampPositions` the only joint-limit
   enforcement in this module -- do not "simplify it away" on the assumption that rdk rejects an
   out-of-limit input; it composes the full chain and returns a pose with no error. On the READ
-  path `geometry.ComputeOOBPosition`'s clamp was a workaround for the OLD truncate-and-error
-  behaviour and is now lossy: `EndPosition` for a joint drooped past its limit reports the pose
-  AT the limit where an unclamped `Transform` would be correct. `oob_test.go` now pins only that
-  clamp; removing it is a deliberate small follow-up, not an accident to guard against.
+  path `EndPosition` calls `model.Transform` directly, so a joint drooped past its limit reports
+  where it actually is. `geometry.ComputeOOBPosition` -- a clamp that worked around rdk
+  v0.123's truncate-and-error behaviour -- was removed once that made it lossy;
+  `TestTransformReportsAnOutOfLimitJointWhereItIs` pins the rdk contract EndPosition now
+  depends on.

@@ -329,7 +329,7 @@ func (s *simulatedSO101) EndPosition(ctx context.Context, extra map[string]inter
 	if err != nil {
 		return nil, err
 	}
-	return geometry.ComputeOOBPosition(s.model, inputs)
+	return s.model.Transform(inputs)
 }
 
 // MoveToPosition moves the arm's end effector to the target pose using the motion service.
