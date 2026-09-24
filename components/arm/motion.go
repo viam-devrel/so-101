@@ -2,6 +2,7 @@ package arm
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"strings"
@@ -111,6 +112,10 @@ func (s *so101) EndPosition(ctx context.Context, extra map[string]interface{}) (
 // Requires viam-server >= 0.127.0; older servers silently ignore goal clouds, which makes
 // planning revert to strict six-DOF scoring and fail.
 func (s *so101) MoveToPosition(ctx context.Context, pose spatialmath.Pose, extra map[string]interface{}) error {
+	if s.motion == nil {
+		return errors.New("MoveToPosition requires a motion service, which was not available at construction")
+	}
+
 	// A motion command takes the arm out of hand-guided ("manual") mode.
 	s.mu.Lock()
 	s.exitManualLocked("motion command received")
