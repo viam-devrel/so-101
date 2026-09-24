@@ -323,7 +323,7 @@ func NewSO101(ctx context.Context, deps resource.Dependencies, name resource.Nam
 	} else {
 		ms, err = motion.FromProvider(deps, "builtin")
 		if err != nil {
-			logger.Info("builtin motion service unavailable, MoveToPosition disabled")
+			logger.Warn("builtin motion service unavailable, MoveToPosition disabled")
 			ms = nil
 		}
 	}
