@@ -180,16 +180,13 @@ func (cfg *SO101ArmConfig) Validate(path string) ([]string, []string, error) {
 		}
 	}
 
-	deps := []string{}
-
+	// A motion service named in the config is required. The builtin one is optional:
+	// only MoveToPosition uses it, and viam-server's Windows build has no motion service,
+	// so requiring it would stop the arm from building there at all.
 	if cfg.Motion != "" {
-		deps = append(deps, motion.Named(cfg.Motion).String())
-	} else {
-		// use builtin motion service
-		deps = append(deps, motion.Named("builtin").String())
+		return []string{motion.Named(cfg.Motion).String()}, nil, nil
 	}
-
-	return deps, nil, nil
+	return nil, []string{motion.Named("builtin").String()}, nil
 }
 
 type so101 struct {
@@ -326,7 +323,8 @@ func NewSO101(ctx context.Context, deps resource.Dependencies, name resource.Nam
 	} else {
 		ms, err = motion.FromProvider(deps, "builtin")
 		if err != nil {
-			return nil, err
+			logger.Info("builtin motion service unavailable, MoveToPosition disabled")
+			ms = nil
 		}
 	}
 

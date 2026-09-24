@@ -68,6 +68,17 @@ func TestHardwareArmMoveToPositionSendsGoalCloud(t *testing.T) {
 	assert.NotContains(t, got.Extra, "goal_metric_type", "the cone replaces position_only")
 }
 
+func TestHardwareArmMoveToPositionRequiresMotionService(t *testing.T) {
+	a := &so101{name: arm.Named("myarm"), logger: logging.NewTestLogger(t)}
+
+	err := a.MoveToPosition(context.Background(), testGoal(), nil)
+	// Pin the guard's identity, not merely "an error": without asserting the message,
+	// removing the guard is still caught, but only as a SIGSEGV that panics the whole test
+	// binary -- a failure that names this test while explaining nothing.
+	require.Error(t, err, "the nil-motion guard must still fire")
+	assert.ErrorContains(t, err, "requires a motion service")
+}
+
 func TestHardwareArmMoveToPositionHonorsMetricTypeOverride(t *testing.T) {
 	var got motion.MoveReq
 	a := &so101{
