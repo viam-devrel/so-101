@@ -302,3 +302,36 @@ func TestResolveManualParams_ZeroOverrideDisablesCompliance(t *testing.T) {
 		t.Fatalf("explicit zero must disable compliance writes: p_gain=%d torque_limit=%d", pGain, torqueLimit)
 	}
 }
+
+func TestProperties(t *testing.T) {
+	props, err := (&so101{}).Properties(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("Properties: %v", err)
+	}
+	if !props.SupportManualMode || !props.SupportCartesianCommands {
+		t.Errorf("Properties = %+v, want both true", props)
+	}
+}
+
+func TestExitTimerFires(t *testing.T) {
+	var et exitTimer
+	done := make(chan struct{})
+	et.schedule(10*time.Millisecond, func() { close(done) })
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("scheduled exit never fired")
+	}
+}
+
+func TestExitTimerCancel(t *testing.T) {
+	var et exitTimer
+	fired := make(chan struct{}, 1)
+	et.schedule(20*time.Millisecond, func() { fired <- struct{}{} })
+	et.cancel()
+	select {
+	case <-fired:
+		t.Fatal("cancelled exit fired")
+	case <-time.After(60 * time.Millisecond):
+	}
+}
