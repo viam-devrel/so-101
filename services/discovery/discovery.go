@@ -128,10 +128,6 @@ func (dis *so101Discovery) discoverPort(ctx context.Context, portPath string) []
 		moduleDataDir = "/tmp"
 	}
 	calibrationFile := findCalibrationFile(moduleDataDir, portSuffix, dis.logger)
-	if calibrationFile == "" {
-		// Name it now so each arm's sensor writes its own file instead of the shared default.
-		calibrationFile = portSuffix + "_calibration.json"
-	}
 
 	// Generate component configs
 	return dis.generateConfigs(configPort, portSuffix, hasArm, hasGripper, calibrationFile)
@@ -305,7 +301,8 @@ func stablePort(dir, portPath string) (string, string) {
 
 // findCalibrationFile searches for calibration files in moduleDataDir
 // Tries port-specific file first, then falls back to default
-// Returns just the filename (not full path) or empty string if not found
+// Returns just the filename (not full path); with neither, the port-specific name so each
+// arm's sensor writes its own file instead of the shared default
 func findCalibrationFile(moduleDataDir, portSuffix string, logger logging.Logger) string {
 	// Try port-specific file first: ttyUSB0_calibration.json (<serial>_calibration.json on Linux)
 	portSpecific := filepath.Join(moduleDataDir, portSuffix+"_calibration.json")
@@ -322,7 +319,7 @@ func findCalibrationFile(moduleDataDir, portSuffix string, logger logging.Logger
 	}
 
 	logger.Debug("No calibration file found")
-	return ""
+	return filepath.Base(portSpecific)
 }
 
 // enumerateSerialPorts returns a list of all serial ports on the system

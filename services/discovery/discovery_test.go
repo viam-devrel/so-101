@@ -130,7 +130,7 @@ func TestFindCalibrationFile(t *testing.T) {
 				// No files created
 			},
 			portSuffix: "ttyUSB0",
-			expected:   "",
+			expected:   "ttyUSB0_calibration.json",
 		},
 	}
 
