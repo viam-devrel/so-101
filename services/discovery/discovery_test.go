@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.viam.com/rdk/logging"
 )
 
@@ -153,4 +154,41 @@ func TestEnumerateSerialPorts(t *testing.T) {
 	assert.NotNil(t, ports)
 	// Ports list can be empty on systems without serial devices
 	t.Logf("Found %d serial ports", len(ports))
+}
+
+func TestStablePort(t *testing.T) {
+	dir := t.TempDir()
+	byID := filepath.Join(dir, "by-id")
+	require.NoError(t, os.Mkdir(byID, 0o755))
+	acm1 := filepath.Join(dir, "ttyACM1")
+	acm2 := filepath.Join(dir, "ttyACM2")
+	require.NoError(t, os.WriteFile(acm1, nil, 0o600))
+	require.NoError(t, os.WriteFile(acm2, nil, 0o600))
+	link := filepath.Join(byID, "usb-1a86_USB_Single_Serial_5C4C126186-if00")
+	require.NoError(t, os.Symlink(acm1, link))
+
+	path, suffix := stablePort(byID, acm1)
+	assert.Equal(t, link, path)
+	assert.Equal(t, "5C4C126186", suffix)
+
+	path, suffix = stablePort(byID, acm2)
+	assert.Equal(t, acm2, path, "no by-id link: keep the tty")
+	assert.Equal(t, "ttyACM2", suffix)
+
+	path, suffix = stablePort(filepath.Join(dir, "missing"), acm1)
+	assert.Equal(t, acm1, path, "no by-id dir (macOS, Windows): keep the tty")
+	assert.Equal(t, "ttyACM1", suffix)
+}
+
+func TestGenerateConfigsGivesArmAndSensorTheSameCalibrationFile(t *testing.T) {
+	dis := &so101Discovery{logger: logging.NewTestLogger(t)}
+	cfgs := dis.generateConfigs("/dev/serial/by-id/x", "5C4C126186", true, true, "5C4C126186_calibration.json")
+	require.Len(t, cfgs, 3)
+	for _, c := range cfgs {
+		if c.Name == "so101-gripper-5C4C126186" {
+			continue
+		}
+		assert.Equal(t, "5C4C126186_calibration.json", c.Attributes["calibration_file"], c.Name)
+		assert.Equal(t, "/dev/serial/by-id/x", c.Attributes["port"], c.Name)
+	}
 }
