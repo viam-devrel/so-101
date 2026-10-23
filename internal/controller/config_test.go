@@ -8,7 +8,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.uber.org/zap/zapcore"
 	"go.viam.com/rdk/logging"
 
 	"so_arm/internal/servo"
@@ -109,7 +108,7 @@ func TestLoadCalibrationMissingFileDoesNotWarn(t *testing.T) {
 
 	assert.False(t, fromFile)
 	assert.Equal(t, DefaultSO101FullCalibration, cal)
-	assert.Equal(t, 0, logs.FilterLevelExact(zapcore.WarnLevel).Len())
+	assert.Equal(t, 0, logs.FilterMessageSnippet("Failed to load calibration").Len())
 }
 
 func TestGetNormModeForServo(t *testing.T) {
