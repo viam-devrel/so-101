@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -123,6 +124,16 @@ func (r *ControllerRegistry) AcquireController(
 	owner resource.Name, config *SoArm101Config,
 	calibration SO101FullCalibration, fromFile bool,
 ) (*ControllerHandle, error) {
+	// Key by device, not name: a /dev/serial/by-id link and its ttyACMn are one port.
+	// Unresolvable (absent device, COM3) keeps the raw name so the open fails as before.
+	if dev, err := filepath.EvalSymlinks(config.Port); err == nil && dev != config.Port {
+		if config.Logger != nil {
+			config.Logger.Infof("serial port %s resolves to %s", config.Port, dev)
+		}
+		resolved := *config
+		resolved.Port = dev
+		config = &resolved
+	}
 	h, err := r.GetController(config.Port, config, calibration, fromFile)
 	if err != nil {
 		return nil, err

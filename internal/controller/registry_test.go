@@ -2,6 +2,8 @@ package controller
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -10,6 +12,7 @@ import (
 	"github.com/hipsterbrown/feetech-servo/feetech"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.viam.com/rdk/components/arm"
 	"go.viam.com/rdk/logging"
 
 	"so_arm/internal/testfake"
@@ -522,4 +525,31 @@ func TestAcquireNeverJoinsATornDownEntry(t *testing.T) {
 	assert.NotSame(t, torn, h2.entry,
 		"joining a torn-down entry would hand back a permanently dead handle")
 	assert.NotNil(t, h2.entry.session.Load())
+}
+
+func TestAcquireThroughASymlinkSharesTheTargetsBus(t *testing.T) {
+	dir := t.TempDir()
+	dev := filepath.Join(dir, "ttyACM1")
+	require.NoError(t, os.WriteFile(dev, nil, 0o600))
+	link := filepath.Join(dir, "usb-1a86_USB_Single_Serial_5C4C126186-if00")
+	require.NoError(t, os.Symlink(dev, link))
+	want, err := filepath.EvalSymlinks(dev) // macOS t.TempDir() is itself under a symlink
+	require.NoError(t, err)
+
+	r := NewControllerRegistry()
+	var opened []string
+	r.busFactory = func(cfg feetech.BusConfig) (*feetech.Bus, error) {
+		opened = append(opened, cfg.Port)
+		cfg.Transport = testfake.NewFakeTransport()
+		return feetech.NewBus(cfg)
+	}
+
+	h1, err := r.AcquireController(arm.Named("arm"), shortTimeoutConfig(link), DefaultSO101FullCalibration, true)
+	require.NoError(t, err)
+	t.Cleanup(h1.Release)
+	h2, err := r.AcquireController(arm.Named("cal"), shortTimeoutConfig(dev), DefaultSO101FullCalibration, true)
+	require.NoError(t, err, "by-id link and its target are one port, not a config conflict")
+	t.Cleanup(h2.Release)
+
+	assert.Equal(t, []string{want}, opened, "one bus, opened on the resolved device")
 }
