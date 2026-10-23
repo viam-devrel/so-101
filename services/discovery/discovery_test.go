@@ -167,7 +167,19 @@ func TestStablePort(t *testing.T) {
 	link := filepath.Join(byID, "usb-1a86_USB_Single_Serial_5C4C126186-if00")
 	require.NoError(t, os.Symlink(acm1, link))
 
-	path, suffix := stablePort(byID, acm1)
+	// Entries that must not break matching: dangling link, regular file, FTDI-style link.
+	require.NoError(t, os.Symlink(filepath.Join(dir, "gone"), filepath.Join(byID, "usb-dangling-if00")))
+	require.NoError(t, os.WriteFile(filepath.Join(byID, "not-a-link"), nil, 0o600))
+	ftdiTTY := filepath.Join(dir, "ttyUSB0")
+	require.NoError(t, os.WriteFile(ftdiTTY, nil, 0o600))
+	ftdi := filepath.Join(byID, "usb-FTDI_FT232R_USB_UART_A50285BI-if00-port0")
+	require.NoError(t, os.Symlink(ftdiTTY, ftdi))
+
+	path, suffix := stablePort(byID, ftdiTTY)
+	assert.Equal(t, ftdi, path)
+	assert.Equal(t, "A50285BI", suffix)
+
+	path, suffix = stablePort(byID, acm1)
 	assert.Equal(t, link, path)
 	assert.Equal(t, "5C4C126186", suffix)
 
