@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap/zapcore"
 	"go.viam.com/rdk/logging"
 
 	"so_arm/internal/servo"
@@ -99,6 +100,16 @@ func TestLoadCalibrationStaysQuietWhenGripperIsNotInServoIDs(t *testing.T) {
 
 	require.True(t, fromFile)
 	assert.Equal(t, 0, logs.FilterMessageSnippet("run the calibration workflow").Len())
+}
+
+func TestLoadCalibrationMissingFileDoesNotWarn(t *testing.T) {
+	logger, logs := logging.NewObservedTestLogger(t)
+	cfg := &SoArm101Config{CalibrationFile: filepath.Join(t.TempDir(), "absent.json")}
+	cal, fromFile := cfg.LoadCalibration(logger)
+
+	assert.False(t, fromFile)
+	assert.Equal(t, DefaultSO101FullCalibration, cal)
+	assert.Equal(t, 0, logs.FilterLevelExact(zapcore.WarnLevel).Len())
 }
 
 func TestGetNormModeForServo(t *testing.T) {
