@@ -109,7 +109,6 @@ func (dis *so101Discovery) DiscoverResources(ctx context.Context, extra map[stri
 
 // discoverPort validates a single port and generates component configurations
 func (dis *so101Discovery) discoverPort(ctx context.Context, portPath string) []resource.Config {
-	portSuffix := extractPortSuffix(portPath)
 	dis.logger.Debugf("Checking port %s", portPath)
 
 	// Try to open port and ping servos
@@ -120,7 +119,8 @@ func (dis *so101Discovery) discoverPort(ctx context.Context, portPath string) []
 		return nil
 	}
 
-	dis.logger.Infof("Discovered SO-101 on %s (arm: %v, gripper: %v)", portPath, hasArm, hasGripper)
+	configPort, portSuffix := stablePort(serialByIDDir, portPath)
+	dis.logger.Infof("Discovered SO-101 on %s (arm: %v, gripper: %v)", configPort, hasArm, hasGripper)
 
 	// Find calibration file
 	moduleDataDir := os.Getenv("VIAM_MODULE_DATA")
@@ -130,7 +130,7 @@ func (dis *so101Discovery) discoverPort(ctx context.Context, portPath string) []
 	calibrationFile := findCalibrationFile(moduleDataDir, portSuffix, dis.logger)
 
 	// Generate component configs
-	return dis.generateConfigs(portPath, portSuffix, hasArm, hasGripper, calibrationFile)
+	return dis.generateConfigs(configPort, portSuffix, hasArm, hasGripper, calibrationFile)
 }
 
 // pingServos attempts to ping servo 1 and servo 6 on the given port
@@ -274,11 +274,37 @@ func extractPortSuffix(portPath string) string {
 	return base
 }
 
+// serialByIDDir is udev's stable per-device name directory (Linux only).
+const serialByIDDir = "/dev/serial/by-id"
+
+// stablePort returns the by-id link in dir that resolves to portPath, with the USB serial
+// from its name (usb-<vendor>_<model>_<serial>-if<NN>) as the suffix. Without one it
+// returns portPath and extractPortSuffix(portPath).
+func stablePort(dir, portPath string) (string, string) {
+	entries, err := os.ReadDir(dir)
+	target, terr := filepath.EvalSymlinks(portPath)
+	if err != nil || terr != nil {
+		return portPath, extractPortSuffix(portPath)
+	}
+	for _, e := range entries {
+		link := filepath.Join(dir, e.Name())
+		if t, err := filepath.EvalSymlinks(link); err != nil || t != target {
+			continue
+		}
+		name := e.Name()
+		if i := strings.LastIndex(name, "-if"); i > 0 {
+			name = name[:i]
+		}
+		return link, name[strings.LastIndex(name, "_")+1:]
+	}
+	return portPath, extractPortSuffix(portPath)
+}
+
 // findCalibrationFile searches for calibration files in moduleDataDir
 // Tries port-specific file first, then falls back to default
 // Returns just the filename (not full path) or empty string if not found
 func findCalibrationFile(moduleDataDir, portSuffix string, logger logging.Logger) string {
-	// Try port-specific file first: ttyUSB0_calibration.json
+	// Try port-specific file first: ttyUSB0_calibration.json (<serial>_calibration.json on Linux)
 	portSpecific := filepath.Join(moduleDataDir, portSuffix+"_calibration.json")
 	if _, err := os.Stat(portSpecific); err == nil {
 		logger.Debugf("Found port-specific calibration file: %s", filepath.Base(portSpecific))

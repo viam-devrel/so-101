@@ -25,7 +25,7 @@ _If you have already calibrated the servos on this arm, use the `devrel:so101:di
 
 | Name               | Type     | Required     | Description                                                                                                                     |
 | ------------------ | -------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------- |
-| `port`             | string   | **Required** | Serial port for servo communication (see [Communication](#communication)). On Windows this is a COM name, e.g. `COM3`.              |
+| `port`             | string   | **Required** | Serial port for servo communication (see [Communication](#communication)). On Windows this is a COM name, e.g. `COM3`. On Linux, prefer a `/dev/serial/by-id` path. |
 | `calibration_file` | string   | Optional     | Path where calibration will be saved. If relative path, uses `$VIAM_MODULE_DATA` directory. Default: `"so101_calibration.json"` |
 | `baudrate`         | int      | Optional     | Serial communication speed. Default: `1000000`                                                                                  |
 | `timeout`          | duration | Optional     | Communication timeout. Default: `"5s"`                                                                                          |
@@ -220,6 +220,8 @@ Motor setup status is included in sensor readings:
 ```
 
 ## Communication
+
+On Linux, prefer a stable `/dev/serial/by-id/...` path; see [arm.md](arm.md#communication).
 
 You can use the included [discovery service](discovery.md#model-devrelso101discovery) or find the available serial port options from your machine's command line.
 

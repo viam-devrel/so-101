@@ -101,6 +101,16 @@ func TestLoadCalibrationStaysQuietWhenGripperIsNotInServoIDs(t *testing.T) {
 	assert.Equal(t, 0, logs.FilterMessageSnippet("run the calibration workflow").Len())
 }
 
+func TestLoadCalibrationMissingFileDoesNotWarn(t *testing.T) {
+	logger, logs := logging.NewObservedTestLogger(t)
+	cfg := &SoArm101Config{CalibrationFile: filepath.Join(t.TempDir(), "absent.json")}
+	cal, fromFile := cfg.LoadCalibration(logger)
+
+	assert.False(t, fromFile)
+	assert.Equal(t, DefaultSO101FullCalibration, cal)
+	assert.Equal(t, 0, logs.FilterMessageSnippet("Failed to load calibration").Len())
+}
+
 func TestGetNormModeForServo(t *testing.T) {
 	tests := []struct {
 		servoID  int

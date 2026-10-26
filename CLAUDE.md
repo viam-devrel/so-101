@@ -57,6 +57,10 @@ from `README.md` and from `meta.json`'s per-model `markdown_link` fields.
   their model vars.
 - **Simulated models** use none of the above — no controller, no serial port — and exist
   for developing, testing, and visualizing without a physical robot.
+- **The controller is keyed by the symlink-resolved device**, not the configured string:
+  `AcquireController` runs `filepath.EvalSymlinks` so a `/dev/serial/by-id` link and its
+  `ttyACMn` share one bus. Linux lets two fds open one tty, so without this they would
+  interleave transactions on the wire. Discovery suggests by-id paths for this reason.
 
 ## Kinematics & meshes
 

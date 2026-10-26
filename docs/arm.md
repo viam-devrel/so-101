@@ -22,7 +22,7 @@ The following attributes are available for the arm component:
 
 | Name               | Type     | Inclusion    | Description                                                                                                                                                            |
 | ------------------ | -------- | ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `port`             | string   | **Required** | The serial port for communication with the SO-101 (see Communication section below). On Windows this is a COM name, e.g. `COM3`.                                       |
+| `port`             | string   | **Required** | The serial port for communication with the SO-101 (see Communication section below). On Windows this is a COM name, e.g. `COM3`. On Linux, prefer a `/dev/serial/by-id` path. |
 | `calibration_file` | string   | Optional     | Path to the calibration file. If not provided, the module will attempt to read calibration from servo registers. If servo reads fail, uses default calibration values. |
 | `baudrate`         | int      | Optional     | The baud rate for serial communication. Default is `1000000`.                                                                                                          |
 | `servo_ids`        | []int    | Optional     | List of servo IDs for the arm joints. Default is `[1, 2, 3, 4, 5]`.                                                                                                    |
@@ -598,7 +598,7 @@ While manual mode is active, it also reports live per-joint telemetry (`actual_d
 
 The SO-101 uses serial communication over USB with Feetech STS3215 servos. All 6 servos share one bus, and the arm component owns that connection: it drives servos 1-5 itself and exposes the remaining servo to a gripper component through its [`servo_*` commands](#servo-commands). The gripper therefore configures an `arm` rather than a `port`, and never opens the port itself.
 
-Components that do configure a `port` — an arm, and the [calibration sensor](calibration.md#model-devrelso101calibration) — share one connection when they name the same port, rather than opening it twice. The port stays open until the last of them is removed.
+Components that do configure a `port` — an arm, and the [calibration sensor](calibration.md#model-devrelso101calibration) — share one connection when they name the same port, rather than opening it twice. The port stays open until the last of them is removed. They also share it when they name the same device differently — one by its `/dev/serial/by-id` link, the other by the `ttyACM` it points to.
 
 If the port is not present when the machine starts, the component keeps retrying and connects on its own once the device appears. No restart is needed.
 
@@ -625,6 +625,16 @@ you@machine: ls /dev/tty*
 /dev/ttyACM0
 /dev/ttyUSB0
 ```
+
+On Linux, prefer the `/dev/serial/by-id/...` path over `/dev/ttyACM0`. `ttyACM` numbers follow plug-in order and can swap between boots, so a leader and follower configured by tty name can trade places. The by-id name contains the adapter's USB serial and does not change:
+
+```
+you@machine: ls -l /dev/serial/by-id/
+usb-1a86_USB_Single_Serial_5C4C126186-if00 -> ../../ttyACM1
+usb-1a86_USB_Single_Serial_5C4C127771-if00 -> ../../ttyACM2
+```
+
+The discovery service suggests these paths automatically. If two arms' adapters show up as a single by-id entry (a name with no serial in it, e.g. `usb-1a86_USB2.0-Serial-if00-port0`), those adapters report no USB serial. Use `/dev/serial/by-path/...` instead, which is stable per physical USB socket.
 
 On Windows, look for `COM` in the name:
 

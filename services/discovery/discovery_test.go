@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.viam.com/rdk/logging"
 )
 
@@ -153,4 +154,40 @@ func TestEnumerateSerialPorts(t *testing.T) {
 	assert.NotNil(t, ports)
 	// Ports list can be empty on systems without serial devices
 	t.Logf("Found %d serial ports", len(ports))
+}
+
+func TestStablePort(t *testing.T) {
+	dir := t.TempDir()
+	byID := filepath.Join(dir, "by-id")
+	require.NoError(t, os.Mkdir(byID, 0o755))
+	acm1 := filepath.Join(dir, "ttyACM1")
+	acm2 := filepath.Join(dir, "ttyACM2")
+	require.NoError(t, os.WriteFile(acm1, nil, 0o600))
+	require.NoError(t, os.WriteFile(acm2, nil, 0o600))
+	link := filepath.Join(byID, "usb-1a86_USB_Single_Serial_5C4C126186-if00")
+	require.NoError(t, os.Symlink(acm1, link))
+
+	// Entries that must not break matching: dangling link, regular file, FTDI-style link.
+	require.NoError(t, os.Symlink(filepath.Join(dir, "gone"), filepath.Join(byID, "usb-dangling-if00")))
+	require.NoError(t, os.WriteFile(filepath.Join(byID, "not-a-link"), nil, 0o600))
+	ftdiTTY := filepath.Join(dir, "ttyUSB0")
+	require.NoError(t, os.WriteFile(ftdiTTY, nil, 0o600))
+	ftdi := filepath.Join(byID, "usb-FTDI_FT232R_USB_UART_A50285BI-if00-port0")
+	require.NoError(t, os.Symlink(ftdiTTY, ftdi))
+
+	path, suffix := stablePort(byID, ftdiTTY)
+	assert.Equal(t, ftdi, path)
+	assert.Equal(t, "A50285BI", suffix)
+
+	path, suffix = stablePort(byID, acm1)
+	assert.Equal(t, link, path)
+	assert.Equal(t, "5C4C126186", suffix)
+
+	path, suffix = stablePort(byID, acm2)
+	assert.Equal(t, acm2, path, "no by-id link: keep the tty")
+	assert.Equal(t, "ttyACM2", suffix)
+
+	path, suffix = stablePort(filepath.Join(dir, "missing"), acm1)
+	assert.Equal(t, acm1, path, "no by-id dir (macOS, Windows): keep the tty")
+	assert.Equal(t, "ttyACM1", suffix)
 }

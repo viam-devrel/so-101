@@ -3,7 +3,9 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -114,7 +116,11 @@ func (cfg *SoArm101Config) LoadCalibration(logger logging.Logger) (SO101FullCali
 	calibration, err := LoadFullCalibrationFromFile(cfg.CalibrationFile, logger)
 	if err != nil {
 		if logger != nil {
-			logger.Warnf("Failed to load calibration from %s: %v, using default calibration", cfg.CalibrationFile, err)
+			if errors.Is(err, fs.ErrNotExist) {
+				logger.Debugf("Calibration file %s not found yet, using default calibration", cfg.CalibrationFile)
+			} else {
+				logger.Warnf("Failed to load calibration from %s: %v, using default calibration", cfg.CalibrationFile, err)
+			}
 		}
 		return DefaultSO101FullCalibration, false
 	}
