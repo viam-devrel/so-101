@@ -431,6 +431,7 @@ func (s *so101) enterManualLocked(overrides map[string]interface{}) map[string]i
 // exitManualLocked tears down manual mode if active and holds the current pose.
 // Caller holds s.mu. Safe to call when not active.
 func (s *so101) exitManualLocked(reason string) {
+	s.manualExit.cancel() // drop any pending SetManualMode auto-exit, however we're exiting
 	if s.manual == nil || !s.manual.running() {
 		return
 	}

@@ -363,6 +363,23 @@ func (s *simulatedSO101) MoveToPosition(ctx context.Context, pose spatialmath.Po
 	return planning.WrapMoveErr(err, path, s.goalCloud)
 }
 
+// Properties reports optional features. The simulated arm has no servos to
+// back-drive, so manual (hand-guided) mode is unsupported; cartesian commands
+// are supported via the motion service (see MoveToPosition).
+func (s *simulatedSO101) Properties(ctx context.Context, extra map[string]interface{}) (arm.Properties, error) {
+	return arm.Properties{SupportManualMode: false, SupportCartesianCommands: true}, nil
+}
+
+// ManualMode is always false: the simulated arm has no compliance/hand-guiding.
+func (s *simulatedSO101) ManualMode(ctx context.Context, extra map[string]interface{}) (bool, error) {
+	return false, nil
+}
+
+// SetManualMode is unsupported on the simulated arm (nothing to back-drive).
+func (s *simulatedSO101) SetManualMode(ctx context.Context, on bool, enabledFor time.Duration, extra map[string]interface{}) error {
+	return errors.New("manual mode is not supported on the simulated SO-101")
+}
+
 // MoveToJointPositions starts a move to the given joint configuration and blocks until it
 // completes, the arm is stopped, or the context is canceled.
 func (s *simulatedSO101) MoveToJointPositions(

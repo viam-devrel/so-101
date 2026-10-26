@@ -198,6 +198,7 @@ type so101 struct {
 	opMgr      *operation.SingleOperationManager
 	controller *controller.ControllerHandle
 	manual     *manualSession
+	manualExit exitTimer // auto-exit for SetManualMode's enabledFor
 
 	// goalCloud is the resolved approach-axis tolerance pair. Set once in NewSO101 and
 	// never mutated (the model is resource.AlwaysRebuild), so it needs no mutex.
