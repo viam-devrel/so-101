@@ -242,6 +242,20 @@ func TestTeleopTickErrorThreshold(t *testing.T) {
 	test.That(t, tp.cycles, test.ShouldEqual, uint64(1))
 }
 
+// stop() cancels the loop context mid-cycle; the cut-short cycle must not read as a failure.
+func TestTeleopTickCancelledCycleIsNotAnError(t *testing.T) {
+	la := &fakeArm{name: arm.Named("l"), jpErr: context.Canceled}
+	fa := &fakeArm{name: arm.Named("f"), jp: []referenceframe.Input{0.5}}
+	tp := newTestTeleop(t, la, fa, nil, nil)
+	tp.running = true
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	test.That(t, tp.tick(ctx), test.ShouldBeTrue)
+	test.That(t, tp.lastError, test.ShouldBeBlank)
+	test.That(t, tp.consecutiveErrors, test.ShouldEqual, 0)
+}
+
 // A streamed setpoint has no speed cap and no ramp, so the mirror must not use one until
 // the follower has actually caught up -- otherwise starting teleop with the arms in
 // different poses snaps the follower across at full servo speed.
