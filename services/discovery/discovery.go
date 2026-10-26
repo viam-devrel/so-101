@@ -180,8 +180,10 @@ func (dis *so101Discovery) generateConfigs(
 	// Generate arm config if servo 1 responded
 	if hasArm {
 		attrs := map[string]interface{}{
-			"port":             portPath,
-			"calibration_file": calibrationFile,
+			"port": portPath,
+		}
+		if calibrationFile != "" {
+			attrs["calibration_file"] = calibrationFile
 		}
 
 		configs = append(configs, resource.Config{
@@ -218,8 +220,7 @@ func (dis *so101Discovery) generateConfigs(
 			API:   sensor.API,
 			Model: so101calibration.SO101CalibrationSensorModel,
 			Attributes: map[string]interface{}{
-				"port":             portPath,
-				"calibration_file": calibrationFile,
+				"port": portPath,
 			},
 		})
 	}
@@ -301,8 +302,7 @@ func stablePort(dir, portPath string) (string, string) {
 
 // findCalibrationFile searches for calibration files in moduleDataDir
 // Tries port-specific file first, then falls back to default
-// Returns just the filename (not full path); with neither, the port-specific name so each
-// arm's sensor writes its own file instead of the shared default
+// Returns just the filename (not full path) or empty string if not found
 func findCalibrationFile(moduleDataDir, portSuffix string, logger logging.Logger) string {
 	// Try port-specific file first: ttyUSB0_calibration.json (<serial>_calibration.json on Linux)
 	portSpecific := filepath.Join(moduleDataDir, portSuffix+"_calibration.json")
@@ -319,7 +319,7 @@ func findCalibrationFile(moduleDataDir, portSuffix string, logger logging.Logger
 	}
 
 	logger.Debug("No calibration file found")
-	return filepath.Base(portSpecific)
+	return ""
 }
 
 // enumerateSerialPorts returns a list of all serial ports on the system

@@ -2,7 +2,7 @@
 
 # Model devrel:so101:discovery
 
-Automatic discovery service that detects connected arms and suggests component configurations for the calibration sensor, arm and gripper. It will also look for existing calibration files. On Linux it suggests the stable `/dev/serial/by-id` path and names components after the adapter's USB serial (e.g. `so101-arm-5C4C126186`), each with its own `<serial>_calibration.json`, so leader and follower keep their identities and calibrations across reboots.
+Automatic discovery service that detects connected arms and suggests component configurations for the calibration sensor, arm and gripper. It will also look for existing calibration files. On Linux it suggests the stable `/dev/serial/by-id` path and names components after the adapter's USB serial (e.g. `so101-arm-5C4C126186`), so leader and follower keep their identities across reboots.
 
 **IF YOU ARE BUILDING THIS ARM FOR THE FIRST TIME: add the calibration sensor and follow the setup instructions**
 

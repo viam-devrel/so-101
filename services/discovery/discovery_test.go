@@ -130,7 +130,7 @@ func TestFindCalibrationFile(t *testing.T) {
 				// No files created
 			},
 			portSuffix: "ttyUSB0",
-			expected:   "ttyUSB0_calibration.json",
+			expected:   "",
 		},
 	}
 
@@ -190,17 +190,4 @@ func TestStablePort(t *testing.T) {
 	path, suffix = stablePort(filepath.Join(dir, "missing"), acm1)
 	assert.Equal(t, acm1, path, "no by-id dir (macOS, Windows): keep the tty")
 	assert.Equal(t, "ttyACM1", suffix)
-}
-
-func TestGenerateConfigsGivesArmAndSensorTheSameCalibrationFile(t *testing.T) {
-	dis := &so101Discovery{logger: logging.NewTestLogger(t)}
-	cfgs := dis.generateConfigs("/dev/serial/by-id/x", "5C4C126186", true, true, "5C4C126186_calibration.json")
-	require.Len(t, cfgs, 3)
-	for _, c := range cfgs {
-		if c.Name == "so101-gripper-5C4C126186" {
-			continue
-		}
-		assert.Equal(t, "5C4C126186_calibration.json", c.Attributes["calibration_file"], c.Name)
-		assert.Equal(t, "/dev/serial/by-id/x", c.Attributes["port"], c.Name)
-	}
 }
