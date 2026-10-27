@@ -13,6 +13,7 @@ import (
 	"go.viam.com/rdk/referenceframe"
 	"go.viam.com/rdk/services/motion"
 	"go.viam.com/rdk/spatialmath"
+	"go.viam.com/rdk/utils"
 
 	"so_arm/internal/controller"
 	"so_arm/internal/geometry"
@@ -84,11 +85,19 @@ func jointLimitsFor(cal controller.SO101FullCalibration, ids []int) [][2]float64
 }
 
 // calibratedJointLimitsDeg keys jointLimitsFor by joint ID, which is the servo ID in both
-// so101.json and so101.urdf.
+// so101.json and so101.urdf. A joint with no real calibration (missing, the 500/3500 default,
+// or factory 0/4095) is left out so it keeps the model's own limits.
 func calibratedJointLimitsDeg(cal controller.SO101FullCalibration, ids []int) map[string][2]float64 {
 	limits := make(map[string][2]float64, len(ids))
 	for i, l := range jointLimitsFor(cal, ids) {
-		limits[strconv.Itoa(ids[i])] = [2]float64{l[0] * 180 / math.Pi, l[1] * 180 / math.Pi}
+		mc := cal.GetMotorCalibrationByID(ids[i])
+		if mc == nil || mc.NormMode != servo.NormModeDegrees || (mc.RangeMin == 0 && mc.RangeMax == 4095) {
+			continue
+		}
+		if def := controller.DefaultSO101FullCalibration.GetMotorCalibrationByID(ids[i]); def != nil && *mc == *def {
+			continue
+		}
+		limits[strconv.Itoa(ids[i])] = [2]float64{utils.RadToDeg(l[0]), utils.RadToDeg(l[1])}
 	}
 	return limits
 }

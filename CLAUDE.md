@@ -100,7 +100,9 @@ both arm models and both gripper models.
   kinematics/TCP **and** frame names as the JSON model — only the collision geometry changes
   (per-link meshes vs so101.json's primitives). `armModelURDF` therefore just parses the
   URDF; it only re-serializes to SVA JSON for `visualize_ee_frame` (to carry the tool's
-  placeholder marker box across the wire).
+  placeholder marker box across the wire). The hardware arm re-serializes again regardless, to
+  bake in calibrated joint limits (`geometry.WithJointLimits`), so only the simulated arm ships
+  raw URDF bytes.
 - `internal/geometry/meshes/so101/*.glb` — arm-link meshes (Draco GLB) + `ee_frame.glb`
   (the colored EE coordinate-frame marker). Served via the arm's `Get3DModels`.
   `visualize_ee_frame` works in both JSON and URDF modes, since both end at a `tool` frame
@@ -285,10 +287,11 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
   an EE ~98mm past so101.json's TCP and the gripper (parented to the arm) followed it — while
   every in-process unit test stayed green. `TestURDFModelSurvivesSerialization` guards this
   by round-tripping through the real gRPC (de)serialization; an in-process `Transform` check
-  would NOT have caught it. The one place we still rely on this: for `visualize_ee_frame` the
-  tool needs an in-memory placeholder box, so that path re-serializes to **SVA JSON**
-  (`spatialmath.GeometryConfig.MeshData` embeds the mesh bytes, so meshes survive) — a bigger
-  payload (~5.9 MB vs ~4.4 MB URDF), hence only when the marker is enabled.
+  would NOT have caught it. Two places still rely on this, both by re-serializing to **SVA JSON**
+  (`spatialmath.GeometryConfig.MeshData` embeds the mesh bytes, so meshes survive): the
+  `visualize_ee_frame` placeholder box, and the hardware arm's calibrated joint limits
+  (`geometry.WithJointLimits`, always). The cost is a bigger payload (~5.9 MB vs ~4.4 MB URDF)
+  on every hardware `use_urdf` arm.
 - The Viam `tool` frame in `so101.json` is rotated ~180° from the URDF `gripper_link`
   frame (the TCP convention). Gripper meshes are authored in `gripper_link` coords, so
   `internal/geometry`'s `toolFromGripperLink` transform corrects them in `BuildGripperMeshes`.
