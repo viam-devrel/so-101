@@ -307,6 +307,10 @@ func NewSO101(ctx context.Context, deps resource.Dependencies, name resource.Nam
 	}
 
 	model, err := makeModelFrame(conf, name.Name)
+	if err == nil {
+		// Report the calibrated range, the same one clampPositions enforces, not so101.json's.
+		model, err = geometry.WithJointLimits(model, calibratedJointLimitsDeg(ctrl.GetCalibration(), conf.ServoIDs), name.Name)
+	}
 	if err != nil {
 		ctrl.Release() // Clean up on error
 		return nil, fmt.Errorf("failed to create kinematic model: %w", err)

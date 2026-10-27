@@ -11,6 +11,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 
 	"github.com/pkg/errors"
 	"go.viam.com/rdk/referenceframe"
@@ -114,6 +115,29 @@ func ArmModel(useURDF bool, ratios []float64, visualizeEE bool, name string) (re
 		return ArmModelJSON(name)
 	}
 	return armModelURDF(ratios, visualizeEE, name)
+}
+
+// WithJointLimits replaces each joint's min/max (degrees, keyed by joint ID) and re-serializes
+// the model to SVA JSON, since viam-server rebuilds it from OriginalFile bytes and an in-memory
+// edit would not survive the module boundary. Joints absent from limits keep their own.
+func WithJointLimits(model referenceframe.Model, limits map[string][2]float64, name string) (referenceframe.Model, error) {
+	sm, ok := model.(*referenceframe.SimpleModel)
+	if !ok {
+		return nil, fmt.Errorf("expected *referenceframe.SimpleModel, got %T", model)
+	}
+	mc := *sm.ModelConfig()
+	mc.OriginalFile = nil
+	mc.Joints = slices.Clone(mc.Joints)
+	for i := range mc.Joints {
+		if l, ok := limits[mc.Joints[i].ID]; ok {
+			mc.Joints[i].Min, mc.Joints[i].Max = l[0], l[1]
+		}
+	}
+	jsonBytes, err := json.Marshal(&mc)
+	if err != nil {
+		return nil, fmt.Errorf("serializing model with joint limits: %w", err)
+	}
+	return referenceframe.UnmarshalModelJSON(jsonBytes, name)
 }
 
 // so101.urdf carries one merged collision mesh per arm link (base/shoulder/upper_arm/lower_arm/

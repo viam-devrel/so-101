@@ -363,7 +363,9 @@ A joint reads 0° at the pose it was homed at during calibration (raw tick 2047,
 `set_homing` centers the servo's `position_offset`), **not** at the middle of its recorded range.
 The recorded `range_min`/`range_max` only bound commanded positions — as the servo's register
 limits, and as the arm's joint limits, which clamp any out-of-range target and log one warning
-per move. An asymmetric range therefore narrows the joint's travel but never moves its zero.
+per move. The same range is what `Kinematics()` reports, so the motion planner and rdk's arm
+client see it too (read at construction; reconfigure the arm after recalibrating). An asymmetric
+range therefore narrows the joint's travel but never moves its zero.
 
 Versions before this convention derived 0° from `(range_min + range_max) / 2`. Upgrading with an
 existing calibration file shifts every arm joint by `(2047 - midpoint) × 360 / 4095` degrees
@@ -484,7 +486,7 @@ Enforcing acceleration costs some speed, because the servos now ramp instead of 
 - Late points are written, not dropped. `Constraints` and `extra` are ignored. One ack per non-empty batch.
 - After the last point the arm dwells, then waits for the servos to stop, so the call returns once the arm has arrived.
 - The move lock is held for the whole stream; `Stop()` ends it, even while waiting on the producer.
-- rdk's arm client validates each point against the model's *static* joint limits before sending; the module clamps to the *calibrated* limits. A point inside the second but outside the first fails client-side.
+- rdk's arm client validates each point against the model's joint limits before sending. Those are the calibrated limits the module clamps to, as of the last (re)configure.
 
 The simulated arm re-targets its interpolator at each point's time. One log line per stream reports gate, late points, settle and wall time.
 
