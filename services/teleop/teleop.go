@@ -365,6 +365,9 @@ func (tp *so101Teleop) runLoop(ctx context.Context) {
 // happen under tp.mu so a concurrent status DoCommand reads a consistent view.
 func (tp *so101Teleop) tick(ctx context.Context) bool {
 	err := tp.syncOnce(ctx)
+	if ctx.Err() != nil {
+		return true // stopping: a cycle cut short by cancel is not an error
+	}
 
 	tp.mu.Lock()
 	defer tp.mu.Unlock()
