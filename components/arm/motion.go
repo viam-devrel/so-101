@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strconv"
 	"strings"
 	"time"
 
@@ -78,6 +79,16 @@ func jointLimitsFor(cal controller.SO101FullCalibration, ids []int) [][2]float64
 			lo, hi = hi, lo
 		}
 		limits[i] = [2]float64{lo, hi}
+	}
+	return limits
+}
+
+// calibratedJointLimitsDeg keys jointLimitsFor by joint ID, which is the servo ID in both
+// so101.json and so101.urdf.
+func calibratedJointLimitsDeg(cal controller.SO101FullCalibration, ids []int) map[string][2]float64 {
+	limits := make(map[string][2]float64, len(ids))
+	for i, l := range jointLimitsFor(cal, ids) {
+		limits[strconv.Itoa(ids[i])] = [2]float64{l[0] * 180 / math.Pi, l[1] * 180 / math.Pi}
 	}
 	return limits
 }

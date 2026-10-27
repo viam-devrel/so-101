@@ -609,10 +609,11 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
   close the channel (the server's recv goroutine watches the stream ctx). Requires rdk ≥ v1.1.0
   (the method is on `arm.Arm`); `FakeTransport.WriteCount` counts `SYNC_WRITE`s by start
   address so tests can count goal writes -- `SetGoals` is a sync write at `RegAcceleration`.
-  A REMOTE caller is also validated by rdk's arm client against the model's static `DoF()`
-  limits (so101.json / URDF), point by point, and the stream is torn down client-side on a
-  violation -- before any point reaches the module's `clampPositions`, which clamps to the
-  CALIBRATED limits. Two different limit sets; in-process tests only ever see the second.
+  A REMOTE caller is also validated by rdk's arm client against the model's `DoF()`, point by
+  point, and the stream is torn down client-side on a violation. `NewSO101` bakes the CALIBRATED
+  limits (the ones `clampPositions` uses) into the model via `geometry.WithJointLimits`, which
+  re-serializes to SVA JSON -- so the URDF path now ships the bigger JSON payload too. The model is
+  built once per construction: `reload_calibration` updates the clamp but not `Kinematics()`.
 - **rdk ≥ v1.6.0's `Frame.Transform` does NOT bounds-check joints** (`OOBErrString` is dead
   upstream). On the WRITE path that makes `so101.clampPositions` the only joint-limit
   enforcement in this module -- do not "simplify it away" on the assumption that rdk rejects an

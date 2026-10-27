@@ -1,6 +1,7 @@
 package geometry
 
 import (
+	"math"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -74,4 +75,29 @@ func TestURDFModelSurvivesSerialization(t *testing.T) {
 	gEE, err := tEE.Geometries(make([]referenceframe.Input, len(tEE.DoF())))
 	require.NoError(t, err)
 	require.Equal(t, 6, len(gEE.Geometries()), "transmitted model lost the visualize_ee_frame marker geometry")
+}
+
+// TestJointLimitsSurviveSerialization: calibrated limits must reach viam-server, which rebuilds
+// the model from the transmitted bytes, on both the JSON and URDF paths.
+func TestJointLimitsSurviveSerialization(t *testing.T) {
+	t.Setenv("VIAM_MODULE_ROOT", testfake.RepoRoot())
+	for _, useURDF := range []bool{false, true} {
+		base, err := ArmModel(useURDF, nil, false, "arm")
+		require.NoError(t, err)
+		m, err := WithJointLimits(base, map[string][2]float64{"4": {-104.8, 99.5}}, "arm")
+		require.NoError(t, err)
+
+		out, err := referenceframe.KinematicModelFromProtobuf("arm", referenceframe.KinematicModelToProtobuf(m))
+		require.NoError(t, err)
+		dof := out.DoF()
+		require.InDelta(t, -104.8*math.Pi/180, dof[3].Min, 1e-9, "urdf=%v", useURDF)
+		require.InDelta(t, 99.5*math.Pi/180, dof[3].Max, 1e-9, "urdf=%v", useURDF)
+		require.Equal(t, base.DoF()[0], dof[0], "urdf=%v: untouched joint changed", useURDF)
+
+		g, err := out.Geometries(make([]referenceframe.Input, len(dof)))
+		require.NoError(t, err)
+		bg, err := base.Geometries(make([]referenceframe.Input, len(dof)))
+		require.NoError(t, err)
+		require.Len(t, g.Geometries(), len(bg.Geometries()), "urdf=%v: geometry lost", useURDF)
+	}
 }
