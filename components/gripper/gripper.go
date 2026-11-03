@@ -161,6 +161,16 @@ func newSO101Gripper(ctx context.Context, deps resource.Dependencies, conf resou
 	logger.Debugf("SO-101 gripper initialized with servo ID %d, open=%.1f%%, closed=%.1f%%",
 		cfg.ServoID, g.openPosition, g.closedPosition)
 
+	// A leader gripper is an input device: its trigger must be free to move, but the arm's
+	// bring-up has just enabled torque on the whole bus (servo 6 included). Release it here,
+	// after the arm, since the gripper depends on the arm and so is built after it. Best
+	// effort: an arm that is still a remote on an older module simply does not know the
+	// command, and the gripper must still build.
+	if gripperType == geometry.LeaderGripper {
+		if _, err := g.servoDo(ctx, servocmd.CmdServoTorque, map[string]interface{}{"enable": false}); err != nil {
+			logger.Warnf("leader gripper: could not release the trigger servo's torque: %v", err)
+		}
+	}
 	return g, nil
 }
 
@@ -426,6 +436,16 @@ func (g *so101Gripper) DoCommand(ctx context.Context, cmd map[string]interface{}
 
 		err := g.moveToPercent(ctx, targetPercent, servocmd.WaitArg(cmd))
 		return map[string]interface{}{"success": err == nil}, err
+
+	case "set_torque":
+		enable, ok := cmd["enable"].(bool)
+		if !ok {
+			return nil, fmt.Errorf("set_torque command requires 'enable' boolean parameter")
+		}
+		if _, err := g.servoDo(ctx, servocmd.CmdServoTorque, map[string]interface{}{"enable": enable}); err != nil {
+			return nil, err
+		}
+		return map[string]interface{}{"success": true, "enable": enable}, nil
 
 	case "controller_status":
 		// The arm owns the controller now, so forward and re-shape to this component's

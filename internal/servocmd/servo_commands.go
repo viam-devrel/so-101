@@ -22,6 +22,10 @@ const (
 	CmdServoPosition     = "servo_position"
 	CmdServoStop         = "servo_stop"
 	CmdServoWaitStop     = "servo_wait_stop"
+	// CmdServoTorque enables or disables torque on ONE servo. The arm's set_torque acts on
+	// the whole bus, which is wrong for a leader gripper: its trigger is an input device and
+	// must be free to move while the arm joints hold.
+	CmdServoTorque = "servo_torque"
 )
 
 // ServoOps is the single-servo surface HandleServoCommand needs. Keeping dispatch behind
@@ -37,6 +41,8 @@ type ServoOps interface {
 	StopServo(ctx context.Context, id int) error
 	WaitForServosToStop(ctx context.Context, ids []int, timeoutMs int) error
 	AnyServoMoving(ctx context.Context, ids []int) (moving bool, condition feetech.StatusError, err error)
+	// SetServoTorque writes a single servo's torque_enable register.
+	SetServoTorque(ctx context.Context, id int, enable bool) error
 }
 
 // IsServoCommand reports whether a DoCommand belongs to this family, so the arm can route
@@ -193,6 +199,16 @@ func HandleServoCommand(
 			return nil, err
 		}
 		return withCondition(map[string]any{"moving": moving}, condition), nil
+
+	case CmdServoTorque:
+		enable, ok := cmd["enable"].(bool)
+		if !ok {
+			return nil, fmt.Errorf("%s requires an 'enable' bool", CmdServoTorque)
+		}
+		if err := ops.SetServoTorque(ctx, id, enable); err != nil {
+			return nil, err
+		}
+		return map[string]any{"enable": enable}, nil
 
 	case CmdServoWaitStop:
 		timeoutMs, ok := NumArg(cmd, "timeout_ms")
