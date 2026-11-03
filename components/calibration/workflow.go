@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	feetech "github.com/hipsterbrown/feetech-servo/feetech"
@@ -297,8 +299,17 @@ func (cs *so101CalibrationSensor) stopRangeRecording(_ context.Context) (map[str
 		return map[string]any{"success": false}, fmt.Errorf("invalid ranges detected")
 	}
 
-	cs.setState(StateCompleted,
-		"Range recording complete. Save the calibration to write it to the servos and to file.")
+	// Warn now, before the user presses save, if any range captured an encoder wrap.
+	// saveCalibration refuses such a recording; the state stays Completed so the result can
+	// still be inspected, and "start" begins a fresh session.
+	if err := validateRecordedRanges(cs.joints); err != nil {
+		cs.logger.Warnf("Recorded ranges cannot be saved: %v", err)
+		cs.setState(StateCompleted, fmt.Sprintf(
+			"Range recording complete, but it CANNOT be saved: %v. Start a new calibration.", err))
+	} else {
+		cs.setState(StateCompleted,
+			"Range recording complete. Save the calibration to write it to the servos and to file.")
+	}
 
 	return map[string]any{
 		"success":            true,
@@ -317,6 +328,15 @@ func (cs *so101CalibrationSensor) saveCalibration(ctx context.Context) (map[stri
 			fmt.Errorf("calibration not completed (current state: %s)", cs.state.String())
 	}
 
+	// Refuse a recording that captured an encoder wrap BEFORE writing anything: the servo
+	// firmware would clamp an out-of-range limit to 0..4095 and the arm would then normalize
+	// that joint over the wrong span, silently.
+	if err := validateRecordedRanges(cs.joints); err != nil {
+		cs.setState(StateCompleted, fmt.Sprintf("Calibration NOT saved: %v. Start a new calibration.", err))
+		return map[string]any{"success": false, "message": cs.lastInstruction}, err
+	}
+
+	calibrationPath := controller.ResolveCalibrationPath(cs.cfg.CalibrationFile)
 	cs.logger.Info("Saving calibration to servos and file...")
 
 	// Create calibration structure
@@ -364,11 +384,12 @@ func (cs *so101CalibrationSensor) saveCalibration(ctx context.Context) (map[stri
 	// cannot cost the recording if the module restarts before the retry. Nothing requires the
 	// two to agree -- the file is the module's normalization source and the registers are only
 	// the fallback read when no file exists (controller.LoadCalibration).
-	if err := controller.SaveFullCalibrationToFile(cs.cfg.CalibrationFile, fullCalibration); err != nil {
+	if err := controller.SaveFullCalibrationToFile(calibrationPath, fullCalibration); err != nil {
 		cs.setState(StateCompleted, fmt.Sprintf(
-			"Failed to save calibration file: %v. Recorded ranges are unaffected -- saving again is safe.", err))
+			"Failed to save calibration file %s: %v. Recorded ranges are unaffected -- saving again is safe.", calibrationPath, err))
 		return map[string]any{"success": false}, err
 	}
+	cs.logger.Infof("Calibration file written to %s", calibrationPath)
 
 	cs.logger.Info("Writing calibration data to servo registers...")
 	for servoID, joint := range cs.joints {
@@ -431,7 +452,7 @@ func (cs *so101CalibrationSensor) saveCalibration(ctx context.Context) (map[stri
 	result := map[string]any{
 		"success":           true,
 		"state":             cs.state.String(),
-		"calibration_file":  cs.cfg.CalibrationFile,
+		"calibration_file":  calibrationPath,
 		"joints_calibrated": len(cs.joints),
 		"torque_enabled":    torqueEnabled,
 		"message":           cs.lastInstruction,
@@ -644,4 +665,29 @@ func (cs *so101CalibrationSensor) writeMaxPositionLimit(ctx context.Context, ser
 	}
 
 	return cs.controller.WriteServoRegister(ctx, servoID, "max_angle_limit", data)
+}
+
+// validateRecordedRanges checks every recorded joint range is a real span inside the servo's
+// encoder: 0 <= min < max <= MaxPosition. A range like [2, 32973] means the joint crossed the
+// encoder's zero during recording (the STS3215 reads ~32768+ just past zero), i.e. it was homed
+// near one end of its travel. The error names every bad joint and its recorded range.
+func validateRecordedRanges(joints map[int]*JointCalibrationData) error {
+	maxPos := feetech.ModelSTS3215.MaxPosition
+	ids := make([]int, 0, len(joints))
+	for id := range joints {
+		ids = append(ids, id)
+	}
+	sort.Ints(ids)
+	var bad []string
+	for _, id := range ids {
+		j := joints[id]
+		if j.RangeMin < 0 || j.RangeMin >= j.RangeMax || j.RangeMax > maxPos {
+			bad = append(bad, fmt.Sprintf("servo %d (%s) recorded range [%d, %d]", id, j.Name, j.RangeMin, j.RangeMax))
+		}
+	}
+	if len(bad) == 0 {
+		return nil
+	}
+	return fmt.Errorf("out-of-range calibration (must be within [0, %d]): %s; re-home with this joint at the middle of its travel, then record again",
+		maxPos, strings.Join(bad, "; "))
 }

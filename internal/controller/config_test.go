@@ -178,3 +178,28 @@ func TestValidateServoRegisterValues(t *testing.T) {
 		})
 	}
 }
+
+func TestSaveAndLoadResolveRelativeCalibrationFileToTheSamePath(t *testing.T) {
+	dataDir := filepath.Join(t.TempDir(), "module-data", "not-yet-created")
+	t.Setenv("VIAM_MODULE_DATA", dataDir)
+	const name = "left_leader_calibration.json"
+
+	savePath := ResolveCalibrationPath(name)
+	assert.Equal(t, filepath.Join(dataDir, name), savePath)
+	assert.True(t, filepath.IsAbs(savePath))
+
+	// Save must create the module data directory if it is missing.
+	require.NoError(t, SaveFullCalibrationToFile(savePath, SO101FullCalibration{
+		ShoulderPan: &servo.MotorCalibration{ID: 1, HomingOffset: 7, RangeMin: 100, RangeMax: 3900, NormMode: servo.NormModeDegrees},
+	}))
+
+	cfg := &SoArm101Config{CalibrationFile: name, ServoIDs: []int{1}}
+	cal, fromFile := cfg.LoadCalibration(logging.NewTestLogger(t))
+	require.True(t, fromFile, "loader must find the file the saver wrote")
+	assert.Equal(t, savePath, cfg.CalibrationFile)
+	require.NotNil(t, cal.ShoulderPan)
+	assert.Equal(t, 7, cal.ShoulderPan.HomingOffset)
+
+	// Absolute paths pass through untouched.
+	assert.Equal(t, "/abs/cal.json", ResolveCalibrationPath("/abs/cal.json"))
+}
