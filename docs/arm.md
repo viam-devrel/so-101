@@ -66,6 +66,28 @@ Test communication with all servos:
 }
 ```
 
+### Servo Health
+
+Read supply voltage, voltage limits, temperature and condition flags for every servo on the bus. Read-only, and safe while the arm is in use:
+
+```json
+{
+  "command": "health"
+}
+```
+
+```json
+{
+  "healthy": false,
+  "servos": [
+    { "servo_id": 2, "present_voltage_v": 5.0, "min_voltage_v": 6.0, "max_voltage_v": 8.4,
+      "temperature_c": 31, "max_temperature_c": 70, "flags": ["voltage"], "errors": [] }
+  ]
+}
+```
+
+A `voltage` flag means the supply the servo measures is outside the `min_voltage_v`-`max_voltage_v` limits stored in that servo. The servo still answers and its readings are still valid, so the module keeps working, but fix the cause: the power supply, or the servo's limits if they differ from its neighbours'. At startup the same condition is logged with the measured voltage and the limits.
+
 ### Controller Status
 
 Check the shared controller status for debugging:

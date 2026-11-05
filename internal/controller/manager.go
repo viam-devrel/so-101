@@ -444,7 +444,7 @@ func (h *ControllerHandle) Ping(ctx context.Context) error {
 				return fmt.Errorf("ping failed for servo %d: %w", id, err)
 			}
 			if flags != 0 {
-				h.logger.Warnf("servo %d answered ping with %v", id, flags)
+				h.logger.Warnf("servo %d answered ping with %v%s", id, flags, conditionDetail(ctx, sess.bus, id, flags))
 			}
 		}
 		return nil
@@ -504,7 +504,11 @@ func (h *ControllerHandle) ReadServoRegister(ctx context.Context, servoID int, r
 			return fmt.Errorf("servo %d not available", servoID)
 		}
 		data, err := servo.ReadRegister(ctx, registerName)
-		if err != nil {
+		// A condition flag (a servo outside its voltage limits, say) comes back WITH a
+		// valid payload. Failing the read here is what left manual mode at full stiffness
+		// and the calibration fallback on defaults; the flag itself is reported by Ping
+		// and servo_health.
+		if _, err = tolerateCondition(err); err != nil {
 			return err
 		}
 		out = data

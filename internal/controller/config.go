@@ -395,7 +395,8 @@ func getNormModeForServo(servoID int) int {
 // readUint16Register reads a 2-byte register from servo and decodes as uint16
 func readUint16Register(ctx context.Context, servo *feetech.Servo, registerName string) (uint16, error) {
 	data, err := servo.ReadRegister(ctx, registerName)
-	if err != nil {
+	// Keep the payload when the only error is a condition flag; see tolerateCondition.
+	if _, err = tolerateCondition(err); err != nil {
 		return 0, err
 	}
 	if len(data) != 2 {
@@ -407,7 +408,8 @@ func readUint16Register(ctx context.Context, servo *feetech.Servo, registerName 
 // readInt16Register reads a 2-byte register and decodes as signed int16
 func readInt16Register(ctx context.Context, servo *feetech.Servo, registerName string) (int, error) {
 	data, err := servo.ReadRegister(ctx, registerName)
-	if err != nil {
+	// Keep the payload when the only error is a condition flag; see tolerateCondition.
+	if _, err = tolerateCondition(err); err != nil {
 		return 0, err
 	}
 	if len(data) != 2 {

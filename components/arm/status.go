@@ -3,6 +3,7 @@ package arm
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	"so_arm/internal/controller"
 	"so_arm/internal/servo"
@@ -105,6 +106,26 @@ func (s *so101) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[
 		}
 		err := s.controller.SetTorqueEnable(ctx, enable)
 		return map[string]interface{}{"success": err == nil}, err
+
+	case "health":
+		// Read-only: supply voltage, voltage limits, temperature and condition flags for every
+		// servo on this bus (the arm's, plus a gripper on servo 6). The usual cause of a
+		// "[voltage]" condition is a supply outside a servo's min/max voltage registers.
+		ids := append([]int(nil), s.armServoIDs...)
+		if !slices.Contains(ids, 6) {
+			ids = append(ids, 6)
+		}
+		health, err := s.controller.ServoHealth(ctx, ids)
+		if err != nil {
+			return nil, err
+		}
+		servos := make([]interface{}, len(health))
+		ok := true
+		for i, h := range health {
+			servos[i] = h.Map()
+			ok = ok && h.Flags == 0 && len(h.Errors) == 0
+		}
+		return map[string]interface{}{"healthy": ok, "servos": servos}, nil
 
 	case "ping":
 		err := s.controller.Ping(ctx)
