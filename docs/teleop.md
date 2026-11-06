@@ -93,6 +93,6 @@ than backing up, so a rate the bus cannot sustain degrades silently to the rate 
 ## Notes
 
 - Joint targets are sent to the follower with `wait: false` (non-blocking), so the follower continuously chases the most recent leader pose without queuing up moves.
-- When `manage_leader_torque` is enabled (the default), torque is restored on the leader when the loop stops for any reason — including reaching the error threshold or calling `Close` on the service.
+- When `manage_leader_torque` is enabled (the default), torque is restored on the leader when the loop stops for any reason — including reaching the error threshold or calling `Close` on the service. If a `leader_gripper` is configured, its trigger is then released again, since restoring the arm's torque also locks servo 6. A gripper on an older module build without `set_torque` logs a warning and stays locked.
 - To use without gripper mirroring, omit both `leader_gripper` and `follower_gripper`.
 
