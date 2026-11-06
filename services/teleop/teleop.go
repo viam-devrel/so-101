@@ -325,14 +325,23 @@ func (tp *so101Teleop) stop() {
 }
 
 // setLeaderTorque best-effort enables/disables torque on the leader arm.
-// SetTorqueEnable acts on the whole 6-servo group and the leader arm + gripper share
-// one controller, so this single call also covers the leader gripper servo. We do not
-// call set_torque on the gripper (it has no such command and it would be redundant).
+// The arm's set_torque acts on the whole 6-servo bus, so it also covers the leader
+// gripper's servo. That is what we want when disabling. When enabling, it also locks the
+// leader gripper's trigger, which is an input and must stay free, so the gripper is
+// released again with its own per-servo set_torque.
 func (tp *so101Teleop) setLeaderTorque(ctx context.Context, enable bool) {
 	if _, err := tp.leaderArm.DoCommand(ctx, map[string]interface{}{
 		"command": "set_torque", "enable": enable,
 	}); err != nil {
 		tp.logger.Warnf("Failed to set leader arm torque=%v: %v", enable, err)
+	}
+	if enable && tp.leaderGripper != nil {
+		// Best effort: a gripper on an older module build does not know set_torque.
+		if _, err := tp.leaderGripper.DoCommand(ctx, map[string]interface{}{
+			"command": "set_torque", "enable": false,
+		}); err != nil {
+			tp.logger.Warnf("Failed to release the leader gripper's trigger: %v", err)
+		}
 	}
 }
 
