@@ -293,7 +293,7 @@ The calibration sensor operates as a state machine:
 - **`completed`**: Calibration data ready to save
 - **`error`**: Error occurred, use reset command. Entered from `started` (a `set_homing`
   register write or position read failed), from `range_recording` (`stop_range_recording`
-  found a joint whose range was never moved), and from `idle`/`completed`/`error` (a `start`
+  found a joint whose range was never moved, or one outside the encoder's `0`-`4095`), and from `idle`/`completed`/`error` (a `start`
   whose torque-disable failed). No command available in `homing_position` can reach it.
 
 A failed `save_calibration` stays in `completed`, not `error`, so it is retryable in place:
@@ -358,6 +358,8 @@ The sensor saves calibration in the standard format:
 ### Common Issues
 
 - **Range recording not working**: Ensure you call `start_range_recording` and manually move joints
-- **Invalid ranges**: Move joints through their complete range of motion
+- **Invalid ranges**: `stop_range_recording` moves to `error` if any joint recorded no range, or a range outside the encoder's `0`-`4095`. The error names each joint and its recorded range. Run `reset`, then calibrate again:
+  - A joint that recorded no range was never moved. Move every joint through its complete range of motion.
+  - A range like `[2, 32973]` means the joint crossed the encoder's zero while recording, because it was homed near one end of its travel. Re-home with that joint at the middle of its travel.
 - **Servo communication errors**: Check port, baudrate, and servo connections
 - **Permission denied**: Ensure proper access to serial port (`sudo chmod 666 /dev/ttyUSB0`)

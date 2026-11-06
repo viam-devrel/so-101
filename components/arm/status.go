@@ -166,8 +166,10 @@ func (s *so101) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[
 			}, nil
 		}
 
-		// Load the new calibration
-		newCalibration, err := controller.LoadFullCalibrationFromFile(s.cfg.CalibrationFile, s.logger)
+		// Resolve a relative name the same way the loader and the calibration sensor do,
+		// against VIAM_MODULE_DATA, never the process working directory.
+		calibrationPath := controller.ResolveCalibrationPath(s.cfg.CalibrationFile)
+		newCalibration, err := controller.LoadFullCalibrationFromFile(calibrationPath, s.logger)
 		if err != nil {
 			return map[string]interface{}{
 				"success": false,
@@ -183,10 +185,10 @@ func (s *so101) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[
 			}, nil
 		}
 
-		s.logger.Debugf("Successfully reloaded calibration from %s", s.cfg.CalibrationFile)
+		s.logger.Debugf("Successfully reloaded calibration from %s", calibrationPath)
 		return map[string]interface{}{
 			"success":          true,
-			"calibration_file": s.cfg.CalibrationFile,
+			"calibration_file": calibrationPath,
 			"message":          "Calibration reloaded successfully",
 		}, nil
 

@@ -278,7 +278,13 @@ export class FakeCalibrationSensor {
 
 		let allValid = true;
 		for (const joint of this.joints.values()) {
-			if (joint.recorded_min >= joint.recorded_max) {
+			// Mirrors recordedRangeProblem in components/calibration/workflow.go: an empty
+			// span, or a range outside the encoder's 0..4095 (an encoder wrap).
+			if (
+				joint.recorded_min >= joint.recorded_max ||
+				joint.recorded_min < 0 ||
+				joint.recorded_max > 4095
+			) {
 				allValid = false;
 				continue;
 			}
