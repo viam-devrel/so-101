@@ -257,6 +257,23 @@ COM1
 
 ## Usage
 
+### From a terminal: `so101-calibrate`
+
+On a machine with no setup app, such as a local viam-server with no cloud config, the `so101-calibrate` command walks the same workflow from a terminal. It prompts before each step, prints live readings while the range records, and saves at the end:
+
+```sh
+go run ./cmd/so101-calibrate -addr localhost:8080 -insecure -sensor my-calibration
+```
+
+| Flag | Description |
+| ---- | ----------- |
+| `-sensor` | **Required.** Name of the `devrel:so101:calibration` sensor. |
+| `-addr` | Machine address. Default `localhost:8080`. |
+| `-insecure` | Dial without TLS or credentials, for a local viam-server with no cloud config. |
+| `-key-id`, `-key` | API key credentials. Default to `VIAM_API_KEY_ID` and `VIAM_API_KEY`. |
+
+Ctrl-C sends `abort`, or `reset` once the recording is complete. Either one leaves torque off, so rest the arm before you press it. After saving, restart viam-server so the arm picks up the new calibration everywhere. The arm's [`reload_calibration`](arm.md#reload-calibration) applies it to joint clamping without a restart, but not to the joint limits the arm reports in `Kinematics()`.
+
 ### Monitor Progress
 
 Example output:
