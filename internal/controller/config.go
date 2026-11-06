@@ -94,6 +94,22 @@ func (cfg *SoArm101Config) Validate(path string) ([]string, []string, error) {
 	return nil, nil, nil
 }
 
+// ResolveCalibrationPath returns the absolute path a calibration_file config value refers to.
+// An absolute path is returned unchanged; a relative one is joined onto $VIAM_MODULE_DATA
+// (falling back to /tmp when unset). Both the arm's loader and the calibration sensor's saver
+// go through here: a relative name must never resolve against the module process's working
+// directory, which is the module install dir and is replaced on every reload.
+func ResolveCalibrationPath(name string) string {
+	if name == "" || filepath.IsAbs(name) {
+		return name
+	}
+	moduleDataDir := os.Getenv("VIAM_MODULE_DATA")
+	if moduleDataDir == "" {
+		moduleDataDir = "/tmp" // Fallback if VIAM_MODULE_DATA not set
+	}
+	return filepath.Join(moduleDataDir, name)
+}
+
 // LoadCalibration loads calibration from file or returns default calibration
 // Returns (calibration, fromFile) where fromFile indicates if loaded from file
 func (cfg *SoArm101Config) LoadCalibration(logger logging.Logger) (SO101FullCalibration, bool) {
@@ -104,14 +120,9 @@ func (cfg *SoArm101Config) LoadCalibration(logger logging.Logger) (SO101FullCali
 		return DefaultSO101FullCalibration, false
 	}
 
-	// Handle relative paths using VIAM_MODULE_DATA
-	if !filepath.IsAbs(cfg.CalibrationFile) {
-		moduleDataDir := os.Getenv("VIAM_MODULE_DATA")
-		if moduleDataDir == "" {
-			moduleDataDir = "/tmp" // Fallback if VIAM_MODULE_DATA not set
-		}
-		cfg.CalibrationFile = filepath.Join(moduleDataDir, cfg.CalibrationFile)
-	}
+	// Relative paths resolve against VIAM_MODULE_DATA -- the same resolution the calibration
+	// sensor saves with, so the two cannot diverge.
+	cfg.CalibrationFile = ResolveCalibrationPath(cfg.CalibrationFile)
 
 	calibration, err := LoadFullCalibrationFromFile(cfg.CalibrationFile, logger)
 	if err != nil {
@@ -255,6 +266,11 @@ func SaveFullCalibrationToFile(filePath string, calibration SO101FullCalibration
 		return fmt.Errorf("failed to marshal calibration: %w", err)
 	}
 
+	if dir := filepath.Dir(filePath); dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return fmt.Errorf("failed to create calibration directory %s: %w", dir, err)
+		}
+	}
 	if err := os.WriteFile(filePath, data, 0644); err != nil {
 		return fmt.Errorf("failed to write calibration file: %w", err)
 	}
