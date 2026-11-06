@@ -274,3 +274,23 @@ func TestConditionArgReadsOnlyNonEmptyText(t *testing.T) {
 		})
 	}
 }
+
+func TestServoTorqueWritesOneServo(t *testing.T) {
+	ops := &testfake.FakeServoOps{}
+	res, err := HandleServoCommand(context.Background(), map[string]any{
+		"command": CmdServoTorque, "servo_id": 6, "enable": false,
+	}, ops, armServos)
+	require.NoError(t, err)
+	assert.Equal(t, false, res["enable"])
+	assert.Equal(t, map[int]bool{6: false}, ops.Torque)
+
+	_, err = HandleServoCommand(context.Background(), map[string]any{
+		"command": CmdServoTorque, "servo_id": 6,
+	}, ops, armServos)
+	require.Error(t, err) // enable is required
+
+	_, err = HandleServoCommand(context.Background(), map[string]any{
+		"command": CmdServoTorque, "servo_id": 3, "enable": false,
+	}, ops, armServos)
+	require.Error(t, err) // an arm joint is refused like every servo_* command
+}

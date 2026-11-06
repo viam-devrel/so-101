@@ -47,7 +47,7 @@ The module provides several custom commands accessible through the `DoCommand` i
 
 ### Set Torque Control
 
-Enable or disable joint torque:
+Enable or disable torque on every servo on the bus, including a gripper on servo 6. To change one servo only, use [`servo_torque`](#servo-torque):
 
 ```json
 {
@@ -344,6 +344,28 @@ Block until a servo reports it has stopped moving, or the timeout elapses. Scope
   "timeout_ms": 2000
 }
 ```
+
+### Servo Torque
+
+Enable or disable torque on a single servo, leaving every other servo on the bus untouched. The arm's [`set_torque`](#set-torque-control) acts on the whole bus instead. Like the other `servo_*` commands, it refuses the arm's own joints:
+
+```json
+{
+  "command": "servo_torque",
+  "servo_id": 6,
+  "enable": false
+}
+```
+
+Response:
+
+```json
+{
+  "enable": false
+}
+```
+
+The gripper's [`set_torque`](gripper.md#set-torque) is built on this command.
 
 ## Calibration Priority
 

@@ -73,6 +73,9 @@ type fakeGripper struct {
 	getErr error
 	setPct []float64
 	setErr error
+	// torqueLog records set_torque calls; torqueErr makes them fail.
+	torqueLog []bool
+	torqueErr error
 }
 
 func (f *fakeGripper) Name() resource.Name { return f.name }
@@ -92,6 +95,14 @@ func (f *fakeGripper) DoCommand(ctx context.Context, cmd map[string]interface{})
 		}
 		if pct, ok := cmd["percentage"].(float64); ok {
 			f.setPct = append(f.setPct, pct)
+		}
+		return map[string]interface{}{"success": true}, nil
+	case "set_torque":
+		if f.torqueErr != nil {
+			return nil, f.torqueErr
+		}
+		if enable, ok := cmd["enable"].(bool); ok {
+			f.torqueLog = append(f.torqueLog, enable)
 		}
 		return map[string]interface{}{"success": true}, nil
 	}
@@ -356,4 +367,46 @@ func TestTeleopConstructorWiring(t *testing.T) {
 	test.That(t, tp.maxConsecutiveErr, test.ShouldEqual, defaultMaxConsecutiveErrors)
 	test.That(t, tp.leaderGripper, test.ShouldBeNil)
 	test.That(t, svc.Close(context.Background()), test.ShouldBeNil)
+}
+
+func TestTeleopStopReleasesTheLeaderGripperAfterRestoringTorque(t *testing.T) {
+	la := &fakeArm{name: arm.Named("l"), jp: []referenceframe.Input{0.1}}
+	fa := &fakeArm{name: arm.Named("f")}
+	lg := &fakeGripper{name: gripper.Named("lg")}
+	tp := newTestTeleop(t, la, fa, lg, nil)
+	tp.manageLeaderTorque = true
+
+	_, err := tp.DoCommand(context.Background(), map[string]interface{}{"command": "start"})
+	test.That(t, err, test.ShouldBeNil)
+	// Disabling the whole leader bus already frees the trigger: no gripper call on start.
+	lg.mu.Lock()
+	test.That(t, lg.torqueLog, test.ShouldBeEmpty)
+	lg.mu.Unlock()
+
+	_, err = tp.DoCommand(context.Background(), map[string]interface{}{"command": "stop"})
+	test.That(t, err, test.ShouldBeNil)
+	// The arm's whole-bus enable re-torqued servo 6; the gripper is released after it.
+	la.mu.Lock()
+	test.That(t, la.torqueLog, test.ShouldResemble, []bool{false, true})
+	la.mu.Unlock()
+	lg.mu.Lock()
+	test.That(t, lg.torqueLog, test.ShouldResemble, []bool{false})
+	lg.mu.Unlock()
+}
+
+func TestTeleopStopToleratesALeaderGripperWithoutSetTorque(t *testing.T) {
+	la := &fakeArm{name: arm.Named("l"), jp: []referenceframe.Input{0.1}}
+	fa := &fakeArm{name: arm.Named("f")}
+	lg := &fakeGripper{name: gripper.Named("lg"), torqueErr: errors.New("unknown command: set_torque")}
+	tp := newTestTeleop(t, la, fa, lg, nil)
+	tp.manageLeaderTorque = true
+
+	_, err := tp.DoCommand(context.Background(), map[string]interface{}{"command": "start"})
+	test.That(t, err, test.ShouldBeNil)
+	resp, err := tp.DoCommand(context.Background(), map[string]interface{}{"command": "stop"})
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, resp["running"], test.ShouldBeFalse)
+	la.mu.Lock()
+	test.That(t, la.torqueLog, test.ShouldResemble, []bool{false, true})
+	la.mu.Unlock()
 }

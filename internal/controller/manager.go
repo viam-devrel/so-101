@@ -485,6 +485,17 @@ func (h *ControllerHandle) WriteServoRegister(ctx context.Context, servoID int, 
 	})
 }
 
+// SetServoTorque enables or disables torque on one servo, leaving the rest of the bus alone.
+// Unlike SetTorqueEnable (the whole group) this is what a leader gripper needs: its trigger
+// servo free while the arm joints keep holding.
+func (h *ControllerHandle) SetServoTorque(ctx context.Context, servoID int, enable bool) error {
+	v := byte(0)
+	if enable {
+		v = 1
+	}
+	return h.WriteServoRegister(ctx, servoID, "torque_enable", []byte{v})
+}
+
 // ReadServoRegister reads a named register from a specific servo.
 func (h *ControllerHandle) ReadServoRegister(ctx context.Context, servoID int, registerName string) (out []byte, err error) {
 	err = h.withSessionRead(func(sess *busSession) error {

@@ -140,6 +140,34 @@ Response:
 `set_position`. Unlike `set_position` it returns the clamped `position` rather than a
 `success` boolean, and it has no raw-tick form.
 
+### Set Torque
+
+Enable or disable torque on the gripper's servo only. The arm joints are untouched:
+
+```json
+{
+  "command": "set_torque",
+  "enable": false
+}
+```
+
+Response:
+
+```json
+{
+  "success": true,
+  "enable": false
+}
+```
+
+The gripper reaches its servo through the arm's [`servo_torque`](arm.md#servo-torque) command, so the arm must run a module build that has it.
+
+**A `leader` gripper releases its own torque when it builds**, because its trigger is an input you squeeze by hand. The arm enables torque on the whole bus at startup, servo 6 included, and the gripper builds after the arm, so the release comes last. The release lasts only until something enables torque on the whole bus again:
+
+- The [teleop service](teleop.md) restores leader torque when it stops, then releases the leader gripper again. No action needed.
+- The arm's [`set_torque`](arm.md#set-torque-control) with `enable: true` locks the trigger. Send `set_torque` with `enable: false` to the gripper afterwards.
+- The [calibration sensor](calibration.md)'s `save_calibration` enables torque on every calibrated servo. Send the same gripper `set_torque` afterwards.
+
 ### Controller Status
 
 Check the status of the serial controller, forwarded from the arm that owns it:

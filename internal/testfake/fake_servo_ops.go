@@ -30,6 +30,21 @@ type FakeServoOps struct {
 
 	// Condition is returned alongside every position and moving reading.
 	Condition feetech.StatusError
+
+	// Torque records SetServoTorque calls by servo id.
+	Torque    map[int]bool
+	TorqueErr error
+}
+
+func (f *FakeServoOps) SetServoTorque(_ context.Context, id int, enable bool) error {
+	if f.TorqueErr != nil {
+		return f.TorqueErr
+	}
+	if f.Torque == nil {
+		f.Torque = map[int]bool{}
+	}
+	f.Torque[id] = enable
+	return nil
 }
 
 func (f *FakeServoOps) MoveServoPercent(_ context.Context, id int, percent float64, speed int) error {
