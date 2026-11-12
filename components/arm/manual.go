@@ -414,7 +414,7 @@ func (s *so101) enterManualLocked(ctx context.Context, overrides map[string]inte
 	// If already active, tear down first so the new parameters take effect (live re-tuning).
 	// exitManualLocked restores the prior compliance registers before the fresh session
 	// re-applies with the new values.
-	if s.manualActiveLocked() && !s.released { // released re-enter is an idempotent disable
+	if s.manual != nil && s.manual.running() {
 		_ = s.exitManualLocked(ctx, "re-enter with new parameters")
 	}
 	var mm *ManualModeConfig

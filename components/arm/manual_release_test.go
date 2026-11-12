@@ -123,6 +123,33 @@ func TestSetTorqueExitsReleasedManualMode(t *testing.T) {
 	}
 }
 
+func TestSetTorqueFailureKeepsReleasedManualMode(t *testing.T) {
+	ctx := context.Background()
+	ft := testfake.NewFakeTransport()
+	s := releaseTestArm(t, ft)
+	require.NoError(t, s.SetManualMode(ctx, true, 0, nil))
+	ft.Unplug()
+
+	_, err := s.DoCommand(ctx, map[string]interface{}{"command": "set_torque", "enable": false})
+	require.Error(t, err)
+
+	on, _ := s.ManualMode(ctx, nil)
+	require.True(t, on, "a failed set_torque must not report a released arm as auto")
+}
+
+func TestSetTorqueEnableFromReleaseSeedsOnce(t *testing.T) {
+	ctx := context.Background()
+	ft := testfake.NewFakeTransport()
+	s := releaseTestArm(t, ft)
+	require.NoError(t, s.SetManualMode(ctx, true, 0, nil))
+	goalWrites := ft.WriteCount(1, feetech.RegGoalPosition.Address)
+
+	_, err := s.DoCommand(ctx, map[string]interface{}{"command": "set_torque", "enable": true})
+	require.NoError(t, err)
+
+	require.Equal(t, goalWrites+1, ft.WriteCount(1, feetech.RegGoalPosition.Address))
+}
+
 func TestReleasedReenterCancelsPendingAutoExit(t *testing.T) {
 	ctx := context.Background()
 	ft := testfake.NewFakeTransport()

@@ -19,7 +19,7 @@ func (s *so101) Status(ctx context.Context) (map[string]interface{}, error) {
 			"manual_mode": map[string]interface{}{"release_torque": true},
 		}, nil
 	}
-	if s.manualActiveLocked() {
+	if s.manual != nil && s.manual.running() {
 		// GetStatus serializes this via structpb.NewStruct, which only accepts
 		// structpb-native types — a typed []manualJointStatus slice fails. Emit the
 		// joints as []interface{} of map[string]interface{} so the wire format holds.
@@ -110,18 +110,17 @@ func (s *so101) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[
 			return nil, fmt.Errorf("set_torque command requires 'enable' boolean parameter")
 		}
 		s.mu.Lock()
+		defer s.mu.Unlock()
 		var err error
-		if !enable && s.released {
+		if s.released {
+			// set_torque replaces the re-hold; released clears only once it lands.
 			s.manualExit.cancel()
-			s.released = false // torque is about to go off anyway; no re-hold
-		} else {
-			err = s.exitManualLocked(ctx, "set_torque command")
+			if err = s.controller.SetTorqueEnable(ctx, enable); err == nil {
+				s.released = false
+			}
+		} else if err = s.exitManualLocked(ctx, "set_torque command"); err == nil {
+			err = s.controller.SetTorqueEnable(ctx, enable)
 		}
-		s.mu.Unlock()
-		if err != nil {
-			return nil, err
-		}
-		err = s.controller.SetTorqueEnable(ctx, enable)
 		return map[string]interface{}{"success": err == nil}, err
 
 	case "ping":
