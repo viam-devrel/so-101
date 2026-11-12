@@ -64,8 +64,8 @@ func TestSaveCalibrationTorqueReenableFailureStaysIdleAndSucceeds(t *testing.T) 
 }
 
 // packetLogTransport records the ordering of the two packet kinds this fix is about: the
-// per-servo WRITE (0x03) or SYNC_WRITE (0x83) of RegGoalPosition, and the group SYNC_WRITE (0x83) of
-// RegTorqueEnable -- the packet EnableAll/DisableAll send. Packet layout matches
+// SYNC_WRITE (0x83) of RegGoalPosition and of RegTorqueEnable, the two packets
+// EnableTorqueHeld sends. Packet layout matches
 // isWriteToServo's comment in calibration_save_retry_test.go, except a SYNC_WRITE's ID field
 // is the broadcast ID and its parameters are [address, dataLen, id, data...]... rather than a
 // single servo's payload. Everything else passes through untouched.
@@ -83,10 +83,8 @@ type packetLogTransport struct {
 
 func (p *packetLogTransport) Write(b []byte) (int, error) {
 	if len(b) >= 7 && b[0] == 0xFF && b[1] == 0xFF {
-		id, instruction, params := int(b[2]), b[4], b[5:len(b)-1]
+		instruction, params := b[4], b[5:len(b)-1]
 		switch {
-		case instruction == 0x03 && params[0] == feetech.RegGoalPosition.Address && len(params) == 3:
-			p.record(fmt.Sprintf("goal:%d=%d", id, int(params[1])|int(params[2])<<8))
 		case instruction == 0x83 && params[0] == feetech.RegGoalPosition.Address:
 			n := int(params[1])
 			for i := 2; i+1+n <= len(params); i += 1 + n {
