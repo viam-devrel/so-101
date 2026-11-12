@@ -424,7 +424,7 @@ func (h *ControllerHandle) SetServoTorque(ctx context.Context, servoID int, enab
 	if enable {
 		return h.EnableTorqueHeld(ctx, []int{servoID})
 	}
-	return h.DisableTorque(ctx, []int{servoID})
+	return h.WriteServoRegister(ctx, servoID, "torque_enable", []byte{0})
 }
 
 func (h *ControllerHandle) Stop(ctx context.Context) error {
