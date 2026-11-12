@@ -138,8 +138,11 @@ func (s *so101) MoveToPosition(ctx context.Context, pose spatialmath.Pose, extra
 
 	// A motion command takes the arm out of hand-guided ("manual") mode.
 	s.mu.Lock()
-	s.exitManualLocked("motion command received")
+	exitErr := s.exitManualLocked(ctx, "motion command received")
 	s.mu.Unlock()
+	if exitErr != nil {
+		return exitErr
+	}
 
 	dest, planExtra, path, err := planning.BuildMoveDestination(
 		fmt.Sprintf("%v_origin", s.Name().Name), pose, s.goalCloud, extra)
@@ -392,8 +395,11 @@ func (s *so101) MoveToJointPositions(ctx context.Context, positions []referencef
 	defer done()
 
 	s.mu.Lock()
-	s.exitManualLocked("motion command received")
+	exitErr := s.exitManualLocked(ctx, "motion command received")
 	s.mu.Unlock()
+	if exitErr != nil {
+		return exitErr
+	}
 
 	s.moveLock.Lock()
 	defer s.moveLock.Unlock()
@@ -451,8 +457,11 @@ func (s *so101) MoveThroughJointPositions(ctx context.Context, positions [][]ref
 	defer done()
 
 	s.mu.Lock()
-	s.exitManualLocked("motion command received")
+	exitErr := s.exitManualLocked(ctx, "motion command received")
 	s.mu.Unlock()
+	if exitErr != nil {
+		return exitErr
+	}
 
 	s.moveLock.Lock()
 	defer s.moveLock.Unlock()
@@ -580,11 +589,11 @@ func (s *so101) Stop(ctx context.Context, extra map[string]interface{}) error {
 	s.opMgr.CancelRunning(ctx)
 
 	s.mu.Lock()
-	s.exitManualLocked("stop command received")
+	exitErr := s.exitManualLocked(ctx, "stop command received")
 	s.mu.Unlock()
 
 	s.isMoving.Store(false)
-	return s.controller.Stop(ctx)
+	return errors.Join(exitErr, s.controller.Stop(ctx))
 }
 
 func (s *so101) CurrentInputs(ctx context.Context) ([]referenceframe.Input, error) {

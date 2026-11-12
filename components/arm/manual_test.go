@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
 	"go.viam.com/rdk/logging"
 	"google.golang.org/protobuf/types/known/structpb"
 )
@@ -20,7 +21,7 @@ func TestStatusIsProtoSerializableInManualMode(t *testing.T) {
 	s.manual.start()
 	defer func() {
 		s.mu.Lock()
-		s.exitManualLocked("test cleanup")
+		_ = s.exitManualLocked(context.Background(), "test cleanup")
 		s.mu.Unlock()
 	}()
 	time.Sleep(40 * time.Millisecond)
@@ -57,7 +58,7 @@ func TestExitManualLockedTearsDown(t *testing.T) {
 	s.manual = newManualSession(context.Background(), io, manualDefaults(), 0, 0, s.logger)
 	s.manual.start()
 	s.mu.Lock()
-	s.exitManualLocked("test")
+	require.NoError(t, s.exitManualLocked(context.Background(), "test"))
 	s.mu.Unlock()
 	if s.manual != nil {
 		t.Fatal("session should be cleared after exitManualLocked")

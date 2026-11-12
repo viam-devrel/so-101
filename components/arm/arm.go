@@ -376,9 +376,11 @@ func (s *so101) NewClientFromConn(ctx context.Context, conn rpc.ClientConn, remo
 	panic("not implemented")
 }
 
-func (s *so101) Close(context.Context) error {
+func (s *so101) Close(ctx context.Context) error {
 	s.mu.Lock()
-	s.exitManualLocked("arm closing")
+	if err := s.exitManualLocked(ctx, "arm closing"); err != nil {
+		s.logger.Warnf("%v", err)
+	}
 	s.mu.Unlock()
 
 	s.cancelFunc()

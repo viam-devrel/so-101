@@ -38,8 +38,11 @@ func (s *so101) MoveThroughJointPositionsStreamed(
 	defer done()
 
 	s.mu.Lock()
-	s.exitManualLocked("motion command received")
+	exitErr := s.exitManualLocked(ctx, "motion command received")
 	s.mu.Unlock()
+	if exitErr != nil {
+		return exitErr
+	}
 
 	s.moveLock.Lock()
 	defer s.moveLock.Unlock()
