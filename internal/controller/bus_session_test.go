@@ -13,6 +13,17 @@ import (
 	"so_arm/internal/testfake"
 )
 
+type fakeBusTransport interface {
+	feetech.Transport
+	NoteOpen()
+	IsUnplugged() bool
+}
+
+func testHandleOver(t *testing.T, tr fakeBusTransport) *ControllerHandle {
+	t.Helper()
+	return acquireTestHandle(t, testRegistry(tr))
+}
+
 // testRegistry returns a registry whose bus factory opens every bus over the caller's fake,
 // and fails the open while that fake is unplugged.
 //
@@ -20,7 +31,7 @@ import (
 // against a transport it never touched, and feetech.NewBus with a non-nil Transport never
 // fails on its own, so without the unplugged check a test could open a working bus over a
 // port that is supposed to be gone.
-func testRegistry(ft *testfake.FakeTransport) *ControllerRegistry {
+func testRegistry(ft fakeBusTransport) *ControllerRegistry {
 	r := NewControllerRegistry()
 	r.busFactory = func(cfg feetech.BusConfig) (*feetech.Bus, error) {
 		ft.NoteOpen()

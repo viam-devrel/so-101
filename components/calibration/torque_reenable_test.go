@@ -64,8 +64,8 @@ func TestSaveCalibrationTorqueReenableFailureStaysIdleAndSucceeds(t *testing.T) 
 }
 
 // packetLogTransport records the ordering of the two packet kinds this fix is about: the
-// per-servo WRITE (instruction 0x03) of RegGoalPosition, and the group SYNC_WRITE (0x83) of
-// RegTorqueEnable -- the packet EnableAll/DisableAll send. Packet layout matches
+// SYNC_WRITE (0x83) of RegGoalPosition and of RegTorqueEnable, the two packets
+// EnableTorqueHeld sends. Packet layout matches
 // isWriteToServo's comment in calibration_save_retry_test.go, except a SYNC_WRITE's ID field
 // is the broadcast ID and its parameters are [address, dataLen, id, data...]... rather than a
 // single servo's payload. Everything else passes through untouched.
@@ -83,10 +83,13 @@ type packetLogTransport struct {
 
 func (p *packetLogTransport) Write(b []byte) (int, error) {
 	if len(b) >= 7 && b[0] == 0xFF && b[1] == 0xFF {
-		id, instruction, params := int(b[2]), b[4], b[5:len(b)-1]
+		instruction, params := b[4], b[5:len(b)-1]
 		switch {
-		case instruction == 0x03 && params[0] == feetech.RegGoalPosition.Address && len(params) == 3:
-			p.record(fmt.Sprintf("goal:%d=%d", id, int(params[1])|int(params[2])<<8))
+		case instruction == 0x83 && params[0] == feetech.RegGoalPosition.Address:
+			n := int(params[1])
+			for i := 2; i+1+n <= len(params); i += 1 + n {
+				p.record(fmt.Sprintf("goal:%d=%d", params[i], int(params[i+1])|int(params[i+2])<<8))
+			}
 		case instruction == 0x83 && params[0] == feetech.RegTorqueEnable.Address:
 			if p.failTorqueEnable {
 				return 0, syscall.EIO
@@ -128,11 +131,8 @@ func completedSensorForSave(t *testing.T, ft feetech.Transport) *so101Calibratio
 }
 
 // TestSaveCalibrationSeedsGoalPositionsBeforeEnablingTorque is the safety contract of the
-// post-save torque re-enable. Torque enable is a bare SyncWrite to RegTorqueEnable, so the
-// firmware immediately drives toward whatever Goal_Position holds -- stale after a hand-moved
-// calibration, and reinterpreted through the position_offset set_homing wrote. Every servo's
-// live position must therefore reach Goal_Position BEFORE that sync write, or enabling torque
-// snaps the arm.
+// post-save torque re-enable. SetTorqueEnable seeds goals first, so every servo's live
+// position must reach Goal_Position BEFORE the torque write, or enabling torque snaps the arm.
 func TestSaveCalibrationSeedsGoalPositionsBeforeEnablingTorque(t *testing.T) {
 	ft := testfake.NewFakeTransport()
 	want := map[int]int{1: 1000, 2: 1500, 3: 2000, 4: 2500, 5: 3000, 6: 2100}

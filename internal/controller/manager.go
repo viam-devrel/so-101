@@ -363,19 +363,68 @@ func (h *ControllerHandle) GetJointPositionsForServos(ctx context.Context, servo
 	return out, err
 }
 
+var sessionServoIDs = []int{1, 2, 3, 4, 5, 6}
+
+// SetTorqueEnable enables (holding the current pose) or disables torque on every servo.
 func (h *ControllerHandle) SetTorqueEnable(ctx context.Context, enable bool) error {
+	if enable {
+		return h.EnableTorqueHeld(ctx, sessionServoIDs)
+	}
+	return h.DisableTorque(ctx, sessionServoIDs)
+}
+
+// EnableTorqueHeld seeds each servo's goal with its present position, then enables torque,
+// all under one bus lock. A bare enable drives to the stale goal at max speed.
+// Any failure returns before torque is written.
+func (h *ControllerHandle) EnableTorqueHeld(ctx context.Context, ids []int) error {
 	return h.withSession(func(sess *busSession) error {
-		if enable {
-			if err := sess.group.EnableAll(ctx); err != nil {
-				return fmt.Errorf("failed to set torque enable: %w", err)
+		data, err := sess.bus.SyncRead(ctx, feetech.RegPresentPosition.Address, 2, ids)
+		if _, err = tolerateCondition(err); err != nil {
+			return fmt.Errorf("read positions before enabling torque: %w", err)
+		}
+		proto := sess.bus.Protocol()
+		goals := make(map[int][]byte, len(ids))
+		on := make(map[int][]byte, len(ids))
+		for _, id := range ids {
+			d, ok := data[id]
+			if !ok {
+				return fmt.Errorf("servo %d reported no position before enabling torque", id)
 			}
-		} else {
-			if err := sess.group.DisableAll(ctx); err != nil {
-				return fmt.Errorf("failed to set torque enable: %w", err)
+			// goal_position is sign-magnitude; a garbled read must not become a multi-turn goal.
+			if p := int(proto.DecodeWord(d)); p > feetech.ModelSTS3215.MaxPosition {
+				return fmt.Errorf("servo %d position %d out of range [0, %d]", id, p, feetech.ModelSTS3215.MaxPosition)
 			}
+			goals[id] = d
+			on[id] = []byte{1}
+		}
+		if err := sess.bus.SyncWrite(ctx, feetech.RegGoalPosition.Address, 2, goals); err != nil {
+			return fmt.Errorf("seed goal positions: %w", err)
+		}
+		if err := sess.bus.SyncWrite(ctx, feetech.RegTorqueEnable.Address, 1, on); err != nil {
+			return fmt.Errorf("enable torque: %w", err)
 		}
 		return nil
 	})
+}
+
+// DisableTorque turns torque off on ids only.
+func (h *ControllerHandle) DisableTorque(ctx context.Context, ids []int) error {
+	off := make(map[int][]byte, len(ids))
+	for _, id := range ids {
+		off[id] = []byte{0}
+	}
+	return h.withSession(func(sess *busSession) error {
+		return sess.bus.SyncWrite(ctx, feetech.RegTorqueEnable.Address, 1, off)
+	})
+}
+
+// SetServoTorque enables (holding the current pose) or disables torque on one servo,
+// leaving the rest of the bus alone -- what a leader gripper's trigger needs.
+func (h *ControllerHandle) SetServoTorque(ctx context.Context, servoID int, enable bool) error {
+	if enable {
+		return h.EnableTorqueHeld(ctx, []int{servoID})
+	}
+	return h.WriteServoRegister(ctx, servoID, "torque_enable", []byte{0})
 }
 
 func (h *ControllerHandle) Stop(ctx context.Context) error {
@@ -483,17 +532,6 @@ func (h *ControllerHandle) WriteServoRegister(ctx context.Context, servoID int, 
 		}
 		return servo.WriteRegister(ctx, registerName, data)
 	})
-}
-
-// SetServoTorque enables or disables torque on one servo, leaving the rest of the bus alone.
-// Unlike SetTorqueEnable (the whole group) this is what a leader gripper needs: its trigger
-// servo free while the arm joints keep holding.
-func (h *ControllerHandle) SetServoTorque(ctx context.Context, servoID int, enable bool) error {
-	v := byte(0)
-	if enable {
-		v = 1
-	}
-	return h.WriteServoRegister(ctx, servoID, "torque_enable", []byte{v})
 }
 
 // ReadServoRegister reads a named register from a specific servo.

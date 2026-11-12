@@ -407,12 +407,8 @@ func (cs *so101CalibrationSensor) saveCalibration(ctx context.Context) (map[stri
 		cs.logger.Debugf("Successfully wrote position limits to servo %d", servoID)
 	}
 
-	// Re-enable torque only now that every write above has landed, and only after seeding each
-	// servo's Goal_Position with where it physically is. Torque enable is a bare SyncWrite to
-	// RegTorqueEnable (ServoGroup.EnableAll), so the firmware resumes driving toward whatever
-	// goal it still holds -- stale after a hand-moved calibration, and reinterpreted through the
-	// position_offset set_homing wrote, so the arm can snap across its whole calibrated travel.
-	// If the seed fails, torque stays OFF rather than shipping that jerk.
+	// Re-enable torque only now that every write above has landed. SetTorqueEnable seeds
+	// goals first, so the arm holds the hand-placed pose instead of snapping to a stale goal.
 	//
 	// A failure here does NOT revert to StateCompleted: the calibration is already durably
 	// saved (file + registers), so there is nothing left to retry -- reverting would resurrect
@@ -420,14 +416,10 @@ func (cs *so101CalibrationSensor) saveCalibration(ctx context.Context) (map[stri
 	// torque_enabled / torque_enable_error so the caller can warn the user the arm is limp.
 	torqueEnabled := true
 	var torqueErr string
-	if err := cs.seedGoalPositions(ctx); err != nil {
+	if err := cs.controller.SetTorqueEnable(ctx, true); err != nil {
 		torqueEnabled = false
 		torqueErr = err.Error()
 		cs.logger.Errorf("Leaving torque disabled: %v", err)
-	} else if err := cs.controller.SetTorqueEnable(ctx, true); err != nil {
-		torqueEnabled = false
-		torqueErr = err.Error()
-		cs.logger.Errorf("Failed to re-enable torque after save: %v", err)
 	}
 
 	message := "Calibration completed and saved successfully. Torque re-enabled -- ready for new calibration."
@@ -456,8 +448,8 @@ func (cs *so101CalibrationSensor) saveCalibration(ctx context.Context) (map[stri
 }
 
 // abortCalibration cancels the current calibration process
-// Torque intentionally stays disabled here. It could be re-enabled safely -- seedGoalPositions
-// exists for exactly that -- but abort is reached with the servos' registers half-written
+// Torque intentionally stays disabled here. It could be re-enabled safely -- SetTorqueEnable
+// seeds goals -- but abort is reached with the servos' registers half-written
 // (resetCalibrationRegisters may have wiped the position limits) and with the user's hands on
 // the arm, so an abort deliberately performs no motion-capable operation. resetCalibration
 // leaves torque alone for the same reason.
@@ -599,44 +591,6 @@ func encodePositionOffset(value int) ([]byte, error) {
 		raw = uint16(-value) | (1 << uint(signBit))
 	}
 	return []byte{byte(raw & 0xFF), byte((raw >> 8) & 0xFF)}, nil
-}
-
-// seedGoalPositions writes each configured servo's live position into its Goal_Position, so a
-// following torque enable holds the arm where it is instead of chasing a stale goal. Read and
-// write share the post-set_homing frame (the firmware applies position_offset to both), so
-// this is a fixed point.
-//
-// Scoped to cs.cfg.ServoIDs like every other loop here; SetTorqueEnable is group-wide, so a
-// servo left out of servo_ids is still enabled without a fresh goal.
-func (cs *so101CalibrationSensor) seedGoalPositions(ctx context.Context) error {
-	positions, err := cs.controller.SyncReadPositions(ctx, cs.cfg.ServoIDs)
-	if err != nil {
-		return fmt.Errorf("failed to read positions before enabling torque: %w", err)
-	}
-	for _, servoID := range cs.cfg.ServoIDs {
-		raw, ok := positions[servoID]
-		if !ok {
-			return fmt.Errorf("servo %d reported no position before enabling torque", servoID)
-		}
-		if err := cs.writeGoalPosition(ctx, servoID, raw); err != nil {
-			return fmt.Errorf("failed to hold servo %d at its current position: %w", servoID, err)
-		}
-	}
-	return nil
-}
-
-// writeGoalPosition writes a raw tick value to a servo's goal_position register. Values
-// outside the encoder range are rejected rather than encoded: goal_position is sign-magnitude
-// at bit 15, so a garbled read must never reach the firmware as a negative multi-turn target.
-func (cs *so101CalibrationSensor) writeGoalPosition(ctx context.Context, servoID, raw int) error {
-	if raw < 0 || raw > feetech.ModelSTS3215.MaxPosition {
-		return fmt.Errorf("position %d out of range [0, %d]", raw, feetech.ModelSTS3215.MaxPosition)
-	}
-	data := []byte{
-		byte(raw & 0xFF),
-		byte((raw >> 8) & 0xFF),
-	}
-	return cs.controller.WriteServoRegister(ctx, servoID, "goal_position", data)
 }
 
 // writeMinPositionLimit writes the minimum position limit to a servo's register

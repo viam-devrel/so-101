@@ -410,32 +410,53 @@ func resolveManualParams(cfg *ManualModeConfig, overrides map[string]interface{}
 }
 
 // enterManualLocked starts a manual-mode session. Caller holds s.mu.
-func (s *so101) enterManualLocked(overrides map[string]interface{}) map[string]interface{} {
+func (s *so101) enterManualLocked(ctx context.Context, overrides map[string]interface{}) (map[string]interface{}, error) {
 	// If already active, tear down first so the new parameters take effect (live re-tuning).
 	// exitManualLocked restores the prior compliance registers before the fresh session
 	// re-applies with the new values.
 	if s.manual != nil && s.manual.running() {
-		s.exitManualLocked("re-enter with new parameters")
+		_ = s.exitManualLocked(ctx, "re-enter with new parameters")
 	}
 	var mm *ManualModeConfig
 	if s.cfg != nil {
 		mm = s.cfg.ManualMode
 	}
+	if mm != nil && mm.ReleaseTorque {
+		s.manualExit.cancel() // re-enter skips exitManualLocked; drop any stale auto-exit
+		if err := s.controller.DisableTorque(ctx, s.armServoIDs); err != nil {
+			return nil, fmt.Errorf("manual mode: release torque: %w", err)
+		}
+		s.released = true
+		return map[string]interface{}{"mode": "manual", "servos": s.armServoIDs, "release_torque": true}, nil
+	}
 	params, pGain, torqueLimit := resolveManualParams(mm, overrides)
 	io := newControllerManualIO(s.controller, s.armServoIDs, jointLimitsFor(s.controller.GetCalibration(), s.armServoIDs))
 	s.manual = newManualSession(s.cancelCtx, io, params, pGain, torqueLimit, s.logger)
 	s.manual.start()
-	return map[string]interface{}{"mode": "manual", "servos": s.armServoIDs}
+	return map[string]interface{}{"mode": "manual", "servos": s.armServoIDs}, nil
 }
 
 // exitManualLocked tears down manual mode if active and holds the current pose.
 // Caller holds s.mu. Safe to call when not active.
-func (s *so101) exitManualLocked(reason string) {
+func (s *so101) exitManualLocked(ctx context.Context, reason string) error {
 	s.manualExit.cancel() // drop any pending SetManualMode auto-exit, however we're exiting
-	if s.manual == nil || !s.manual.running() {
-		return
+	if !s.manualActiveLocked() {
+		return nil
 	}
 	s.logger.Infof("manual mode exiting: %s", reason)
+	if s.released {
+		if err := s.controller.EnableTorqueHeld(ctx, s.armServoIDs); err != nil {
+			return fmt.Errorf("manual mode: re-hold arm after torque release: %w", err)
+		}
+		s.released = false
+		return nil
+	}
 	s.manual.stop()
 	s.manual = nil
+	return nil
+}
+
+// manualActiveLocked reports whether manual mode is on. Caller holds s.mu.
+func (s *so101) manualActiveLocked() bool {
+	return s.released || (s.manual != nil && s.manual.running())
 }

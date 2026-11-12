@@ -41,7 +41,7 @@ func (s *so101) Properties(ctx context.Context, extra map[string]interface{}) (a
 func (s *so101) ManualMode(ctx context.Context, extra map[string]interface{}) (bool, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.manual != nil && s.manual.running(), nil
+	return s.manualActiveLocked(), nil
 }
 
 // SetManualMode enters or exits manual mode. When enabledFor > 0, manual mode
@@ -51,10 +51,11 @@ func (s *so101) SetManualMode(ctx context.Context, on bool, enabledFor time.Dura
 	defer s.mu.Unlock()
 	s.manualExit.cancel()
 	if !on {
-		s.exitManualLocked("SetManualMode(false)")
-		return nil
+		return s.exitManualLocked(ctx, "SetManualMode(false)")
 	}
-	s.enterManualLocked(extra)
+	if _, err := s.enterManualLocked(ctx, extra); err != nil {
+		return err
+	}
 	if enabledFor > 0 {
 		s.manualExit.schedule(enabledFor, s.autoExitManualMode)
 	}
@@ -65,5 +66,7 @@ func (s *so101) SetManualMode(ctx context.Context, on bool, enabledFor time.Dura
 func (s *so101) autoExitManualMode() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.exitManualLocked("manual mode duration elapsed")
+	if err := s.exitManualLocked(context.Background(), "manual mode duration elapsed"); err != nil {
+		s.logger.Warnf("%v", err)
+	}
 }
