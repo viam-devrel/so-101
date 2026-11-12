@@ -13,6 +13,12 @@ import (
 func (s *so101) Status(ctx context.Context) (map[string]interface{}, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	if s.released {
+		return map[string]interface{}{
+			"mode":        "manual",
+			"manual_mode": map[string]interface{}{"release_torque": true},
+		}, nil
+	}
 	if s.manualActiveLocked() {
 		// GetStatus serializes this via structpb.NewStruct, which only accepts
 		// structpb-native types — a typed []manualJointStatus slice fails. Emit the
@@ -104,7 +110,13 @@ func (s *so101) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[
 			return nil, fmt.Errorf("set_torque command requires 'enable' boolean parameter")
 		}
 		s.mu.Lock()
-		err := s.exitManualLocked(ctx, "set_torque command")
+		var err error
+		if !enable && s.released {
+			s.manualExit.cancel()
+			s.released = false // torque is about to go off anyway; no re-hold
+		} else {
+			err = s.exitManualLocked(ctx, "set_torque command")
+		}
 		s.mu.Unlock()
 		if err != nil {
 			return nil, err

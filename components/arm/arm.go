@@ -116,6 +116,7 @@ type ManualModeConfig struct {
 	LoopHz         float64 `json:"loop_hz,omitempty"`          // control loop rate (Hz) (default 50)
 	PGain          int     `json:"p_gain,omitempty"`           // reduced servo P-gain during manual mode (default 8; 0-255)
 	TorqueLimit    int     `json:"torque_limit,omitempty"`     // servo torque cap during manual mode for backdrive compliance (default 50; 0-1000; lower = easier to move but must stay above gravity-hold load)
+	ReleaseTorque  bool    `json:"release_torque,omitempty"`   // disable torque on the arm servos instead of admittance; for leader arms
 }
 
 // Validate ensures the manual mode config's fields are within acceptable ranges.
@@ -199,6 +200,7 @@ type so101 struct {
 	controller *controller.ControllerHandle
 	manual     *manualSession
 	manualExit exitTimer // auto-exit for SetManualMode's enabledFor
+	released   bool      // manual mode with torque released (release_torque); guarded by mu
 
 	// goalCloud is the resolved approach-axis tolerance pair. Set once in NewSO101 and
 	// never mutated (the model is resource.AlwaysRebuild), so it needs no mutex.
