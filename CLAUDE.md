@@ -494,15 +494,20 @@ calibration wizard. It is bundled into `module.tar.gz` and needs **Node ≥ 20**
   it was deleted — a `PingServo` + `feetech.GetModelByNumber` pair is the replacement, and it has
   no register-map side effect. Note neither call site checks the model is one the SO-101 *ships*:
   a known-but-wrong model (say `scs0009`) still verifies as `ok`.
-- **Enabling torque is a bare `SyncWrite`, so seed `Goal_Position` first.** `EnableAll` writes
-  `RegTorqueEnable` with no goal sync, and these are closed-loop position servos — they resume
-  driving toward whatever goal their register holds, which the calibration workflow never writes
-  (so it is the arm component's last target, or a power-on leftover). Bounded only by the
-  `min`/`max_angle_limit` pair just written, i.e. the joint's whole travel, at a `Goal_Velocity`
-  where `0` means MAXIMUM. `saveCalibration` therefore calls `seedGoalPositions` (live
-  `SyncReadPositions` → per-servo `goal_position` write) immediately before enabling, and leaves
-  torque OFF if that seed fails. `abort`/`reset` perform no motion-capable operation at all: they
-  are reached with registers half-written and hands on the arm.
+- **Every torque enable seeds `Goal_Position` first, through one path.** These are closed-loop
+  position servos: a bare `torque_enable` write resumes driving toward whatever goal the register
+  holds (the arm's last target, or a power-on leftover), bounded only by the whole travel, at a
+  `Goal_Velocity` where `0` means MAXIMUM. `ControllerHandle.EnableTorqueHeld` does read present
+  position -> goal sync-write -> torque sync-write in one `withSession`, and any failure returns
+  before torque is written. `SetTorqueEnable(true)`, `SetServoTorque(id, true)` and
+  `saveCalibration` all route through it (calibration has no seed of its own), so arm init now
+  FAILS on a servo reporting an out-of-range position where it used to enable blindly.
+  `abort`/`reset` perform no motion-capable operation at all: they are reached with registers
+  half-written and hands on the arm.
+- **`manual_mode.release_torque` is a `released` flag, not a `manualSession`.** There is no loop;
+  enter disables torque on servos 1-5, exit re-holds via `EnableTorqueHeld`. `exitManualLocked`
+  returns an error, and motion must not proceed on it: the arm stays in manual mode and motion
+  commands return the error without moving (an auto-exit failure is logged, not retried).
 - **`writeHomingOffset` really writes `position_offset` now**, sign-magnitude encoded at
   `feetech.RegPositionOffset.SignBit` (11) — it used to ignore its argument and write `128` to
   `torque_enable`. That was not inert: `128` is FEETECH's "calibrate middle position" command, so
