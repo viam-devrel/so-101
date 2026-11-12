@@ -133,11 +133,8 @@ func completedSensorForSave(t *testing.T, ft feetech.Transport) *so101Calibratio
 }
 
 // TestSaveCalibrationSeedsGoalPositionsBeforeEnablingTorque is the safety contract of the
-// post-save torque re-enable. Torque enable is a bare SyncWrite to RegTorqueEnable, so the
-// firmware immediately drives toward whatever Goal_Position holds -- stale after a hand-moved
-// calibration, and reinterpreted through the position_offset set_homing wrote. Every servo's
-// live position must therefore reach Goal_Position BEFORE that sync write, or enabling torque
-// snaps the arm.
+// post-save torque re-enable. SetTorqueEnable seeds goals first, so every servo's live
+// position must reach Goal_Position BEFORE the torque write, or enabling torque snaps the arm.
 func TestSaveCalibrationSeedsGoalPositionsBeforeEnablingTorque(t *testing.T) {
 	ft := testfake.NewFakeTransport()
 	want := map[int]int{1: 1000, 2: 1500, 3: 2000, 4: 2500, 5: 3000, 6: 2100}
