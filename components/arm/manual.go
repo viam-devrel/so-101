@@ -422,6 +422,7 @@ func (s *so101) enterManualLocked(ctx context.Context, overrides map[string]inte
 		mm = s.cfg.ManualMode
 	}
 	if mm != nil && mm.ReleaseTorque {
+		s.manualExit.cancel() // re-enter skips exitManualLocked; drop any stale auto-exit
 		if err := s.controller.DisableTorque(ctx, s.armServoIDs); err != nil {
 			return nil, fmt.Errorf("manual mode: release torque: %w", err)
 		}

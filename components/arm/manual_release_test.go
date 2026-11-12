@@ -3,6 +3,7 @@ package arm
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/hipsterbrown/feetech-servo/feetech"
 	"github.com/stretchr/testify/require"
@@ -120,4 +121,23 @@ func TestSetTorqueExitsReleasedManualMode(t *testing.T) {
 				"set_torque false must not re-hold (briefly stiffen) a released arm")
 		}
 	}
+}
+
+func TestReleasedReenterCancelsPendingAutoExit(t *testing.T) {
+	ctx := context.Background()
+	ft := testfake.NewFakeTransport()
+	s := releaseTestArm(t, ft)
+	require.NoError(t, s.SetManualMode(ctx, true, 50*time.Millisecond, nil))
+	goalWrites := ft.WriteCount(1, feetech.RegGoalPosition.Address)
+
+	_, err := s.DoCommand(ctx, map[string]interface{}{"command": "enter_manual_mode"})
+	require.NoError(t, err)
+	time.Sleep(200 * time.Millisecond)
+
+	on, _ := s.ManualMode(ctx, nil)
+	require.True(t, on)
+	for id := 1; id <= 5; id++ {
+		require.False(t, torqueOn(t, s, id), "servo %d", id)
+	}
+	require.Equal(t, goalWrites, ft.WriteCount(1, feetech.RegGoalPosition.Address))
 }
